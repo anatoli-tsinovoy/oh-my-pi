@@ -1181,33 +1181,55 @@ export function collectCustomCallIds(messages: ResponseInput): Set<string> {
  * input grammar. Matches the behavior of {@link transformRequestBody} in the
  * codex provider — issue #1351 / regression of #472.
  */
+
+function responseItemCallId(item: ResponseInput[number]): string | undefined {
+	if (!item || typeof item !== "object" || !("call_id" in item)) return undefined;
+	return typeof item.call_id === "string" ? item.call_id : undefined;
+}
+
 export function repairOrphanResponsesToolOutputs(input: ResponseInput): ResponseInput {
-	const knownCallIds = new Set<string>();
-	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId !== "string") continue;
-		if (t === "function_call" || t === "custom_tool_call") knownCallIds.add(callId);
-	}
+	const seenFunctionCallIds = new Set<string>();
+	const seenCustomCallIds = new Set<string>();
 	let hasOrphan = false;
 	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call_output" && t !== "custom_tool_call_output") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId === "string" && !knownCallIds.has(callId)) {
+		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
+		const callId = responseItemCallId(item);
+		if (callId === undefined) continue;
+		if (t === "function_call") {
+			seenFunctionCallIds.add(callId);
+		} else if (t === "custom_tool_call") {
+			seenCustomCallIds.add(callId);
+		} else if (
+			(t === "function_call_output" && !seenFunctionCallIds.has(callId)) ||
+			(t === "custom_tool_call_output" && !seenCustomCallIds.has(callId))
+		) {
 			hasOrphan = true;
 			break;
 		}
 	}
 	if (!hasOrphan) return input;
+	seenFunctionCallIds.clear();
+	seenCustomCallIds.clear();
 	return input.map(item => {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call_output" && t !== "custom_tool_call_output") return item;
-		const record = item as { call_id?: unknown; output?: unknown; name?: unknown };
-		const callId = record.call_id;
-		if (typeof callId !== "string" || knownCallIds.has(callId)) return item;
-		const toolName = typeof record.name === "string" && record.name.length > 0 ? record.name : "tool";
-		const rawOutput = record.output;
+		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
+		const callId = responseItemCallId(item);
+		if (callId === undefined) return item;
+		if (t === "function_call") {
+			seenFunctionCallIds.add(callId);
+			return item;
+		}
+		if (t === "custom_tool_call") {
+			seenCustomCallIds.add(callId);
+			return item;
+		}
+		if (
+			(t !== "function_call_output" || seenFunctionCallIds.has(callId)) &&
+			(t !== "custom_tool_call_output" || seenCustomCallIds.has(callId))
+		) {
+			return item;
+		}
+		const toolName = "name" in item && typeof item.name === "string" && item.name.length > 0 ? item.name : "tool";
+		const rawOutput = "output" in item ? item.output : undefined;
 		let text: string;
 		if (typeof rawOutput === "string") text = rawOutput;
 		else if (rawOutput == null) text = "";
@@ -1247,31 +1269,33 @@ const ORPHAN_TOOL_CALL_PLACEHOLDER =
  * {@link repairOrphanResponsesToolOutputs}.
  */
 export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseInput {
-	const outputCallIds = new Set<string>();
-	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call_output" && t !== "custom_tool_call_output") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId === "string") outputCallIds.add(callId);
-	}
-	let hasOrphan = false;
-	for (const item of input) {
-		const t = (item as { type?: string }).type;
-		if (t !== "function_call" && t !== "custom_tool_call") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId === "string" && !outputCallIds.has(callId)) {
-			hasOrphan = true;
-			break;
+	const laterFunctionOutputIds = new Set<string>();
+	const laterCustomOutputIds = new Set<string>();
+	const orphanCallIds = new Set<string>();
+	for (let index = input.length - 1; index >= 0; index--) {
+		const item = input[index];
+		if (item === undefined) continue;
+		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
+		const callId = responseItemCallId(item);
+		if (callId === undefined) continue;
+		if (t === "function_call_output") {
+			laterFunctionOutputIds.add(callId);
+		} else if (t === "custom_tool_call_output") {
+			laterCustomOutputIds.add(callId);
+		} else if (t === "function_call" && !laterFunctionOutputIds.has(callId)) {
+			orphanCallIds.add(callId);
+		} else if (t === "custom_tool_call" && !laterCustomOutputIds.has(callId)) {
+			orphanCallIds.add(callId);
 		}
 	}
-	if (!hasOrphan) return input;
+	if (orphanCallIds.size === 0) return input;
 	const repaired: ResponseInput = [];
 	for (const item of input) {
 		repaired.push(item);
-		const t = (item as { type?: string }).type;
+		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
 		if (t !== "function_call" && t !== "custom_tool_call") continue;
-		const callId = (item as { call_id?: unknown }).call_id;
-		if (typeof callId !== "string" || outputCallIds.has(callId)) continue;
+		const callId = responseItemCallId(item);
+		if (callId === undefined || !orphanCallIds.has(callId)) continue;
 		repaired.push({
 			type: t === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
 			call_id: callId,
