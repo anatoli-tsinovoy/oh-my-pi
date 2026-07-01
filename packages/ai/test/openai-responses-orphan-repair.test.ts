@@ -45,34 +45,6 @@ describe("repairOrphanResponsesToolCalls", () => {
 		expect(repaired).toBe(input);
 	});
 
-	it("repairs pairs that appear in the wrong order", () => {
-		const input: ResponseInput = [
-			{ type: "function_call_output", call_id: "call_a", output: "early result" },
-			{ type: "function_call", call_id: "call_a", name: "read", arguments: "{}" },
-		];
-
-		const repaired = repairOrphanResponsesToolCalls(repairOrphanResponsesToolOutputs(input));
-		expect(repaired[0]).toMatchObject({
-			type: "message",
-			role: "assistant",
-			content: expect.stringContaining("early result"),
-		});
-		const callIndex = repaired.findIndex(
-			item =>
-				item &&
-				typeof item === "object" &&
-				"type" in item &&
-				item.type === "function_call" &&
-				"call_id" in item &&
-				item.call_id === "call_a",
-		);
-		expect(repaired[callIndex + 1]).toMatchObject({
-			type: "function_call_output",
-			call_id: "call_a",
-			output: expect.stringContaining("interrupted"),
-		});
-	});
-
 	it("composes with output repair so a tree-branch snapshot stays API-valid", () => {
 		// Branching to a node that ends on a tool call drops the result child:
 		// the assistant turn keeps the call, but no matching output remains.

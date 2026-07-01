@@ -1182,54 +1182,33 @@ export function collectCustomCallIds(messages: ResponseInput): Set<string> {
  * codex provider — issue #1351 / regression of #472.
  */
 
-function responseItemCallId(item: ResponseInput[number]): string | undefined {
-	if (!item || typeof item !== "object" || !("call_id" in item)) return undefined;
-	return typeof item.call_id === "string" ? item.call_id : undefined;
-}
-
 export function repairOrphanResponsesToolOutputs(input: ResponseInput): ResponseInput {
-	const seenFunctionCallIds = new Set<string>();
-	const seenCustomCallIds = new Set<string>();
+	const knownCallIds = new Set<string>();
+	for (const item of input) {
+		const t = (item as { type?: string }).type;
+		const callId = (item as { call_id?: unknown }).call_id;
+		if (typeof callId !== "string") continue;
+		if (t === "function_call" || t === "custom_tool_call") knownCallIds.add(callId);
+	}
 	let hasOrphan = false;
 	for (const item of input) {
-		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
-		const callId = responseItemCallId(item);
-		if (callId === undefined) continue;
-		if (t === "function_call") {
-			seenFunctionCallIds.add(callId);
-		} else if (t === "custom_tool_call") {
-			seenCustomCallIds.add(callId);
-		} else if (
-			(t === "function_call_output" && !seenFunctionCallIds.has(callId)) ||
-			(t === "custom_tool_call_output" && !seenCustomCallIds.has(callId))
-		) {
+		const t = (item as { type?: string }).type;
+		if (t !== "function_call_output" && t !== "custom_tool_call_output") continue;
+		const callId = (item as { call_id?: unknown }).call_id;
+		if (typeof callId === "string" && !knownCallIds.has(callId)) {
 			hasOrphan = true;
 			break;
 		}
 	}
 	if (!hasOrphan) return input;
-	seenFunctionCallIds.clear();
-	seenCustomCallIds.clear();
 	return input.map(item => {
-		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
-		const callId = responseItemCallId(item);
-		if (callId === undefined) return item;
-		if (t === "function_call") {
-			seenFunctionCallIds.add(callId);
-			return item;
-		}
-		if (t === "custom_tool_call") {
-			seenCustomCallIds.add(callId);
-			return item;
-		}
-		if (
-			(t !== "function_call_output" || seenFunctionCallIds.has(callId)) &&
-			(t !== "custom_tool_call_output" || seenCustomCallIds.has(callId))
-		) {
-			return item;
-		}
-		const toolName = "name" in item && typeof item.name === "string" && item.name.length > 0 ? item.name : "tool";
-		const rawOutput = "output" in item ? item.output : undefined;
+		const t = (item as { type?: string }).type;
+		if (t !== "function_call_output" && t !== "custom_tool_call_output") return item;
+		const record = item as { call_id?: unknown; output?: unknown; name?: unknown };
+		const callId = record.call_id;
+		if (typeof callId !== "string" || knownCallIds.has(callId)) return item;
+		const toolName = typeof record.name === "string" && record.name.length > 0 ? record.name : "tool";
+		const rawOutput = record.output;
 		let text: string;
 		if (typeof rawOutput === "string") text = rawOutput;
 		else if (rawOutput == null) text = "";
@@ -1269,33 +1248,31 @@ const ORPHAN_TOOL_CALL_PLACEHOLDER =
  * {@link repairOrphanResponsesToolOutputs}.
  */
 export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseInput {
-	const laterFunctionOutputIds = new Set<string>();
-	const laterCustomOutputIds = new Set<string>();
-	const orphanCallIds = new Set<string>();
-	for (let index = input.length - 1; index >= 0; index--) {
-		const item = input[index];
-		if (item === undefined) continue;
-		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
-		const callId = responseItemCallId(item);
-		if (callId === undefined) continue;
-		if (t === "function_call_output") {
-			laterFunctionOutputIds.add(callId);
-		} else if (t === "custom_tool_call_output") {
-			laterCustomOutputIds.add(callId);
-		} else if (t === "function_call" && !laterFunctionOutputIds.has(callId)) {
-			orphanCallIds.add(callId);
-		} else if (t === "custom_tool_call" && !laterCustomOutputIds.has(callId)) {
-			orphanCallIds.add(callId);
+	const outputCallIds = new Set<string>();
+	for (const item of input) {
+		const t = (item as { type?: string }).type;
+		if (t !== "function_call_output" && t !== "custom_tool_call_output") continue;
+		const callId = (item as { call_id?: unknown }).call_id;
+		if (typeof callId === "string") outputCallIds.add(callId);
+	}
+	let hasOrphan = false;
+	for (const item of input) {
+		const t = (item as { type?: string }).type;
+		if (t !== "function_call" && t !== "custom_tool_call") continue;
+		const callId = (item as { call_id?: unknown }).call_id;
+		if (typeof callId === "string" && !outputCallIds.has(callId)) {
+			hasOrphan = true;
+			break;
 		}
 	}
-	if (orphanCallIds.size === 0) return input;
+	if (!hasOrphan) return input;
 	const repaired: ResponseInput = [];
 	for (const item of input) {
 		repaired.push(item);
-		const t = item && typeof item === "object" && "type" in item ? item.type : undefined;
+		const t = (item as { type?: string }).type;
 		if (t !== "function_call" && t !== "custom_tool_call") continue;
-		const callId = responseItemCallId(item);
-		if (callId === undefined || !orphanCallIds.has(callId)) continue;
+		const callId = (item as { call_id?: unknown }).call_id;
+		if (typeof callId !== "string" || outputCallIds.has(callId)) continue;
 		repaired.push({
 			type: t === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
 			call_id: callId,
@@ -1477,6 +1454,19 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	return repairOrphanResponsesToolCalls(withRepairedOutputs);
 }
 
+function parseResponseReasoningReplayItem(signature: string | undefined): ResponseReasoningItem | undefined {
+	if (!signature) return undefined;
+	try {
+		const parsed = JSON.parse(signature);
+		if (!parsed || typeof parsed !== "object") return undefined;
+		if (!("type" in parsed) || parsed.type !== "reasoning") return undefined;
+		if (!("id" in parsed) || typeof parsed.id !== "string") return undefined;
+		return parsed as ResponseReasoningItem;
+	} catch {
+		return undefined;
+	}
+}
+
 export function convertResponsesAssistantMessage<TApi extends Api>(
 	assistantMsg: AssistantMessage,
 	model: Model<TApi>,
@@ -1487,6 +1477,12 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
+	const hasReplayableReasoningItem =
+		includeThinkingSignatures &&
+		assistantMsg.stopReason !== "error" &&
+		assistantMsg.content.some(
+			block => block.type === "thinking" && parseResponseReasoningReplayItem(block.thinkingSignature) !== undefined,
+		);
 	const isDifferentModel =
 		assistantMsg.model !== model.id && assistantMsg.provider === model.provider && assistantMsg.api === model.api;
 
@@ -1495,14 +1491,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			if (!includeThinkingSignatures) {
 				continue;
 			}
-			if (block.thinkingSignature) {
-				try {
-					outputItems.push(JSON.parse(block.thinkingSignature) as ResponseReasoningItem);
-				} catch {
-					// Legacy/corrupt persisted signature — skip the reasoning item
-					// rather than failing the whole request build.
-				}
-			}
+			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
+			if (reasoningItem) outputItems.push(reasoningItem);
 			continue;
 		}
 
@@ -1510,21 +1500,26 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			const parsedSignature = parseTextSignature(block.textSignature);
 			let msgId = parsedSignature?.id;
 			if (!msgId) {
-				// Distinct ids per unsigned block: several text blocks in one message
-				// (cross-provider replay downgrades thinking → text) must not share an id.
-				msgId = unsignedTextBlocks === 0 ? `msg_${msgIndex}` : `msg_${msgIndex}_${unsignedTextBlocks}`;
-				unsignedTextBlocks += 1;
+				if (hasReplayableReasoningItem) {
+					// Distinct ids per unsigned block: several text blocks in one message
+					// (cross-provider replay downgrades thinking → text) must not share an id.
+					msgId = unsignedTextBlocks === 0 ? `msg_${msgIndex}` : `msg_${msgIndex}_${unsignedTextBlocks}`;
+					unsignedTextBlocks += 1;
+				}
+			} else if (!hasReplayableReasoningItem && msgId.startsWith("msg_")) {
+				msgId = undefined;
 			} else if (msgId.length > 64) {
 				msgId = `msg_${Bun.hash(msgId).toString(36)}`;
 			}
-			outputItems.push({
+			const messageItem = {
 				type: "message",
 				role: "assistant",
 				content: [{ type: "output_text", text: block.text.toWellFormed(), annotations: [] }],
 				status: "completed",
 				id: msgId,
 				phase: parsedSignature?.phase,
-			} satisfies ResponseOutputMessage);
+			} as ResponseInput[number];
+			outputItems.push(messageItem);
 			continue;
 		}
 
@@ -1534,7 +1529,18 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
 		let itemId: string | undefined = normalized.itemId;
-		if (isDifferentModel && (itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))) {
+		// OpenAI links server-issued fc_/ctc_ item ids to reasoning items. When
+		// replay lacks the matching reasoning item, keep only call_id so the
+		// function_call remains pairable with its output without requiring rs_*.
+		if (
+			!hasReplayableReasoningItem &&
+			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))
+		) {
+			itemId = undefined;
+		} else if (
+			isDifferentModel &&
+			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))
+		) {
 			itemId = undefined;
 		}
 		knownCallIds.add(normalized.callId);
