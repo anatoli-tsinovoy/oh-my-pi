@@ -1181,6 +1181,7 @@ export function collectCustomCallIds(messages: ResponseInput): Set<string> {
  * input grammar. Matches the behavior of {@link transformRequestBody} in the
  * codex provider — issue #1351 / regression of #472.
  */
+
 export function repairOrphanResponsesToolOutputs(input: ResponseInput): ResponseInput {
 	const knownCallIds = new Set<string>();
 	for (const item of input) {
@@ -1453,6 +1454,19 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	return repairOrphanResponsesToolCalls(withRepairedOutputs);
 }
 
+function parseResponseReasoningReplayItem(signature: string | undefined): ResponseReasoningItem | undefined {
+	if (!signature) return undefined;
+	try {
+		const parsed = JSON.parse(signature);
+		if (!parsed || typeof parsed !== "object") return undefined;
+		if (!("type" in parsed) || parsed.type !== "reasoning") return undefined;
+		if (!("id" in parsed) || typeof parsed.id !== "string") return undefined;
+		return parsed as ResponseReasoningItem;
+	} catch {
+		return undefined;
+	}
+}
+
 export function convertResponsesAssistantMessage<TApi extends Api>(
 	assistantMsg: AssistantMessage,
 	model: Model<TApi>,
@@ -1463,6 +1477,12 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 ): ResponseInput {
 	const outputItems: ResponseInput = [];
 	let unsignedTextBlocks = 0;
+	const hasReplayableReasoningItem =
+		includeThinkingSignatures &&
+		assistantMsg.stopReason !== "error" &&
+		assistantMsg.content.some(
+			block => block.type === "thinking" && parseResponseReasoningReplayItem(block.thinkingSignature) !== undefined,
+		);
 	const isDifferentModel =
 		assistantMsg.model !== model.id && assistantMsg.provider === model.provider && assistantMsg.api === model.api;
 
@@ -1471,14 +1491,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			if (!includeThinkingSignatures) {
 				continue;
 			}
-			if (block.thinkingSignature) {
-				try {
-					outputItems.push(JSON.parse(block.thinkingSignature) as ResponseReasoningItem);
-				} catch {
-					// Legacy/corrupt persisted signature — skip the reasoning item
-					// rather than failing the whole request build.
-				}
-			}
+			const reasoningItem = parseResponseReasoningReplayItem(block.thinkingSignature);
+			if (reasoningItem) outputItems.push(reasoningItem);
 			continue;
 		}
 
@@ -1486,21 +1500,26 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			const parsedSignature = parseTextSignature(block.textSignature);
 			let msgId = parsedSignature?.id;
 			if (!msgId) {
-				// Distinct ids per unsigned block: several text blocks in one message
-				// (cross-provider replay downgrades thinking → text) must not share an id.
-				msgId = unsignedTextBlocks === 0 ? `msg_${msgIndex}` : `msg_${msgIndex}_${unsignedTextBlocks}`;
-				unsignedTextBlocks += 1;
+				if (hasReplayableReasoningItem) {
+					// Distinct ids per unsigned block: several text blocks in one message
+					// (cross-provider replay downgrades thinking → text) must not share an id.
+					msgId = unsignedTextBlocks === 0 ? `msg_${msgIndex}` : `msg_${msgIndex}_${unsignedTextBlocks}`;
+					unsignedTextBlocks += 1;
+				}
+			} else if (!hasReplayableReasoningItem && msgId.startsWith("msg_")) {
+				msgId = undefined;
 			} else if (msgId.length > 64) {
 				msgId = `msg_${Bun.hash(msgId).toString(36)}`;
 			}
-			outputItems.push({
+			const messageItem = {
 				type: "message",
 				role: "assistant",
 				content: [{ type: "output_text", text: block.text.toWellFormed(), annotations: [] }],
 				status: "completed",
 				id: msgId,
 				phase: parsedSignature?.phase,
-			} satisfies ResponseOutputMessage);
+			} as ResponseInput[number];
+			outputItems.push(messageItem);
 			continue;
 		}
 
@@ -1510,7 +1529,18 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 
 		const normalized = normalizeResponsesToolCallId(block.id, block.customWireName ? "ctc" : "fc");
 		let itemId: string | undefined = normalized.itemId;
-		if (isDifferentModel && (itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))) {
+		// OpenAI links server-issued fc_/ctc_ item ids to reasoning items. When
+		// replay lacks the matching reasoning item, keep only call_id so the
+		// function_call remains pairable with its output without requiring rs_*.
+		if (
+			!hasReplayableReasoningItem &&
+			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))
+		) {
+			itemId = undefined;
+		} else if (
+			isDifferentModel &&
+			(itemId?.startsWith("fc_") || itemId?.startsWith("fcr_") || itemId?.startsWith("ctc_"))
+		) {
 			itemId = undefined;
 		}
 		knownCallIds.add(normalized.callId);

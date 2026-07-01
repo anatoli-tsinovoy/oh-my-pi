@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI Responses replay emitting locally rebuilt assistant item ids without their required reasoning items, preventing `function_call` / `message` replay 400s from poisoned history.
+
 ## [16.2.13] - 2026-07-01
 
 ### Fixed
