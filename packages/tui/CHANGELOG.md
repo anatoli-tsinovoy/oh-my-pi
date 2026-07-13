@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an explicit, user-gesture-safe terminal appearance refresh that performs one OSC 11 background-color query without restoring periodic polling.
+
 ## [16.4.7] - 2026-07-12
 
 ### Fixed

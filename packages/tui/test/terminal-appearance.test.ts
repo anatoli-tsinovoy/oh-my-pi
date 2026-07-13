@@ -144,6 +144,24 @@ describe("ProcessTerminal OSC 11 appearance detection", () => {
 		terminal.stop();
 	});
 
+	it("explicit appearance refresh sends one OSC 11 query through a Mode 2031 bridge", () => {
+		const { terminal, queryCount } = setupTerminal();
+
+		// Complete the startup appearance probe. tmux 3.6 reports Mode 2031 as
+		// supported even when its outer terminal cannot produce appearance-change
+		// notifications, so capability support alone cannot suppress a manual refresh.
+		process.stdin.emit("data", "\x1b]11;rgb:ffff/ffff/ffff\x07");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b[?1;2c");
+		process.stdin.emit("data", "\x1b[?2031;2$y");
+		const afterStartup = queryCount();
+
+		terminal.refreshAppearance();
+
+		expect(queryCount()).toBe(afterStartup + 1);
+		terminal.stop();
+	});
+
 	it("replays already detected OSC 11 appearance to late subscribers", () => {
 		const { terminal } = setupTerminal();
 

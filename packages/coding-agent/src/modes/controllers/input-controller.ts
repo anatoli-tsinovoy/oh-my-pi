@@ -392,7 +392,13 @@ export class InputController {
 		this.ctx.editor.onClear = () => this.handleCtrlC();
 		this.ctx.editor.setActionKeys("app.exit", this.ctx.keybindings.getKeys("app.exit"));
 		this.ctx.editor.setActionKeys("app.display.reset", this.ctx.keybindings.getKeys("app.display.reset"));
-		this.ctx.editor.onDisplayReset = () => this.ctx.ui.resetDisplay();
+		this.ctx.editor.onDisplayReset = () => {
+			// Mode 2031 is not end-to-end reliable through every terminal/multiplexer
+			// combination. A user-requested reset gets one fresh OSC 11 probe without
+			// restoring the periodic polling that cleared text selections (#3297).
+			this.ctx.ui.terminal.refreshAppearance?.();
+			this.ctx.ui.resetDisplay();
+		};
 		this.ctx.editor.onExit = () => this.handleCtrlD();
 		this.ctx.editor.setActionKeys("app.suspend", this.ctx.keybindings.getKeys("app.suspend"));
 		this.ctx.editor.onSuspend = () => this.handleCtrlZ();

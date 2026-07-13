@@ -389,6 +389,14 @@ export interface Terminal {
 	/** The last detected terminal appearance, or undefined if not yet known. */
 	get appearance(): TerminalAppearance | undefined;
 	/**
+	 * Request one fresh OSC 11 background-color probe.
+	 *
+	 * Optional so custom Terminal implementations built against older pi-tui
+	 * versions remain compatible. Intended for explicit user gestures, not
+	 * periodic polling: OSC 11/DA1 writes can clear terminal text selections.
+	 */
+	refreshAppearance?(): void;
+	/**
 	 * Register a callback fired once per DEC private mode when its DECRQM support
 	 * status resolves. Optional: only real terminals implement capability probing.
 	 */
@@ -529,6 +537,10 @@ export class ProcessTerminal implements Terminal {
 				/* ignore callback errors */
 			}
 		}
+	}
+
+	refreshAppearance(): void {
+		this.#queryBackgroundColor();
 	}
 
 	onPrivateModeReport(callback: (mode: number, supported: boolean) => void): void {
