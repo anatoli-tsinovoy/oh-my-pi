@@ -310,6 +310,7 @@ describe("tmux Kitty graphics passthrough", () => {
 		expect(sequence.match(/\x1bPtmux;/gu)).toHaveLength(2);
 		expect(sequence.match(/\x1b\x1b_G/gu)).toHaveLength(2);
 		expect(sequence.match(/\x1b\x1b\\\x1b\\/gu)).toHaveLength(2);
+		expect(sequence).toContain("\x1b\x1b_Gq=2,m=0;");
 	});
 
 	it("leaves Kitty graphics commands bare outside tmux", () => {

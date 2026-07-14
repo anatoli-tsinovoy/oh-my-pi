@@ -621,9 +621,9 @@ function chunkKittyApc(leadParams: string, base64Data: string): string {
 			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_G${leadParams},m=1;${chunk}\x1b\\`));
 			isFirst = false;
 		} else if (isLast) {
-			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_Gm=0;${chunk}\x1b\\`));
+			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_Gq=2,m=0;${chunk}\x1b\\`));
 		} else {
-			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_Gm=1;${chunk}\x1b\\`));
+			chunks.push(wrapTmuxPassthroughIfNeeded(`\x1b_Gq=2,m=1;${chunk}\x1b\\`));
 		}
 
 		offset += CHUNK_SIZE;

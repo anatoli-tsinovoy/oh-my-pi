@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed Kitty graphics being swallowed inside tmux by wrapping image transmissions, placements, and deletions in tmux DCS passthrough envelopes.
+- Fixed Kitty graphics under tmux by using DCS passthrough for every graphics chunk, preserving quiet mode across chunk continuations, and rendering forced-Kitty images as Unicode placeholder cells so they appear on the first paint and follow tmux scrolling/reflow.
 
 ## [16.5.0] - 2026-07-13
 
