@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { visibleWidth } from "@oh-my-pi/pi-natives";
 import {
 	detectKittyUnicodePlaceholdersSupport,
@@ -13,9 +13,16 @@ import {
 } from "@oh-my-pi/pi-tui/kitty-graphics";
 
 const ORIGINAL = { ...getKittyGraphics() };
+const ORIGINAL_TMUX = Bun.env.TMUX;
+
+beforeEach(() => {
+	delete Bun.env.TMUX;
+});
 
 afterEach(() => {
 	setKittyGraphics(ORIGINAL);
+	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
+	else Bun.env.TMUX = ORIGINAL_TMUX;
 });
 
 describe("kitty Unicode placeholder encoding", () => {

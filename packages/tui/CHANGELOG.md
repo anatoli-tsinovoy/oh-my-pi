@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Kitty graphics being swallowed inside tmux by wrapping image transmissions, placements, and deletions in tmux DCS passthrough envelopes.
+
 ## [16.5.0] - 2026-07-13
 
 ### Changed

@@ -15,6 +15,8 @@
  * forms. Protocol gating (`imageProtocol === Kitty`) lives in the caller.
  */
 
+import { wrapTmuxPassthroughIfNeeded } from "./tmux";
+
 /** Kitty Unicode placeholder base character (U+10EEEE, Plane 16 PUA). */
 export const KITTY_PLACEHOLDER = "\u{10eeee}";
 
@@ -120,7 +122,7 @@ export function encodeKittyVirtualPlacement(opts: {
 	const params = ["a=p", "U=1", "q=2", `i=${opts.imageId}`];
 	if (opts.placementId) params.push(`p=${opts.placementId}`);
 	params.push(`c=${opts.columns}`, `r=${opts.rows}`);
-	return `\x1b_G${params.join(",")}\x1b\\`;
+	return wrapTmuxPassthroughIfNeeded(`\x1b_G${params.join(",")}\x1b\\`);
 }
 
 /**
