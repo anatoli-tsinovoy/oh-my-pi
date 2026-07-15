@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed tmux sessions with `extended-keys` enabled losing modified key distinctions when Kitty keyboard negotiation is unavailable, so Ctrl+H no longer becomes Backspace and Shift+Enter no longer becomes Enter.
+- Fixed tmux sessions with `extended-keys` enabled losing modified key distinctions when Kitty keyboard negotiation is unavailable, so Ctrl+H no longer becomes Backspace and Shift+Enter no longer becomes Enter. ([#5620](https://github.com/can1357/oh-my-pi/issues/5620))
 
 ## [17.0.0] - 2026-07-15
 
