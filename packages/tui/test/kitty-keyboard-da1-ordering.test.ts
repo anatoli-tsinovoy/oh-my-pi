@@ -112,7 +112,7 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		expect(harness.terminal.keyboardEnhancementEnterSequence).toBeNull();
 	});
 
-	it("keeps legacy keyboard input under tmux when kitty is unavailable", async () => {
+	it("requests modifyOtherKeys under tmux when kitty is unavailable", async () => {
 		Bun.env.TMUX = "/tmp/tmux-501/default,1234,0";
 		delete Bun.env.SSH_CONNECTION;
 		delete Bun.env.SSH_TTY;
@@ -121,12 +121,15 @@ describe("ProcessTerminal kitty keyboard progressive-enhancement ordering", () =
 		await harness.settle();
 		harness.writes.length = 0;
 
+		// tmux applies this request when `extended-keys` is on/always and safely
+		// ignores it when off. Withholding it collapses Ctrl+H into Backspace and
+		// Shift+Enter into Enter even in tmux sessions configured for extended keys.
 		await harness.feed("\x1b[?1;2c");
 
 		const out = harness.writes.join("");
 		expect(harness.terminal.kittyProtocolActive).toBe(false);
-		expect(out).not.toContain("\x1b[>4;2m");
-		expect(harness.terminal.keyboardEnhancementEnterSequence).toBeNull();
+		expect(out).toContain("\x1b[>4;2m");
+		expect(harness.terminal.keyboardEnhancementEnterSequence).toBe("\x1b[>4;2m");
 	});
 
 	it("reasserts modifyOtherKeys fallback when fullscreen overlays enter the alternate screen", async () => {
