@@ -29,9 +29,14 @@ const runExperimentSchema = type({
 	"timeout_seconds?": type("number").describe("timeout in seconds (default 600)"),
 });
 
+// ponytail: bounded malformed-line carry; increase only if progress tokens need more than 16 KiB.
+const MAX_PROGRESS_CARRY_CHARS = 16 * 1024;
+
 interface ProcessExecutionResult {
 	exitCode: number | null;
 	killed: boolean;
+	watcherTimedOut: boolean;
+	lastProgressAgeSeconds: number | null;
 	logPath: string;
 	output: string;
 }
@@ -41,6 +46,8 @@ interface ProgressSnapshot {
 	runDirectory: string;
 	fullOutputPath: string;
 	tailOutput: string;
+	watchSeconds: number | null;
+	lastProgressAgeSeconds: number | null;
 	truncation?: RunExperimentProgressDetails["truncation"];
 }
 
@@ -120,6 +127,7 @@ export function createRunExperimentTool(
 					cwd: ctx.cwd,
 					logPath: benchmarkLogPath,
 					timeoutMs,
+					watchSeconds: session.watchSeconds,
 					signal,
 					onProgress: details => {
 						onUpdate?.({
@@ -130,6 +138,8 @@ export function createRunExperimentTool(
 								truncation: details.truncation,
 								fullOutputPath: details.fullOutputPath,
 								runDirectory: details.runDirectory,
+								watchSeconds: details.watchSeconds,
+								lastProgressAgeSeconds: details.lastProgressAgeSeconds,
 							},
 						});
 					},
@@ -160,18 +170,21 @@ export function createRunExperimentTool(
 			const parsedAsi = parseAsiLines(execution.output);
 			runtime.lastRunAsi = parsedAsi;
 
+			const timedOut = execution.killed || execution.watcherTimedOut;
+			const missingPrimaryMetric =
+				session.watchSeconds !== null && execution.exitCode === 0 && !timedOut && parsedPrimary === null;
 			storage.markRunCompleted({
 				runId: insertedRun.id,
 				completedAt,
 				durationMs,
 				exitCode: execution.exitCode,
-				timedOut: execution.killed,
+				timedOut,
 				parsedPrimary,
 				parsedMetrics,
 				parsedAsi,
 			});
 
-			const passed = execution.exitCode === 0 && !execution.killed;
+			const passed = execution.exitCode === 0 && !timedOut && !missingPrimaryMetric;
 			const resultDetails: RunDetails = {
 				runNumber: insertedRun.id,
 				runDirectory,
@@ -180,8 +193,12 @@ export function createRunExperimentTool(
 				exitCode: execution.exitCode,
 				durationSeconds,
 				passed,
-				crashed: execution.exitCode !== 0 || execution.killed,
-				timedOut: execution.killed,
+				crashed: execution.exitCode !== 0 || timedOut || missingPrimaryMetric,
+				timedOut,
+				watcherTimedOut: execution.watcherTimedOut,
+				missingPrimaryMetric,
+				watchSeconds: session.watchSeconds,
+				lastProgressAgeSeconds: execution.lastProgressAgeSeconds,
 				tailOutput: displayTruncation.content,
 				parsedMetrics,
 				parsedPrimary,
@@ -205,7 +222,7 @@ export function createRunExperimentTool(
 				runDirectory,
 				runNumber: insertedRun.id,
 				exitCode: execution.exitCode,
-				timedOut: execution.killed,
+				timedOut,
 			};
 			runtime.autoResumeArmed = true;
 			runtime.lastAutoResumePendingRunNumber = null;
@@ -243,7 +260,13 @@ export function createRunExperimentTool(
 		},
 		renderResult(result, options, theme): Text {
 			if (isProgressDetails(result.details)) {
-				const header = theme.fg("warning", `Running ${result.details.elapsed}...`);
+				const watchStatus =
+					result.details.watchSeconds === null
+						? ""
+						: result.details.lastProgressAgeSeconds === null
+							? `; watch ${result.details.watchSeconds}s, no token`
+							: `; watch ${result.details.watchSeconds}s, token ${result.details.lastProgressAgeSeconds.toFixed(1)}s ago`;
+				const header = theme.fg("warning", `Running ${result.details.elapsed}${watchStatus}...`);
 				const preview = replaceTabs(result.content.find(part => part.type === "text")?.text ?? "");
 				return new Text(preview ? `${header}\n${theme.fg("dim", preview)}` : header, 0, 0);
 			}
@@ -271,12 +294,22 @@ async function executeProcess(opts: {
 	cwd: string;
 	logPath: string;
 	timeoutMs: number;
+	watchSeconds: number | null;
 	signal?: AbortSignal;
 	onProgress?(details: ProgressSnapshot): void;
 }): Promise<ProcessExecutionResult> {
 	const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES * 2);
-
 	const startedAt = Date.now();
+	const watchMs = opts.watchSeconds === null ? null : Math.max(1, Math.round(opts.watchSeconds * 1000));
+	const watchAbortController = watchMs === null ? undefined : new AbortController();
+	let lastProgressAt = startedAt;
+	let lastProgressToken: string | null = null;
+	let watcherTimedOut = false;
+	let watchTimer: NodeJS.Timeout | undefined;
+	let progressCarry = "";
+	let discardingProgressLine = false;
+	const lastProgressAgeSeconds = (): number | null =>
+		lastProgressToken === null ? null : (Date.now() - lastProgressAt) / 1000;
 	const snapshot = (): ProgressSnapshot => {
 		const tail = truncateTail(tailBuffer.text(), {
 			maxBytes: DEFAULT_MAX_BYTES,
@@ -287,6 +320,8 @@ async function executeProcess(opts: {
 			runDirectory: path.dirname(opts.logPath),
 			fullOutputPath: opts.logPath,
 			tailOutput: tail.content,
+			watchSeconds: opts.watchSeconds,
+			lastProgressAgeSeconds: lastProgressAgeSeconds(),
 			truncation: tail.truncated ? tail : undefined,
 		};
 	};
@@ -297,6 +332,49 @@ async function executeProcess(opts: {
 			}, 1000)
 		: undefined;
 
+	const rescheduleWatch = (): void => {
+		if (watchMs === null) return;
+		if (watchTimer) clearTimeout(watchTimer);
+		watchTimer = setTimeout(() => {
+			watcherTimedOut = true;
+			watchAbortController?.abort();
+		}, watchMs);
+	};
+	const acceptProgressToken = (token: string): void => {
+		if (token === lastProgressToken) return;
+		lastProgressToken = token;
+		lastProgressAt = Date.now();
+		rescheduleWatch();
+	};
+	const consumeProgressChunk = (chunk: string): void => {
+		let start = 0;
+		while (start < chunk.length) {
+			const newline = chunk.indexOf("\n", start);
+			if (discardingProgressLine) {
+				if (newline === -1) return;
+				discardingProgressLine = false;
+				start = newline + 1;
+				continue;
+			}
+			const end = newline === -1 ? chunk.length : newline;
+			if (progressCarry.length + end - start > MAX_PROGRESS_CARRY_CHARS) {
+				progressCarry = "";
+				if (newline === -1) {
+					discardingProgressLine = true;
+					return;
+				}
+				start = newline + 1;
+				continue;
+			}
+			progressCarry += chunk.slice(start, end);
+			if (newline === -1) return;
+			const token = progressCarry.replace(/\r$/, "").match(/^AUTORESEARCH_PROGRESS (\S+)$/)?.[1];
+			progressCarry = "";
+			if (token) acceptProgressToken(token);
+			start = newline + 1;
+		}
+	};
+
 	const logSink = Bun.file(opts.logPath).writer();
 	let logSinkClosed = false;
 	const closeLogSink = async (): Promise<void> => {
@@ -304,33 +382,54 @@ async function executeProcess(opts: {
 		logSinkClosed = true;
 		await logSink.end();
 	};
+	const abortForUser = (): void => watchAbortController?.abort();
+	if (watchAbortController && opts.signal) {
+		opts.signal.addEventListener("abort", abortForUser, { once: true });
+		if (opts.signal.aborted) abortForUser();
+	}
+	rescheduleWatch();
 	try {
 		const result = await executeBash(opts.command, {
 			cwd: opts.cwd,
 			sessionKey: `autoresearch:${opts.cwd}`,
 			timeout: opts.timeoutMs > 0 ? opts.timeoutMs : 2_147_000_000,
-			signal: opts.signal,
+			signal: watchAbortController?.signal ?? opts.signal,
 			chunkThrottleMs: 0,
 			onChunk: chunk => {
 				tailBuffer.append(chunk);
 				logSink.write(chunk);
+				consumeProgressChunk(chunk);
 			},
 		});
-		await closeLogSink();
+		if (watchTimer) {
+			clearTimeout(watchTimer);
+			watchTimer = undefined;
+		}
 		if (opts.signal?.aborted) {
+			await closeLogSink();
 			throw new Error("aborted");
 		}
+		if (watcherTimedOut) {
+			const annotation = `AUTORESEARCH_WATCHER_TIMEOUT: no new AUTORESEARCH_PROGRESS token for ${opts.watchSeconds} seconds.\n`;
+			tailBuffer.append(annotation);
+			logSink.write(annotation);
+		}
+		await closeLogSink();
 
 		const output = await fs.promises.readFile(opts.logPath, "utf8");
 
 		return {
 			exitCode: result.exitCode ?? null,
 			killed: result.cancelled,
+			watcherTimedOut,
+			lastProgressAgeSeconds: lastProgressAgeSeconds(),
 			logPath: opts.logPath,
 			output,
 		};
 	} finally {
-		if (progressTimer) clearInterval(progressTimer);
+		clearTimeout(watchTimer);
+		if (opts.signal && watchAbortController) opts.signal.removeEventListener("abort", abortForUser);
+		clearInterval(progressTimer);
 		if (!logSinkClosed) {
 			try {
 				await closeLogSink();
@@ -344,12 +443,23 @@ async function executeProcess(opts: {
 function buildRunText(details: RunDetails, outputPreview: string, bestMetric: number | null): string {
 	const lines: string[] = [];
 	lines.push(`Run #${details.runNumber} directory: ${details.runDirectory}`);
-	if (details.timedOut) {
+	if (details.watcherTimedOut) {
+		lines.push(`WATCHER TIMEOUT after ${details.durationSeconds.toFixed(1)}s`);
+	} else if (details.timedOut) {
 		lines.push(`TIMEOUT after ${details.durationSeconds.toFixed(1)}s`);
+	} else if (details.missingPrimaryMetric) {
+		lines.push(`MISSING METRIC ${details.metricName} after ${details.durationSeconds.toFixed(1)}s`);
 	} else if (details.exitCode !== 0) {
 		lines.push(`FAILED with exit code ${details.exitCode} in ${details.durationSeconds.toFixed(1)}s`);
 	} else {
 		lines.push(`PASSED in ${details.durationSeconds.toFixed(1)}s`);
+	}
+	if (details.watchSeconds !== null) {
+		lines.push(
+			details.lastProgressAgeSeconds === null
+				? `Progress watcher: ${details.watchSeconds}s; no token received`
+				: `Progress watcher: ${details.watchSeconds}s; last token ${details.lastProgressAgeSeconds.toFixed(1)}s ago`,
+		);
 	}
 	if (bestMetric !== null) {
 		lines.push(`Current baseline ${details.metricName}: ${formatNum(bestMetric, details.metricUnit)}`);
@@ -383,8 +493,14 @@ function buildRunText(details: RunDetails, outputPreview: string, bestMetric: nu
 }
 
 function renderStatus(details: RunDetails, theme: Theme): string {
+	if (details.watcherTimedOut) {
+		return theme.fg("error", `WATCHER TIMEOUT ${details.durationSeconds.toFixed(1)}s`);
+	}
 	if (details.timedOut) {
 		return theme.fg("error", `TIMEOUT ${details.durationSeconds.toFixed(1)}s`);
+	}
+	if (details.missingPrimaryMetric) {
+		return theme.fg("error", `MISSING METRIC ${details.metricName}`);
 	}
 	if (details.exitCode !== 0) {
 		return theme.fg("error", `FAIL exit=${details.exitCode} ${details.durationSeconds.toFixed(1)}s`);

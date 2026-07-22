@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { createAutoresearchExtension } from "@oh-my-pi/pi-coding-agent/autoresearch";
-import { closeAllAutoresearchStorages } from "@oh-my-pi/pi-coding-agent/autoresearch/storage";
+import { closeAllAutoresearchStorages, openAutoresearchStorage } from "@oh-my-pi/pi-coding-agent/autoresearch/storage";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -44,7 +44,13 @@ function buildHarness(): { handlers: CapturedHandlers; activeTools: string[] } {
 	return { handlers, activeTools };
 }
 
-function makeCtx(cwd: string): ExtensionContext {
+function makeCtx(
+	cwd: string,
+	control: { goal?: string; mode: "on" | "off"; watchSeconds?: number | null } = {
+		mode: "on",
+		goal: "speed up the thing",
+	},
+): ExtensionContext {
 	return {
 		cwd,
 		hasUI: false,
@@ -58,11 +64,49 @@ function makeCtx(cwd: string): ExtensionContext {
 					id: "ctrl-1",
 					parentId: null,
 					timestamp: new Date(0).toISOString(),
-					data: { mode: "on", goal: "speed up the thing" },
+					data: control,
 				},
 			],
 		},
 	} as unknown as ExtensionContext;
+}
+async function seedWatchedPendingRun(cwd: string, parsedPrimary: number | null) {
+	const storage = await openAutoresearchStorage(cwd);
+	const session = storage.openSession({
+		name: "watched",
+		goal: "finish the remote benchmark",
+		primaryMetric: "runtime_ms",
+		metricUnit: "ms",
+		direction: "lower",
+		preferredCommand: null,
+		branch: "autoresearch/test",
+		baselineCommit: null,
+		maxIterations: null,
+		scopePaths: [],
+		offLimits: [],
+		constraints: [],
+		secondaryMetrics: [],
+		watchSeconds: 7.5,
+	});
+	const run = storage.insertRun({
+		sessionId: session.id,
+		segment: session.currentSegment,
+		command: "bun run bench",
+		logPath: `${cwd}/benchmark.log`,
+		preRunDirtyPaths: [],
+		startedAt: 1,
+	});
+	storage.markRunCompleted({
+		runId: run.id,
+		completedAt: 2,
+		durationMs: 1_000,
+		exitCode: 0,
+		timedOut: false,
+		parsedPrimary,
+		parsedMetrics: parsedPrimary === null ? null : { runtime_ms: parsedPrimary },
+		parsedAsi: null,
+	});
+	return { runId: run.id, storage };
 }
 
 describe("autoresearch before_agent_start handler", () => {
@@ -110,6 +154,105 @@ describe("autoresearch before_agent_start handler", () => {
 		const blocks = result.systemPrompt as string[];
 		expect(blocks).toHaveLength(1);
 		expect(blocks[0]).toContain("Autoresearch Mode");
+	});
+
+	it("renders the watched setup contract with its configured deadline", async () => {
+		const { handlers } = buildHarness();
+		if (!handlers.session_start || !handlers.before_agent_start) {
+			throw new Error("Autoresearch extension should register both session_start and before_agent_start");
+		}
+		const ctx = makeCtx(cwdDir.path(), { mode: "on", watchSeconds: 23 });
+		await handlers.session_start({ type: "session_start" } as SessionStartEvent, ctx);
+
+		const result = (await handlers.before_agent_start(
+			{ type: "before_agent_start", prompt: "build it", systemPrompt: [] } as BeforeAgentStartEvent,
+			ctx,
+		)) as BeforeAgentStartEventResult;
+		const rendered = (result.systemPrompt as string[])[0];
+		expect(rendered).toContain("### Watched harness contract (`23` seconds)");
+		expect(rendered).toContain("AUTORESEARCH_PROGRESS TOKEN");
+		expect(rendered).toContain("The first token and each distinct later token refresh the `23`-second deadline.");
+		expect(rendered).toContain("METRIC name=value");
+	});
+
+	it("renders the watched active-run protocol from the persisted session", async () => {
+		const storage = await openAutoresearchStorage(cwdDir.path());
+		storage.openSession({
+			name: "watched",
+			goal: "finish the remote benchmark",
+			primaryMetric: "runtime_ms",
+			metricUnit: "ms",
+			direction: "lower",
+			preferredCommand: null,
+			branch: "autoresearch/test",
+			baselineCommit: null,
+			maxIterations: null,
+			scopePaths: [],
+			offLimits: [],
+			constraints: [],
+			secondaryMetrics: [],
+			watchSeconds: 7.5,
+		});
+		const { handlers } = buildHarness();
+		if (!handlers.session_start || !handlers.before_agent_start) {
+			throw new Error("Autoresearch extension should register both session_start and before_agent_start");
+		}
+		const ctx = makeCtx(cwdDir.path());
+		await handlers.session_start({ type: "session_start" } as SessionStartEvent, ctx);
+
+		const result = (await handlers.before_agent_start(
+			{ type: "before_agent_start", prompt: "run it", systemPrompt: [] } as BeforeAgentStartEvent,
+			ctx,
+		)) as BeforeAgentStartEventResult;
+		const rendered = (result.systemPrompt as string[])[0];
+		expect(rendered).toContain("### Watched runs (`7.5` seconds)");
+		expect(rendered).toContain("exact complete `AUTORESEARCH_PROGRESS TOKEN` stdout lines");
+		expect(rendered).toContain("configured primary `METRIC`");
+	});
+
+	it("renders a watched unlogged run without its primary metric as failed", async () => {
+		const { runId, storage } = await seedWatchedPendingRun(cwdDir.path(), null);
+		const { handlers } = buildHarness();
+		if (!handlers.session_start || !handlers.before_agent_start) {
+			throw new Error("Autoresearch extension should register both session_start and before_agent_start");
+		}
+		const ctx = makeCtx(cwdDir.path());
+		const event = { type: "before_agent_start", prompt: "log it", systemPrompt: [] } as BeforeAgentStartEvent;
+		await handlers.session_start({ type: "session_start" } as SessionStartEvent, ctx);
+
+		const missingMetricResult = (await handlers.before_agent_start(event, ctx)) as BeforeAgentStartEventResult;
+		expect((missingMetricResult.systemPrompt as string[])[0]).toContain("- result: failed");
+
+		storage.markRunCompleted({
+			runId,
+			completedAt: 2,
+			durationMs: 1_000,
+			exitCode: 0,
+			timedOut: false,
+			parsedPrimary: 42,
+			parsedMetrics: { runtime_ms: 42 },
+			parsedAsi: null,
+		});
+		const metricResult = (await handlers.before_agent_start(event, ctx)) as BeforeAgentStartEventResult;
+		expect((metricResult.systemPrompt as string[])[0]).toContain("- result: passed");
+	});
+
+	it("omits watcher instructions when watching is disabled", async () => {
+		const { handlers } = buildHarness();
+		if (!handlers.session_start || !handlers.before_agent_start) {
+			throw new Error("Autoresearch extension should register both session_start and before_agent_start");
+		}
+		const ctx = makeCtx(cwdDir.path(), { mode: "on", watchSeconds: null });
+		await handlers.session_start({ type: "session_start" } as SessionStartEvent, ctx);
+
+		const result = (await handlers.before_agent_start(
+			{ type: "before_agent_start", prompt: "build it", systemPrompt: [] } as BeforeAgentStartEvent,
+			ctx,
+		)) as BeforeAgentStartEventResult;
+		const rendered = (result.systemPrompt as string[])[0];
+		expect(rendered).toContain("Autoresearch Mode");
+		expect(rendered).not.toContain("Watched harness contract");
+		expect(rendered).not.toContain("AUTORESEARCH_PROGRESS");
 	});
 
 	it("joins event.systemPrompt blocks into the rendered base prompt", async () => {

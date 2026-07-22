@@ -3,6 +3,13 @@
 ## Autoresearch Mode
 
 Autoresearch mode is active.
+{{#if watch_enabled}}
+
+### Watched runs (`{{watch_seconds}}` seconds)
+
+OMP watches semantic tokens: it refreshes the `{{watch_seconds}}`-second deadline only on exact complete `AUTORESEARCH_PROGRESS TOKEN` stdout lines. `TOKEN` is one opaque non-whitespace field; only the first and distinct later tokens count. You MUST NOT poll; the harness observes its configured remote job and OMP makes no provider-specific state decisions. Log watch timeouts, observation failures, and missing primary metrics honestly as `crash`, never as a pass.
+
+{{/if}}
 
 {{#if has_goal}}
 Primary goal:
@@ -96,6 +103,12 @@ An unlogged run is waiting:
 Finish the `log_experiment` step before starting another benchmark.
 {{/if}}
 
+{{#if watch_enabled}}
+### Watched completion
+- Pass ONLY with exit 0, no outer or watch timeout, a validated final artifact, and the configured primary `METRIC`.
+- Unknown, malformed, locally blocked, or exhausted observation states fail closed; log them as `crash`.
+
+{{/if}}
 ### Guardrails
 - NEVER game the benchmark.
 - NEVER overfit to synthetic inputs if the real workload is broader.

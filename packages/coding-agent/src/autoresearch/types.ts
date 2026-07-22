@@ -58,6 +58,7 @@ export interface ExperimentState {
 	branch: string | null;
 	baselineCommit: string | null;
 	sessionId: number | null;
+	watchSeconds: number | null;
 }
 
 export interface RunExperimentProgressDetails {
@@ -66,6 +67,8 @@ export interface RunExperimentProgressDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
 	runDirectory?: string;
+	watchSeconds: number | null;
+	lastProgressAgeSeconds: number | null;
 }
 
 export interface RunDetails {
@@ -78,6 +81,10 @@ export interface RunDetails {
 	passed: boolean;
 	crashed: boolean;
 	timedOut: boolean;
+	watcherTimedOut: boolean;
+	missingPrimaryMetric: boolean;
+	watchSeconds: number | null;
+	lastProgressAgeSeconds: number | null;
 	tailOutput: string;
 	parsedMetrics: NumericMetricMap | null;
 	parsedPrimary: number | null;
@@ -132,17 +139,20 @@ export interface AutoresearchRuntime {
 	lastRunSummary: PendingRunSummary | null;
 	runningExperiment: RunningExperiment | null;
 	state: ExperimentState;
+	watchSeconds: number | null;
 	goal: string | null;
 }
 
 export interface AutoresearchControlEntryData {
 	mode: "on" | "off" | "clear";
 	goal?: string;
+	watchSeconds: number | null;
 }
 
 export interface ReconstructedControlState {
 	autoresearchMode: boolean;
 	goal: string | null;
+	watchSeconds: number | null;
 	lastMode: AutoresearchControlEntryData["mode"] | null;
 }
 

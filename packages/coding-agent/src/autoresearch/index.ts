@@ -51,6 +51,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		const runtime = getRuntime(ctx);
 		const control = reconstructControlState(ctx.sessionManager.getBranch());
 		runtime.goal = control.goal;
+		runtime.watchSeconds = control.watchSeconds;
 		runtime.autoResumeArmed = false;
 		runtime.lastAutoResumePendingRunNumber = null;
 
@@ -74,8 +75,9 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			if (storage) {
 				const loggedRuns = storage.listLoggedRuns(session.id);
 				runtime.state = buildExperimentState(session, loggedRuns);
+				runtime.watchSeconds = session.watchSeconds;
 				runtime.goal = runtime.goal ?? session.goal;
-				runtime.lastRunSummary = pendingRunSummaryFromRow(storage.getPendingRun(session.id));
+				runtime.lastRunSummary = pendingRunSummaryFromRow(storage.getPendingRun(session.id), session.watchSeconds);
 			} else {
 				runtime.state = createExperimentState();
 				runtime.lastRunSummary = null;
@@ -115,7 +117,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		runtime.autoResumeArmed = false;
 		runtime.goal = goal;
 		runtime.lastAutoResumePendingRunNumber = null;
-		api.appendEntry("autoresearch-control", goal ? { mode, goal } : { mode });
+		api.appendEntry("autoresearch-control", { ...(goal ? { goal } : {}), mode, watchSeconds: runtime.watchSeconds });
 	};
 
 	api.registerTool(createInitExperimentTool({ dashboard, getRuntime, pi: api }));
@@ -124,7 +126,8 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 	api.registerTool(createUpdateNotesTool({ dashboard, getRuntime, pi: api }));
 
 	api.registerCommand("autoresearch", {
-		description: "Toggle builtin autoresearch mode, or pass off / clear, or a goal message.",
+		description:
+			"Toggle builtin autoresearch mode, or pass --watch=<seconds>, --no-watch, off / clear, or a goal message.",
 		getArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
 			if (argumentPrefix.includes(" ")) return null;
 			const normalized = argumentPrefix.trim().toLowerCase();
@@ -136,6 +139,12 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 					value: "clear",
 					description: "Reset worktree to baseline and close the active session",
 				},
+				{
+					label: "--watch=<seconds>",
+					value: "--watch=<seconds>",
+					description: "Enable semantic-progress watching",
+				},
+				{ label: "--no-watch", value: "--no-watch", description: "Disable semantic-progress watching" },
 			];
 			const filtered = completions.filter(item => item.label.startsWith(normalized));
 			return filtered.length > 0 ? filtered : null;
@@ -143,6 +152,11 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		async handler(args, ctx): Promise<void> {
 			const trimmed = args.trim();
 			const runtime = getRuntime(ctx);
+			const watch = parseWatchOptions(args);
+			if (watch.error) {
+				ctx.ui.notify(watch.error, "error");
+				return;
+			}
 
 			if (trimmed === "" && runtime.autoresearchMode) {
 				setMode(ctx, false, runtime.goal, "off");
@@ -170,7 +184,8 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 				return;
 			}
 
-			const goalArg = trimmed.length > 0 ? trimmed : null;
+			const goalArg = watch.goal.length > 0 ? watch.goal : null;
+			if (watch.specified) runtime.watchSeconds = watch.watchSeconds;
 			const branchResult = await ensureAutoresearchBranch(api, ctx.cwd, goalArg ?? runtime.goal);
 			if (!branchResult.ok) {
 				ctx.ui.notify(branchResult.error, "error");
@@ -186,7 +201,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			// DB if it already exists; the empty-state path must not create one.
 			const existingStorage = await openAutoresearchStorageIfExists(ctx.cwd);
 			const existingSession = existingStorage?.getActiveSessionForBranch(branchResult.branchName) ?? null;
-			const resumeContext = trimmed;
+			const resumeContext = goalArg ?? "";
 			const branchStatusLine = branchResult.branchName
 				? branchResult.created
 					? `Created and checked out dedicated git branch \`${branchResult.branchName}\` before resuming.`
@@ -194,13 +209,17 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 				: "Continuing on the current branch — no autoresearch branch was created.";
 
 			if (existingSession && existingStorage) {
-				if (goalArg) existingStorage.updateSession(existingSession.id, { goal: goalArg });
-				if (branchResult.branchName) {
-					existingStorage.updateSession(existingSession.id, { branch: branchResult.branchName });
+				const updates: Parameters<typeof existingStorage.updateSession>[1] = {};
+				if (goalArg) updates.goal = goalArg;
+				if (branchResult.branchName) updates.branch = branchResult.branchName;
+				if (watch.specified) updates.watchSeconds = watch.watchSeconds;
+				if (goalArg || branchResult.branchName || watch.specified) {
+					existingStorage.updateSession(existingSession.id, updates);
 				}
 				const refreshed = existingStorage.getSessionById(existingSession.id) ?? existingSession;
 				runtime.state = buildExperimentState(refreshed, existingStorage.listLoggedRuns(refreshed.id));
 				runtime.goal = refreshed.goal ?? goalArg;
+				runtime.watchSeconds = refreshed.watchSeconds;
 				setMode(ctx, true, runtime.goal, "on");
 				dashboard.updateWidget(ctx, runtime);
 				await api.setActiveTools([...new Set([...api.getActiveTools(), ...EXPERIMENT_TOOL_NAMES])]);
@@ -267,7 +286,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		const { session } = await loadActiveSession(ctx);
 		const storage = session ? await openAutoresearchStorageIfExists(ctx.cwd) : null;
 		const pendingRow = session && storage ? storage.getPendingRun(session.id) : null;
-		const pendingRun = pendingRunSummaryFromRow(pendingRow);
+		const pendingRun = pendingRunSummaryFromRow(pendingRow, session?.watchSeconds ?? null);
 		runtime.lastRunSummary = pendingRun;
 		runtime.lastRunDuration = pendingRun?.durationSeconds ?? runtime.lastRunDuration;
 		runtime.lastRunAsi = pendingRun?.parsedAsi ?? runtime.lastRunAsi;
@@ -313,9 +332,10 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		const storage = await openAutoresearchStorageIfExists(ctx.cwd);
 		if (session && storage) {
 			runtime.state = buildExperimentState(session, storage.listLoggedRuns(session.id));
+			runtime.watchSeconds = session.watchSeconds;
 		}
 		const pendingRow = session && storage ? storage.getPendingRun(session.id) : null;
-		const pendingRun = pendingRunSummaryFromRow(pendingRow);
+		const pendingRun = pendingRunSummaryFromRow(pendingRow, session?.watchSeconds ?? null);
 		runtime.lastRunSummary = pendingRun;
 		runtime.lastRunDuration = pendingRun?.durationSeconds ?? runtime.lastRunDuration;
 		runtime.lastRunAsi = pendingRun?.parsedAsi ?? runtime.lastRunAsi;
@@ -371,6 +391,8 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 						branch: currentBranch ?? "",
 						has_baseline_warning: baselineWarning !== null,
 						baseline_warning: baselineWarning ?? "",
+						watch_enabled: runtime.watchSeconds !== null,
+						watch_seconds: runtime.watchSeconds ?? 0,
 					}),
 				],
 			};
@@ -411,6 +433,8 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 						pendingRun?.parsedPrimary !== null && pendingRun?.parsedPrimary !== undefined
 							? formatNum(pendingRun.parsedPrimary, state.metricUnit)
 							: null,
+					watch_enabled: runtime.watchSeconds !== null,
+					watch_seconds: runtime.watchSeconds ?? 0,
 				}),
 			],
 		};
@@ -453,6 +477,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		runtime.lastRunArtifactDir = null;
 		runtime.lastRunNumber = null;
 		runtime.lastRunSummary = null;
+		runtime.watchSeconds = null;
 		setMode(ctx, false, null, "clear");
 		dashboard.updateWidget(ctx, runtime);
 		const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
@@ -486,11 +511,11 @@ function removeLegacyArtifacts(workDir: string): void {
 	}
 }
 
-function pendingRunSummaryFromRow(row: RunRow | null): PendingRunSummary | null {
+function pendingRunSummaryFromRow(row: RunRow | null, watchSeconds: number | null): PendingRunSummary | null {
 	if (!row) return null;
 	if (row.status !== null) return null;
 	if (row.completedAt === null) return null;
-	const passed = row.exitCode === 0 && !row.timedOut;
+	const passed = row.exitCode === 0 && !row.timedOut && (watchSeconds === null || row.parsedPrimary !== null);
 	return {
 		command: row.command,
 		durationSeconds: row.durationMs !== null ? row.durationMs / 1000 : null,
@@ -538,4 +563,40 @@ async function tryReadBranch(cwd: string): Promise<string | null> {
 	} catch {
 		return null;
 	}
+}
+
+function parseWatchOptions(args: string): {
+	goal: string;
+	watchSeconds: number | null;
+	specified: boolean;
+	error: string | null;
+} {
+	let remaining = args.trim();
+	let watchSeconds: number | null = null;
+	let specified = false;
+	while (remaining.length > 0) {
+		const token = remaining.match(/^\S+/)?.[0];
+		if (!token) break;
+		if (token === "--no-watch") {
+			watchSeconds = null;
+			specified = true;
+		} else if (token === "--watch" || token.startsWith("--watch=")) {
+			const value = token === "--watch" ? "" : token.slice("--watch=".length);
+			const seconds = Number(value);
+			if (value.length === 0 || !Number.isFinite(seconds) || seconds <= 0) {
+				return {
+					goal: "",
+					watchSeconds: null,
+					specified: false,
+					error: "Invalid --watch value. Use a positive finite number of seconds.",
+				};
+			}
+			watchSeconds = seconds;
+			specified = true;
+		} else {
+			break;
+		}
+		remaining = remaining.slice(token.length).trimStart();
+	}
+	return { goal: remaining, watchSeconds, specified, error: null };
 }
