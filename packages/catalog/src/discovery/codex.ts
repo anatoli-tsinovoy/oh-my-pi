@@ -2,7 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import { compareRevision, parseRevision } from "../compat/revision";
 import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
-import type { FetchImpl, ModelSpec } from "../types";
+import type { FetchImpl, InputModality, ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
 import { CODEX_BASE_URL, CODEX_CLIENT_VERSION, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
@@ -398,15 +398,15 @@ function supportsReasoning(defaultReasoningLevel: unknown, supportedReasoningLev
 	return false;
 }
 
-function normalizeInputModalities(inputModalities: unknown): ("text" | "image")[] {
+function normalizeInputModalities(inputModalities: unknown): InputModality[] {
 	if (!Array.isArray(inputModalities)) {
 		return ["text", "image"];
 	}
 
-	const set = new Set<"text" | "image">();
+	const set = new Set<InputModality>();
 	for (const modality of inputModalities) {
 		const normalized = toNonEmptyString(modality)?.toLowerCase();
-		if (normalized === "text" || normalized === "image") {
+		if (normalized === "text" || normalized === "image" || normalized === "audio" || normalized === "video") {
 			set.add(normalized);
 		}
 	}
@@ -415,7 +415,7 @@ function normalizeInputModalities(inputModalities: unknown): ("text" | "image")[
 		return ["text", "image"];
 	}
 
-	const canonical: ("text" | "image")[] = ["text", "image"];
+	const canonical: InputModality[] = ["text", "image", "audio", "video"];
 	return canonical.filter(modality => set.has(modality));
 }
 

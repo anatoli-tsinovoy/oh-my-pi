@@ -43,6 +43,7 @@ import {
 	type ComputerToolCallMetadata,
 	type Context,
 	type ImageContent,
+	type MediaContent,
 	type Message,
 	type MessageAttribution,
 	type Model,
@@ -102,8 +103,10 @@ import type {
 	ResponseContentPartAddedEvent,
 	ResponseCreateParamsStreaming,
 	ResponseCustomToolCall,
+	ResponseFunctionCallOutputItemList,
 	ResponseFunctionToolCall,
 	ResponseInput,
+	ResponseInputAudio,
 	ResponseInputContent,
 	ResponseInputImage,
 	ResponseInputItem,
@@ -115,7 +118,7 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 /**
  * Keyless-provider sentinel. Custom providers configured with `auth: none`
@@ -774,7 +777,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 		reasoning_effort?: string;
 	};
 	reasoning?: { effort?: string; enabled?: boolean; max_tokens?: number };
-	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
+	venice_parameters?: { disable_thinking?: boolean;[key: string]: unknown };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
@@ -1696,8 +1699,9 @@ function convertResponsesInputImage(image: ImageContent, supportsImageDetailOrig
 }
 
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | Array<TextContent | MediaContent>,
 	supportsImages: boolean,
+	supportsAudio: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
 ): ResponseInputContent[] | undefined {
@@ -1712,25 +1716,45 @@ export function convertResponsesInputContent(
 		];
 	}
 
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
 	const normalizedContent: ResponseInputContent[] = [];
-	for (const item of textBlocks) {
-		const raw = item.text.toWellFormed();
-		const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
-		if (text.trim().length === 0) continue;
-		normalizedContent.push({
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText);
-	}
-	for (const item of imageBlocks) {
-		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
-	}
-	if (omittedImages) {
-		normalizedContent.push({
-			type: "input_text",
-			text: NON_VISION_IMAGE_PLACEHOLDER,
-		} satisfies ResponseInputText);
+	for (const item of content) {
+		if (item.type === "text") {
+			const raw = item.text.toWellFormed();
+			const text = escapeControlTokens ? escapeHarmonyControlTokens(raw) : raw;
+			if (text.trim().length > 0) {
+				normalizedContent.push({ type: "input_text", text } satisfies ResponseInputText);
+			}
+			continue;
+		}
+		if (item.type === "image") {
+			if (supportsImages) {
+				normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
+			} else {
+				normalizedContent.push({
+					type: "input_text",
+					text: NON_VISION_IMAGE_PLACEHOLDER,
+				} satisfies ResponseInputText);
+			}
+			continue;
+		}
+		if (item.type === "audio" && supportsAudio) {
+			const normalizedMimeType = item.mimeType.trim().toLowerCase();
+			normalizedContent.push({
+				type: "input_audio",
+				input_audio: {
+					data: item.data,
+					format: normalizedMimeType === "audio/wav" || normalizedMimeType === "audio/x-wav" ? "wav" : "mp3",
+				},
+			} satisfies ResponseInputAudio);
+		} else {
+			normalizedContent.push({
+				type: "input_text",
+				text:
+					item.type === "audio"
+						? "[audio omitted: model does not support audio input]"
+						: "[video omitted: OpenAI Responses does not support video input]",
+			} satisfies ResponseInputText);
+		}
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
 }
@@ -1857,21 +1881,21 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
 			return typeof item.output === "string"
 				? { ...item, output: escapeHarmonyControlTokens(item.output) }
 				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
+					...item,
+					output: item.output.map(part =>
+						part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+					),
+				};
 		}
 		if (item.type === "custom_tool_call_output") {
 			return typeof item.output === "string"
 				? { ...item, output: escapeHarmonyControlTokens(item.output) }
 				: {
-						...item,
-						output: item.output.map(part =>
-							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-						),
-					};
+					...item,
+					output: item.output.map(part =>
+						part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+					),
+				};
 		}
 		if (item.type === "function_call") {
 			return typeof item.arguments === "string"
@@ -1987,6 +2011,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			const content = convertResponsesInputContent(
 				msg.content,
 				options.model.input.includes("image"),
+				options.model.input.includes("audio"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
 			);
@@ -2013,10 +2038,10 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			const providerPayload =
 				assistantMsg.api === options.model.api && assistantMsg.model === options.model.id
 					? getOpenAIResponsesHistoryPayload(
-							assistantMsg.providerPayload,
-							options.model.provider,
-							assistantMsg.provider,
-						)
+						assistantMsg.providerPayload,
+						options.model.provider,
+						assistantMsg.provider,
+					)
 					: undefined;
 			const nativeReplayEnabled = options.nativeHistory?.replay === true;
 			const historyItems = providerPayload?.items;
@@ -2031,11 +2056,11 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				);
 				const sanitizedHistoryItems = rawSanitizedHistoryItems
 					? adaptResponsesReplayItemsForModel(
-							rawSanitizedHistoryItems,
-							supportsCustomToolCalls,
-							customToolWireNameMap,
-							options.model.supportsComputerUse === true,
-						)
+						rawSanitizedHistoryItems,
+						supportsCustomToolCalls,
+						customToolWireNameMap,
+						options.model.supportsComputerUse === true,
+					)
 					: undefined;
 				if (nativeReplayEnabled && sanitizedHistoryItems) {
 					// Model-owned replay items can carry reserved control-token
@@ -2301,7 +2326,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
  * cannot carry the native output array.
  */
 export interface ResponsesToolResultOutputEncoding {
-	output: string | ResponseInputContent[];
+	output: string | ResponseFunctionCallOutputItemList;
 	outputText: string;
 }
 
@@ -2322,31 +2347,38 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 		.map(block => block.text)
 		.join("\n");
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
+	const hasAudio = toolResult.content.some(block => block.type === "audio");
+	const hasVideo = toolResult.content.some(block => block.type === "video");
 	const omittedImages = hasImages && !supportsImages;
-	const rawOutput = (
-		omittedImages
-			? joinTextWithImagePlaceholder(textResult, true)
-			: textResult.length > 0
-				? textResult
-				: hasImages
-					? "(see attached image)"
-					: ""
-	).toWellFormed();
+	const rawOutput = [
+		omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult,
+		hasAudio ? "[audio omitted: OpenAI Responses tool outputs do not support audio input]" : "",
+		hasVideo ? "[video omitted: OpenAI Responses tool outputs do not support video input]" : "",
+		!textResult && !omittedImages && !hasAudio && !hasVideo && hasImages ? "(see attached image)" : "",
+	]
+		.filter(Boolean)
+		.join("\n")
+		.toWellFormed();
 	const escapeControlTokens = isHarmonyDialectModel(model);
 	// Harmony-server models reject reserved control-token spellings even as tool
 	// data; escape the transport copy so a grep/read result cannot poison the
 	// session (#6913). Covers every downstream branch that consumes `output`.
 	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
-	const output: string | ResponseInputContent[] =
+	const output: string | ResponseFunctionCallOutputItemList =
 		hasImages && supportsImages
-			? toolResult.content.map((block): ResponseInputContent => {
-					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
-					const text = block.text.toWellFormed();
-					return {
-						type: "input_text",
-						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
-					};
-				})
+			? toolResult.content.map(block => {
+				if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
+				const text =
+					block.type === "text"
+						? block.text
+						: block.type === "audio"
+							? "[audio omitted: OpenAI Responses tool outputs do not support audio input]"
+							: "[video omitted: OpenAI Responses tool outputs do not support video input]";
+				return {
+					type: "input_text",
+					text: escapeControlTokens ? escapeHarmonyControlTokens(text.toWellFormed()) : text.toWellFormed(),
+				};
+			})
 			: outputText;
 	return { output, outputText };
 }
@@ -2439,7 +2471,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  * Codex uses the open item's recorded index) so the emitted stream events match
  * each decoder's existing behavior byte-for-byte.
  */
-type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
+type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string;[kStreamingLastParseLen]?: number };
 
 function ensureReasoningSummaryPart(
 	item: ResponseReasoningItem,
@@ -2804,11 +2836,11 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 	interface StreamingItem {
 		item:
-			| ResponseReasoningItem
-			| ResponseOutputMessage
-			| ResponseFunctionToolCall
-			| ResponseCustomToolCall
-			| ResponseComputerToolCall;
+		| ResponseReasoningItem
+		| ResponseOutputMessage
+		| ResponseFunctionToolCall
+		| ResponseCustomToolCall
+		| ResponseComputerToolCall;
 		block: ThinkingContent | TextContent | StreamingToolCallBlock;
 	}
 
@@ -3212,8 +3244,8 @@ export async function processResponsesStream<TApi extends Api>(
 					entry?.block.type === "thinking"
 						? entry.block
 						: (output.content.find(b => b.type === "thinking" && (b as ThinkingContent).itemId === item.id) as
-								| ThinkingContent
-								| undefined);
+							| ThinkingContent
+							| undefined);
 				if (reasoningBlock) {
 					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
 					reasoningBlock.thinkingSignature = JSON.stringify(item);
@@ -3709,22 +3741,22 @@ export function populateResponsesUsageFromResponse(
 	output: AssistantMessage,
 	usage:
 		| {
-				input_tokens?: number | null;
-				output_tokens?: number | null;
-				total_tokens?: number | null;
-				prompt_cache_hit_tokens?: number | null;
-				prompt_cache_miss_tokens?: number | null;
-				input_tokens_details?: {
-					cached_tokens?: number | null;
-					cache_write_tokens?: number | null;
-					orchestration_input_tokens?: number | null;
-					orchestration_input_cached_tokens?: number | null;
-				} | null;
-				output_tokens_details?: {
-					reasoning_tokens?: number | null;
-					orchestration_output_tokens?: number | null;
-				} | null;
-		  }
+			input_tokens?: number | null;
+			output_tokens?: number | null;
+			total_tokens?: number | null;
+			prompt_cache_hit_tokens?: number | null;
+			prompt_cache_miss_tokens?: number | null;
+			input_tokens_details?: {
+				cached_tokens?: number | null;
+				cache_write_tokens?: number | null;
+				orchestration_input_tokens?: number | null;
+				orchestration_input_cached_tokens?: number | null;
+			} | null;
+			output_tokens_details?: {
+				reasoning_tokens?: number | null;
+				orchestration_output_tokens?: number | null;
+			} | null;
+		}
 		| null
 		| undefined,
 ): void {
@@ -3745,7 +3777,7 @@ export function populateResponsesUsageFromResponse(
 		reportedTotalTokens !== undefined &&
 		orchestrationInputTokens + orchestrationOutputTokens > 0 &&
 		Math.abs(reportedTotalTokens - reportedPrimaryTokens) <=
-			Math.abs(reportedTotalTokens - reportedWithSeparateOrchestration);
+		Math.abs(reportedTotalTokens - reportedWithSeparateOrchestration);
 	const orchestrationInputCached = Math.min(orchestrationInputTokens, orchestrationInputCachedTokens);
 	const orchestrationInput = Math.max(0, orchestrationInputTokens - orchestrationInputCached);
 	const accounting = calculateOpenAIUsageAccounting({

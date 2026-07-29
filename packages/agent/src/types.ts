@@ -5,7 +5,7 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Effort,
-	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ServiceTier,
@@ -589,7 +589,7 @@ export interface BeforeToolCallResult {
  */
 export interface AfterToolCallResult {
 	/** If provided, replaces the tool result content array in full. */
-	content?: (TextContent | ImageContent)[];
+	content?: (TextContent | MediaContent)[];
 	/** If provided, replaces the tool result details payload in full. */
 	details?: unknown;
 	/** If provided, replaces the provider-native result metadata in full. */
@@ -677,7 +677,7 @@ export interface AgentState {
 
 export interface AgentToolResult<T = any, _TInput = unknown> {
 	// Content blocks supporting text and images
-	content: (TextContent | ImageContent)[];
+	content: (TextContent | MediaContent)[];
 	// Details to be displayed in a UI or logged
 	details?: T;
 	// Marks a non-throwing failure (e.g. an aggregator catching per-entry errors).

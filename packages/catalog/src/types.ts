@@ -999,6 +999,8 @@ export interface RemoteCompactionConfig<TApi extends Api = Api> {
 	model?: string;
 }
 
+export type InputModality = "text" | "image" | "audio" | "video";
+
 /** Per-million-token rates for one model pricing tier. */
 export interface TokenCost {
 	input: number;
@@ -1086,7 +1088,7 @@ export interface Model<TApi extends Api = Api> {
 	 * the consumer's fallback policy.
 	 */
 	tokenizer?: ModelTokenizer;
-	input: ("text" | "image")[];
+	input: InputModality[];
 	/**
 	 * Decoder family used for image inputs when it has narrower format support
 	 * than OMP's general image pipeline. `stb` local backends reject WebP.

@@ -572,6 +572,9 @@
 - Fixed the Pi exec frames displaying a different operation than the one they run. The provider synthesized its transcript block from a second, hand-rolled translation of the frame args, so `pi_read`'s `offset`/`limit` were shown as a whole-file read, `pi_grep`'s `literal` pattern as an unescaped regex, and `pi_find`'s path/glob join differed from the executed one. Both sides now share a single translation.
 - Fixed the streamed `pi_*_tool_call` announcements that modern builds send alongside each exec frame being unrecognized. The exec channel already synthesizes those blocks when it runs the tool; the duplicate was avoided only because the decoder recognized none of the variants, which would have started double-rendering as soon as any one was added.
 - Fixed `pi_bash` results reaching Cursor clipped with no truncation notice. Two truncation records exist locally: `read`/`grep` set `details.truncation`, which carries an explicit `truncated` flag, while `bash` sets `details.meta.truncation`, whose record has no such flag — its presence is the signal. `piTruncation` read only the first shape and required the flag, so every real Bash truncation was dropped and the server was told the clipped output was complete. Both shapes now translate, and an explicit `truncated: false` still suppresses the field.
+### Added
+
+- Added audio and video input message content, with Gemini inline media, OpenAI audio input, and safe unsupported-media fallbacks.
 
 ## [17.1.8] - 2026-07-28
 

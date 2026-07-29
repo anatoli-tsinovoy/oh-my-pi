@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
-	ImageContent,
+	MediaContent,
 	Message,
 	MessageAttribution,
 	ServiceTierByFamily,
@@ -2468,7 +2468,7 @@ export class SessionManager {
 	 */
 	appendCustomMessageEntry<T = unknown>(
 		customType: string | undefined,
-		content: string | (TextContent | ImageContent)[] | undefined,
+		content: string | (TextContent | MediaContent)[] | undefined,
 		display: boolean | undefined,
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",

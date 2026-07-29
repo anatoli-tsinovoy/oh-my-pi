@@ -1,10 +1,10 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { OutputSummary, TruncationResult } from "../session/streaming-output";
 import type { OutputMeta, TruncationOptions, TruncationSummaryOptions, TruncationTextOptions } from "./output-meta";
 import { outputMeta } from "./output-meta";
 
-type ToolContent = Array<TextContent | ImageContent>;
+type ToolContent = Array<TextContent | MediaContent>;
 
 type DetailsWithMeta = { meta?: OutputMeta };
 

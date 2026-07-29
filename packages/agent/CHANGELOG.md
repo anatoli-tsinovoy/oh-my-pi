@@ -166,6 +166,9 @@
 ### Fixed
 
 - Provider-native compaction failures now surface their transport error instead of silently switching to generic summarization; streaming V2 still falls back to native V1 when available.
+### Added
+
+- Added audio and video message-content support to agent state and compaction contracts.
 
 ## [17.1.7] - 2026-07-27
 

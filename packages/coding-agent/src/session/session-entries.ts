@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	ImageContent,
+	MediaContent,
 	MessageAttribution,
 	ServiceTierByFamily,
 	StopReason,
@@ -283,7 +284,7 @@ export interface ModeChangeEntry extends SessionEntryBase {
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	type: "custom_message";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | MediaContent)[];
 	details?: T;
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */

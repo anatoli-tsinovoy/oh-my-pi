@@ -8,7 +8,7 @@ import { type } from "@oh-my-pi/omptype";
 import * as zod from "@oh-my-pi/omptype/zod";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
-	ImageContent,
+	MediaContent,
 	Model,
 	ServiceTier,
 	ServiceTierByFamily,
@@ -264,7 +264,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
+		content: string | (TextContent | MediaContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void {
 		this.runtime.sendUserMessage(content, options);

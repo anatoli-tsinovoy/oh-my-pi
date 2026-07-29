@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { stringProperty } from "@oh-my-pi/pi-utils";
 import { stripXdUrlPrefix } from "../internal-urls/xd-protocol";
 import type { CompletedRewindState } from "../tools/checkpoint";
@@ -7,7 +7,7 @@ import { writeDeviceDispatch } from "../tools/resolve";
 import type { SessionEntry } from "./session-entries";
 
 /** Extracts text from custom message content. */
-export function customMessageContentText(content: string | (TextContent | ImageContent)[]): string {
+export function customMessageContentText(content: string | (TextContent | MediaContent)[]): string {
 	if (typeof content === "string") return content;
 	const parts: string[] = [];
 	for (const part of content) {

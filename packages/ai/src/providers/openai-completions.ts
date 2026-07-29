@@ -61,6 +61,7 @@ import type {
 	ChatCompletionChunk,
 	ChatCompletionContentPart,
 	ChatCompletionContentPartImage,
+	ChatCompletionContentPartInputAudio,
 	ChatCompletionContentPartText,
 	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
@@ -325,7 +326,7 @@ function serializeToolArguments(value: unknown): string {
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 				return JSON.stringify(parsed);
 			}
-		} catch {}
+		} catch { }
 		return "{}";
 	}
 
@@ -705,7 +706,7 @@ const streamOpenAICompletionsOnce = (
 							event.event = resolvedEvent;
 							event.raw = [`event: ${resolvedEvent}`, ...event.raw];
 						}
-					} catch {}
+					} catch { }
 				}
 				onSseEvent(event, model);
 			}
@@ -713,7 +714,7 @@ const streamOpenAICompletionsOnce = (
 		// Assigned once the block helpers exist (they are scoped to the `try`);
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
-		let finishOpenBlocksOnError: () => void = () => {};
+		let finishOpenBlocksOnError: () => void = () => { };
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -818,8 +819,8 @@ const streamOpenAICompletionsOnce = (
 				const reasoningEffortFallback =
 					activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
 						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
-								explicitDisable: options?.disableReasoning === true && options.reasoning === undefined,
-							})
+							explicitDisable: options?.disableReasoning === true && options.reasoning === undefined,
+						})
 						: undefined;
 				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
@@ -1329,8 +1330,8 @@ const streamOpenAICompletionsOnce = (
 								// concat-safe delta in `finishToolCallBlock` before `toolcall_end` instead.
 								const prev =
 									block.partialArgs !== null &&
-									typeof block.partialArgs === "object" &&
-									!Array.isArray(block.partialArgs)
+										typeof block.partialArgs === "object" &&
+										!Array.isArray(block.partialArgs)
 										? (block.partialArgs as Record<string, unknown>)
 										: undefined;
 								const merged = mergeStreamingArgumentObjects(prev, rawArgs);
@@ -1461,7 +1462,7 @@ const streamOpenAICompletionsOnce = (
 			// throw here must not prevent the terminal error event below.
 			try {
 				finishOpenBlocksOnError();
-			} catch {}
+			} catch { }
 			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 			const result = await AIError.finalize(error, {
 				api: model.api,
@@ -1919,6 +1920,11 @@ function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: C
 	}
 }
 
+function openAIAudioFormat(mimeType: string): "wav" | "mp3" {
+	const normalized = mimeType.trim().toLowerCase();
+	return normalized === "audio/wav" || normalized === "audio/x-wav" ? "wav" : "mp3";
+}
+
 export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -2040,17 +2046,21 @@ export function convertMessages(
 				});
 			} else {
 				const supportsImages = isOpenAICompletionsVisionSupported(model);
+				const supportsAudio = model.input.includes("audio");
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
+				let omittedAudio = false;
+				let omittedVideo = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
-						content.push({
-							type: "text",
-							text,
-						} satisfies ChatCompletionContentPartText);
-					} else if (supportsImages) {
+						content.push({ type: "text", text } satisfies ChatCompletionContentPartText);
+					} else if (item.type === "image") {
+						if (!supportsImages) {
+							omittedImages = true;
+							continue;
+						}
 						content.push({
 							type: "image_url",
 							image_url: {
@@ -2059,16 +2069,32 @@ export function convertMessages(
 								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
 							},
 						} satisfies ChatCompletionContentPartImage);
+					} else if (item.type === "audio" && supportsAudio) {
+						content.push({
+							type: "input_audio",
+							input_audio: { data: item.data, format: openAIAudioFormat(item.mimeType) },
+						} satisfies ChatCompletionContentPartInputAudio);
+					} else if (item.type === "audio") {
+						omittedAudio = true;
 					} else {
-						omittedImages = true;
+						omittedVideo = true;
 					}
 				}
-				if (omittedImages) {
+				if (omittedImages)
 					content.push({
 						type: "text",
 						text: NON_VISION_IMAGE_PLACEHOLDER,
 					} satisfies ChatCompletionContentPartText);
-				}
+				if (omittedAudio)
+					content.push({
+						type: "text",
+						text: "[audio omitted: model does not support audio input]",
+					} satisfies ChatCompletionContentPartText);
+				if (omittedVideo)
+					content.push({
+						type: "text",
+						text: "[video omitted: OpenAI Chat Completions does not support video input]",
+					} satisfies ChatCompletionContentPartText);
 				if (content.length === 0) continue;
 				params.push({
 					role: "user",
@@ -2128,7 +2154,7 @@ export function convertMessages(
 					const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
 					const wireField =
 						compat.allowsSyntheticReasoningContentForToolCalls &&
-						(signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text")
+							(signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text")
 							? signature
 							: signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text"
 								? (compat.reasoningContentField ?? "reasoning_content")
@@ -2177,9 +2203,9 @@ export function convertMessages(
 				const streamedReasoningField = nonEmptyThinkingBlocks[0]?.thinkingSignature;
 				const reasoningField =
 					compat.allowsSyntheticReasoningContentForToolCalls &&
-					(streamedReasoningField === "reasoning_content" ||
-						streamedReasoningField === "reasoning" ||
-						streamedReasoningField === "reasoning_text")
+						(streamedReasoningField === "reasoning_content" ||
+							streamedReasoningField === "reasoning" ||
+							streamedReasoningField === "reasoning_text")
 						? streamedReasoningField
 						: (compat.reasoningContentField ?? "reasoning_content");
 				const reasoningContent = assistantMsg[reasoningField];
@@ -2320,7 +2346,7 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			// Batch consecutive tool results and collect all images
-			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			const mediaBlocks: Array<ChatCompletionContentPartImage | ChatCompletionContentPartInputAudio> = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -2332,21 +2358,28 @@ export function convertMessages(
 					.map(c => (c as TextContent).text)
 					.join("\n");
 				const supportsImages = isOpenAICompletionsVisionSupported(model);
+				const supportsAudio = model.input.includes("audio");
 				const hasImages = toolMsg.content.some(c => c.type === "image");
+				const hasAudio = toolMsg.content.some(c => c.type === "audio");
+				const hasVideo = toolMsg.content.some(c => c.type === "video");
 				const omittedImages = hasImages && !supportsImages;
+				const omittedAudio = hasAudio && !supportsAudio;
 
 				// Always send tool result with text (or placeholder if only images)
 				const hasText = textResult.length > 0;
 				const remappedToolCallId = consumeToolCallId(toolMsg.toolCallId);
 				const resolvedToolCallId =
 					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
-				const toolResultContent = omittedImages
-					? joinTextWithImagePlaceholder(textResult, true)
-					: hasText
-						? textResult
-						: hasImages
-							? "(see attached image)"
-							: "";
+				const toolResultContent = [
+					omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult,
+					omittedAudio ? "[audio omitted: model does not support audio input]" : "",
+					hasVideo ? "[video omitted: OpenAI Chat Completions does not support video input]" : "",
+					!hasText && !omittedImages && !omittedAudio && !hasVideo && (hasImages || hasAudio)
+						? "(see attached media)"
+						: "",
+				]
+					.filter(Boolean)
+					.join("\n");
 				const toolResultMsg: OpenAICompletionsToolMessageParam = {
 					role: "tool",
 					content: toolResultContent.toWellFormed(),
@@ -2357,24 +2390,27 @@ export function convertMessages(
 				}
 				params.push(toolResultMsg);
 
-				if (hasImages && supportsImages) {
-					for (const block of toolMsg.content) {
-						if (block.type === "image") {
-							imageBlocks.push({
-								type: "image_url",
-								image_url: {
-									url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
-								},
-							});
-						}
+				for (const block of toolMsg.content) {
+					if (block.type === "image" && supportsImages) {
+						mediaBlocks.push({
+							type: "image_url",
+							image_url: {
+								url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
+							},
+						});
+					} else if (block.type === "audio" && supportsAudio) {
+						mediaBlocks.push({
+							type: "input_audio",
+							input_audio: { data: block.data, format: openAIAudioFormat(block.mimeType) },
+						});
 					}
 				}
 			}
 
 			i = j - 1;
 
-			// After all consecutive tool results, add a single user message with all images
-			if (imageBlocks.length > 0) {
+			// After all consecutive tool results, add a single user message with all supported media.
+			if (mediaBlocks.length > 0) {
 				if (compat.requiresAssistantAfterToolResult) {
 					params.push({
 						role: "assistant",
@@ -2387,9 +2423,9 @@ export function convertMessages(
 					content: [
 						{
 							type: "text",
-							text: "Attached image(s) from tool result:",
+							text: "Attached media from tool result:",
 						},
-						...imageBlocks,
+						...mediaBlocks,
 					],
 				});
 				lastRole = "user";

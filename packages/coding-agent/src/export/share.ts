@@ -20,7 +20,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
@@ -124,7 +124,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 		if (!isRecord(value)) return;
 		for (const item of Object.values(value)) addJsonStrings(item);
 	};
-	const addContent = (content: string | (TextContent | ImageContent)[]): void => {
+	const addContent = (content: string | (TextContent | MediaContent)[]): void => {
 		if (typeof content === "string") {
 			add(content);
 			return;
@@ -147,7 +147,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 			case "custom":
 			case "hookMessage":
 			case "toolResult":
-				addContent(message.content as string | (TextContent | ImageContent)[]);
+				addContent(message.content as string | (TextContent | MediaContent)[]);
 				return;
 			case "assistant":
 				add(message.errorMessage);
@@ -347,9 +347,9 @@ function redactShareEntry(
 
 function redactShareContent(
 	o: SecretObfuscator,
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | MediaContent)[],
 	sharedRegexSecretValues: ReadonlySet<string>,
-): string | (TextContent | ImageContent)[] {
+): string | (TextContent | MediaContent)[] {
 	if (typeof content === "string") return o.obfuscate(content, sharedRegexSecretValues);
 	return content.map(block =>
 		block.type === "text" ? { ...block, text: o.obfuscate(block.text, sharedRegexSecretValues) } : block,
@@ -401,7 +401,7 @@ function redactShareMessage(
 			return {
 				...message,
 				details: undefined,
-				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | ImageContent)[],
+				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | MediaContent)[],
 			};
 		case "assistant":
 			// Drop opaque provider-replay state (encrypted reasoning / native history) the viewer
@@ -466,7 +466,7 @@ function redactShareMessage(
 				blocks:
 					message.blocks === undefined
 						? undefined
-						: (redactShareContent(o, message.blocks, sharedRegexSecretValues) as (TextContent | ImageContent)[]),
+						: (redactShareContent(o, message.blocks, sharedRegexSecretValues) as (TextContent | MediaContent)[]),
 			};
 		case "fileMention":
 			return {

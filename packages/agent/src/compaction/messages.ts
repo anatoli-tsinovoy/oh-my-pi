@@ -1,5 +1,6 @@
 import type {
 	ImageContent,
+	MediaContent,
 	Message,
 	MessageAttribution,
 	ProviderPayload,
@@ -19,7 +20,7 @@ const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 export interface CustomMessage<T = unknown> {
 	role: "custom";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | MediaContent)[];
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -31,7 +32,7 @@ export interface CustomMessage<T = unknown> {
 export interface HookMessage<T = unknown> {
 	role: "hookMessage";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | MediaContent)[];
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -59,7 +60,7 @@ export interface CompactionSummaryMessage {
 	/** Runtime-only ordered archive blocks for snapcompact: old text region,
 	 *  imaged middle, then new text region. When present, `summary` is already
 	 *  the final lead-in text (no legacy wrapper applied). */
-	blocks?: (TextContent | ImageContent)[];
+	blocks?: (TextContent | MediaContent)[];
 	/** Snapcompact image blocks, kept for display counts / legacy consumers. */
 	images?: ImageContent[];
 	/** Post-pass dead-end warning attached to this compaction (progress guard). */
@@ -79,7 +80,7 @@ declare module "../types" {
 }
 export type ConvertToLlm = (messages: AgentMessage[]) => Message[];
 
-function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
+function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | MediaContent)[] {
 	if (message.prunedAt === undefined) {
 		return message.content;
 	}
@@ -88,7 +89,7 @@ function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | 
 	const firstTextIndex = message.content.findIndex(content => content.type === "text");
 	if (firstTextIndex < 0) return [{ type: "text", text }, ...message.content];
 
-	const content: (TextContent | ImageContent)[] = [];
+	const content: (TextContent | MediaContent)[] = [];
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index];
 		if (block.type !== "text") content.push(block);
@@ -129,7 +130,7 @@ export interface CompactionSummaryMessageOptions {
 	shortSummary?: string;
 	providerPayload?: ProviderPayload;
 	images?: ImageContent[];
-	blocks?: (TextContent | ImageContent)[];
+	blocks?: (TextContent | MediaContent)[];
 	warning?: string;
 	/** Harness compaction method that produced this summary (e.g. "remote", "soft", "handoff"). */
 	method?: string;
@@ -164,7 +165,7 @@ export function createCompactionSummaryMessage(
 
 export function createCustomMessage(
 	customType: string,
-	content: string | (TextContent | ImageContent)[],
+	content: string | (TextContent | MediaContent)[],
 	display: boolean,
 	details: unknown | undefined,
 	timestamp: string,
@@ -236,15 +237,15 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 						message.blocks !== undefined
 							? [{ type: "text" as const, text: message.summary }, ...message.blocks]
 							: [
-									{
-										type: "text" as const,
-										text:
-											message.method === "handoff"
-												? renderHandoffSummaryContext(message.summary)
-												: renderCompactionSummaryContext(message.summary),
-									},
-									...(message.images ?? []),
-								],
+								{
+									type: "text" as const,
+									text:
+										message.method === "handoff"
+											? renderHandoffSummaryContext(message.summary)
+											: renderCompactionSummaryContext(message.summary),
+								},
+								...(message.images ?? []),
+							],
 					attribution: "agent",
 					historyRewriteAt: message.timestamp,
 					providerPayload: message.providerPayload,

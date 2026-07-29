@@ -1,16 +1,16 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent } from "@oh-my-pi/pi-ai";
 import type { Args } from "./args";
 
 export interface InitialMessageInput {
 	parsed: Args;
 	fileText?: string;
-	fileImages?: ImageContent[];
+	fileImages?: MediaContent[];
 	stdinContent?: string;
 }
 
 export interface InitialMessageResult {
 	initialMessage?: string;
-	initialImages?: ImageContent[];
+	initialImages?: MediaContent[];
 }
 
 /**

@@ -30,6 +30,7 @@ import type {
 	CodexCompactionRequestContext,
 	Context,
 	FetchImpl,
+	MediaContent,
 	Model,
 	ProviderSessionState,
 	RawSseEvent,
@@ -379,7 +380,7 @@ type CodexEventItem =
 type CodexOutputBlock =
 	| ThinkingContent
 	| TextContent
-	| (ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number });
+	| (ToolCall & { [kStreamingPartialJson]: string;[kStreamingLastParseLen]?: number });
 
 interface CodexResponseUsage {
 	input_tokens?: number;
@@ -1278,16 +1279,16 @@ function unrollCodexComputerItems(items: ResponseInput, supportsImageDetailOrigi
 			const image =
 				typeof item.output.image_url === "string" && item.output.image_url.length > 0
 					? ({
-							type: "input_image",
-							detail: supportsImageDetailOriginal ? "original" : "auto",
-							image_url: item.output.image_url,
-						} satisfies ResponseInputContent)
+						type: "input_image",
+						detail: supportsImageDetailOriginal ? "original" : "auto",
+						image_url: item.output.image_url,
+					} satisfies ResponseInputContent)
 					: typeof item.output.file_id === "string" && item.output.file_id.length > 0
 						? ({
-								type: "input_image",
-								detail: supportsImageDetailOriginal ? "original" : "auto",
-								file_id: item.output.file_id,
-							} satisfies ResponseInputContent)
+							type: "input_image",
+							detail: supportsImageDetailOriginal ? "original" : "auto",
+							file_id: item.output.file_id,
+						} satisfies ResponseInputContent)
 						: undefined;
 			unrolled.push({
 				type: "function_call_output",
@@ -2513,9 +2514,9 @@ class CodexStreamProcessor {
 
 		const incompleteDetails =
 			response &&
-			"incomplete_details" in response &&
-			response.incomplete_details &&
-			typeof response.incomplete_details === "object"
+				"incomplete_details" in response &&
+				response.incomplete_details &&
+				typeof response.incomplete_details === "object"
 				? response.incomplete_details
 				: undefined;
 		const shouldPromoteIncompleteToolUse =
@@ -3215,10 +3216,10 @@ function getCodexWebSocketStateForPublicSession(
 	model: Model<"openai-codex-responses">,
 	options:
 		| {
-				sessionId?: string;
-				baseUrl?: string;
-				providerSessionState?: Map<string, ProviderSessionState>;
-		  }
+			sessionId?: string;
+			baseUrl?: string;
+			providerSessionState?: Map<string, ProviderSessionState>;
+		}
 		| undefined,
 ): CodexWebSocketSessionState | undefined {
 	const baseUrl = options?.baseUrl || model.baseUrl || CODEX_BASE_URL;
@@ -3534,11 +3535,11 @@ function buildCodexChainedRequestBody(
 	const chainable = state?.canAppend === true;
 	const appendInput = chainable
 		? buildResponsesDeltaInput(
-				state.lastRequest,
-				state.lastResponseItems,
-				requestBody,
-				CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP,
-			)
+			state.lastRequest,
+			state.lastResponseItems,
+			requestBody,
+			CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP,
+		)
 		: null;
 	if (appendInput && appendInput.length > 0 && state?.lastResponseId) {
 		return { ...requestBody, previous_response_id: state.lastResponseId, input: appendInput };
@@ -3833,12 +3834,12 @@ class CodexWebSocketConnection {
 		try {
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
-						protocol: "websocket",
-						method: "POST",
-						url: this.#url,
-						headers: this.#headers,
-						body: request,
-					})
+					protocol: "websocket",
+					method: "POST",
+					url: this.#url,
+					headers: this.#headers,
+					body: request,
+				})
 				: undefined;
 			this.#debugResponseLog = debugSession
 				? await debugSession.openResponseLog("WebSocket 101 Switching Protocols", this.#handshakeHeaders)
@@ -4111,7 +4112,7 @@ class CodexWebSocketConnection {
 	}
 
 	#wakeWaiters(): void {
-		for (;;) {
+		for (; ;) {
 			const waiter = this.#waiters.shift();
 			if (!waiter) break;
 			waiter();
@@ -4623,9 +4624,7 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 
 function normalizeInputMessageContent(
 	model: Model<"openai-codex-responses">,
-	content:
-		| string
-		| Array<{ type: "text"; text: string } | { type: "image"; mimeType: string; data: string; url?: string }>,
+	content: string | Array<TextContent | MediaContent>,
 ): ResponseInputContent[] {
 	// gpt-5.x codex rejects reserved Harmony control-token spellings in input
 	// data; escape the transport copy of untrusted user text so ordinary docs or
@@ -4641,6 +4640,7 @@ function normalizeInputMessageContent(
 		convertResponsesInputContent(
 			content,
 			model.input.includes("image"),
+			model.input.includes("audio"),
 			model.compat.supportsImageDetailOriginal,
 			escapeControlTokens,
 		) ?? []
@@ -4653,18 +4653,18 @@ export { convertMessages as convertCodexResponsesMessages };
 type CodexToolPayload =
 	| { type: "computer"; name?: never }
 	| {
-			type: "function";
-			name: string;
-			description: string;
-			parameters: Record<string, unknown>;
-			strict?: boolean;
-	  }
+		type: "function";
+		name: string;
+		description: string;
+		parameters: Record<string, unknown>;
+		strict?: boolean;
+	}
 	| {
-			type: "custom";
-			name: string;
-			description: string;
-			format: { type: "grammar"; syntax: "lark" | "regex"; definition: string };
-	  };
+		type: "custom";
+		name: string;
+		description: string;
+		format: { type: "grammar"; syntax: "lark" | "regex"; definition: string };
+	};
 
 /** @internal Exported for tests. */
 export function convertOpenAICodexResponsesTools(
@@ -4768,13 +4768,13 @@ const codexFailureEventSchema = type("unknown").pipe(raw => {
 	const out = innerFailureEventSchema(raw);
 	return out instanceof type.errors
 		? {
-				type: undefined,
-				code: undefined,
-				message: undefined,
-				status: undefined,
-				error: undefined,
-				response: undefined,
-			}
+			type: undefined,
+			code: undefined,
+			message: undefined,
+			status: undefined,
+			error: undefined,
+			response: undefined,
+		}
 		: out;
 });
 

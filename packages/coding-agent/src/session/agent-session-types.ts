@@ -10,6 +10,7 @@ import type {
 	Context,
 	Effort,
 	ImageContent,
+	MediaContent,
 	Message,
 	MessageAttribution,
 	Model,
@@ -327,8 +328,10 @@ export interface AgentSessionConfig {
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true). */
 	expandPromptTemplates?: boolean;
-	/** Image attachments. */
+	/** Image attachments, normalized for the active model. */
 	images?: ImageContent[];
+	/** Audio or video attachments forwarded without image normalization. */
+	attachments?: MediaContent[];
 	/** Queue behavior while streaming. */
 	streamingBehavior?: "steer" | "followUp";
 	/** Optional tool choice override for the next LLM call. */

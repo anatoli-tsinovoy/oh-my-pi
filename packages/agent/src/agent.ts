@@ -11,6 +11,7 @@ import {
 	type CursorToolResultHandler,
 	type Effort,
 	type ImageContent,
+	type MediaContent,
 	type Message,
 	type Model,
 	type ProviderSessionState,
@@ -1173,7 +1174,7 @@ export class Agent {
 			} else {
 				promptOptions = imagesOrOptions;
 			}
-			const content: Array<TextContent | ImageContent> = [{ type: "text", text: input }];
+			const content: Array<TextContent | MediaContent> = [{ type: "text", text: input }];
 			if (images && images.length > 0) {
 				content.push(...images);
 			}

@@ -11,7 +11,7 @@
 
 import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type {
 	BusChannel,
@@ -480,7 +480,7 @@ export class CollabHost {
 			return;
 		}
 		const name = peer.name;
-		const content: string | (TextContent | ImageContent)[] =
+		const content: string | (TextContent | MediaContent)[] =
 			images && images.length > 0 ? [{ type: "text", text }, ...images] : text;
 		const details: CollabPromptDetails = { from: name };
 		if (this.#ctx.session.isStreaming) {

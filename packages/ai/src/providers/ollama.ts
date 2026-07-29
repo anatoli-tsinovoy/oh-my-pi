@@ -6,6 +6,7 @@ import type {
 	AssistantMessage,
 	Context,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	StreamFunction,
@@ -32,7 +33,7 @@ import {
 	type StreamMarkupHealingEvent,
 } from "../utils/stream-markup-healing";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder } from "./vision-guard";
 
 export interface OllamaChatOptions extends StreamOptions {
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -173,7 +174,7 @@ function selectToolsForToolChoice(tools: Tool[] | undefined, toolChoice: ToolCho
 }
 
 function toPlainContent(
-	content: string | ReadonlyArray<TextContent | ImageContent>,
+	content: string | ReadonlyArray<TextContent | MediaContent>,
 	supportsImages: boolean,
 ): {
 	content: string;
@@ -182,11 +183,16 @@ function toPlainContent(
 	if (typeof content === "string") {
 		return { content };
 	}
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
-	const text = textBlocks.map(block => block.text).join("\n");
+	const textBlocks = content.filter((block): block is TextContent => block.type === "text");
+	const imageBlocks = content.filter((block): block is ImageContent => block.type === "image");
+	const unsupportedMedia = content.filter(block => block.type === "audio" || block.type === "video");
+	const text = [
+		...textBlocks.map(block => block.text),
+		...unsupportedMedia.map(block => `[unsupported ${block.type}: ${block.mimeType}]`),
+	].join("\n");
 	return {
-		content: joinTextWithImagePlaceholder(text, omittedImages),
-		...(imageBlocks.length > 0 ? { images: imageBlocks.map(block => block.data) } : {}),
+		content: joinTextWithImagePlaceholder(text, !supportsImages && imageBlocks.length > 0),
+		...(supportsImages && imageBlocks.length > 0 ? { images: imageBlocks.map(block => block.data) } : {}),
 	};
 }
 

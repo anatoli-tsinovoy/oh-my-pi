@@ -30,6 +30,7 @@ import type {
 	Context,
 	FetchImpl,
 	ImageContent,
+	MediaContent,
 	Message,
 	Model,
 	ProviderInputTransformation,
@@ -1004,10 +1005,10 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 }
 
 async function resizeAnthropicManyImageContent(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	state: { resized: number },
 	limit: ResizeLimiter,
-): Promise<(TextContent | ImageContent)[]> {
+): Promise<(TextContent | MediaContent)[]> {
 	let changed = false;
 	const next = await Promise.all(
 		content.map(async block => {
@@ -1089,12 +1090,13 @@ type AnthropicToolResultContent =
  * Convert content blocks to Anthropic API format
  */
 function convertContentBlocks(
-	content: (TextContent | ImageContent)[],
+	content: (TextContent | MediaContent)[],
 	supportsImages = true,
 ): AnthropicToolResultContent {
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
 	let sawText = false;
 	let sawImage = false;
+	let sawUnsupportedMedia = false;
 
 	for (const block of content) {
 		if (block.type === "text") {
@@ -1102,6 +1104,12 @@ function convertContentBlocks(
 			if (text.trim().length === 0) continue;
 			sawText = true;
 			blocks.push({ type: "text", text });
+			continue;
+		}
+
+		if (block.type === "audio" || block.type === "video") {
+			sawUnsupportedMedia = true;
+			blocks.push({ type: "text", text: `[unsupported ${block.type}: ${block.mimeType}]` });
 			continue;
 		}
 
@@ -1128,7 +1136,7 @@ function convertContentBlocks(
 		blocks.push({ type: "image", source });
 	}
 
-	if (!supportsImages) {
+	if (!supportsImages && !sawUnsupportedMedia) {
 		return blocks
 			.filter((block): block is { type: "text"; text: string } => block.type === "text")
 			.map(block => block.text)

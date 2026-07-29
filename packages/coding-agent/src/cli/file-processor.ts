@@ -3,7 +3,7 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir, isEnoent, readImageMetadata } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { resolveReadPath } from "../tools/path-utils";
@@ -18,7 +18,7 @@ const MAX_CLI_IMAGE_BYTES = 25 * 1024 * 1024; // 25MB
 
 export interface ProcessedFiles {
 	text: string;
-	images: ImageContent[];
+	images: MediaContent[];
 }
 
 export interface ProcessFileOptions {
@@ -26,11 +26,11 @@ export interface ProcessFileOptions {
 	autoResizeImages?: boolean;
 }
 
-/** Process @file arguments into text, document content, and image attachments */
+/** Process @file arguments into text, document content, and media attachments. */
 export async function processFileArguments(fileArgs: string[], options?: ProcessFileOptions): Promise<ProcessedFiles> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	let text = "";
-	const images: ImageContent[] = [];
+	const images: MediaContent[] = [];
 
 	for (const fileArg of fileArgs) {
 		// Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
@@ -45,7 +45,9 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
-		const maxBytes = mimeType ? MAX_CLI_IMAGE_BYTES : MAX_CLI_TEXT_BYTES;
+		const mediaMimeType =
+			ext === ".wav" ? "audio/wav" : ext === ".mp3" ? "audio/mpeg" : ext === ".mp4" ? "video/mp4" : undefined;
+		const maxBytes = mimeType || mediaMimeType ? MAX_CLI_IMAGE_BYTES : MAX_CLI_TEXT_BYTES;
 		if (stat.size > maxBytes) {
 			console.error(
 				chalk.yellow(`Warning: Skipping file contents (too large: ${formatBytes(stat.size)}): ${absolutePath}`),
@@ -108,6 +110,13 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 			} else {
 				text += `<file name="${absolutePath}"></file>\n`;
 			}
+		} else if (mediaMimeType) {
+			images.push({
+				type: mediaMimeType.startsWith("audio/") ? "audio" : "video",
+				mimeType: mediaMimeType,
+				data: buffer.toBase64(),
+			});
+			text += `<file name="${absolutePath}"></file>\n`;
 		} else if (CONVERTIBLE_EXTENSIONS.has(ext)) {
 			const result = await convertFileWithMarkit(absolutePath);
 			if (result.ok) {

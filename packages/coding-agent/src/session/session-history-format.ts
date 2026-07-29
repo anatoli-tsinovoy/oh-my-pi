@@ -7,7 +7,7 @@
  * as one-liners. No system prompt, no tool catalog, no config sections.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, MediaContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { escapeXmlText } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type {
@@ -112,7 +112,7 @@ export function formatExecutionSourcePreview(source: string): string {
 }
 
 /** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
-function contentToText(content: string | readonly (TextContent | ImageContent)[]): string {
+function contentToText(content: string | readonly (TextContent | MediaContent)[]): string {
 	if (typeof content === "string") return content;
 	const parts: string[] = [];
 	for (const block of content) {
@@ -189,7 +189,7 @@ export function formatToolCallIntentPreview(args: Record<string, unknown> | unde
 	return typeof intent === "string" && intent.trim() ? oneLine(intent, 80) : undefined;
 }
 
-export function formatToolResultErrorPreview(content: string | readonly (TextContent | ImageContent)[]): string {
+export function formatToolResultErrorPreview(content: string | readonly (TextContent | MediaContent)[]): string {
 	return oneLine(contentToText(content).split("\n", 1)[0] ?? "");
 }
 

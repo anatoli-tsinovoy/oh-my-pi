@@ -25,7 +25,7 @@ import { getBundledModelReferenceIndex } from "../identity/bundled";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
-import type { Api, FetchImpl, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig, TokenCost } from "../types";
+import type { Api, FetchImpl, InputModality, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig, TokenCost } from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";
@@ -120,12 +120,15 @@ function toModelName(value: unknown, fallback: string): string {
 	return trimmed.length > 0 ? trimmed : fallback;
 }
 
-function toInputCapabilities(value: unknown): ("text" | "image")[] {
+function toInputCapabilities(value: unknown): InputModality[] {
 	if (!Array.isArray(value)) {
 		return ["text"];
 	}
-	const supportsImage = value.some(item => item === "image");
-	return supportsImage ? ["text", "image"] : ["text"];
+	const modalities: InputModality[] = ["text"];
+	if (value.includes("image")) modalities.push("image");
+	if (value.includes("audio")) modalities.push("audio");
+	if (value.includes("video")) modalities.push("video");
+	return modalities;
 }
 
 /**
@@ -469,7 +472,7 @@ interface OllamaResolvedMetadata {
 	maxTokens: number;
 	capabilities?: string[];
 	reasoning?: boolean;
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 }
 
 interface OllamaShowMetadata {
@@ -477,7 +480,7 @@ interface OllamaShowMetadata {
 	maxTokens?: number;
 	capabilities?: string[];
 	reasoning?: boolean;
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 }
 
 function getOllamaContextWindow(modelInfo: Record<string, unknown> | undefined): number | undefined {
@@ -530,7 +533,7 @@ async function fetchOllamaShowMetadata(
 			reasoning: capabilities ? capabilities.includes("thinking") : undefined,
 			input: capabilities
 				? capabilities.includes("vision")
-					? (["text", "image"] as Array<"text" | "image">)
+					? (["text", "image"] as InputModality[])
 					: (["text"] as Array<"text">)
 				: undefined,
 		};
@@ -1246,7 +1249,8 @@ function mapNovitaModel(
 		...model,
 		reasoning: novitaArrayIncludes(entry.features, "reasoning"),
 		supportsTools: novitaArrayIncludes(entry.features, "function-calling"),
-		input: toInputCapabilities(entry.input_modalities),
+		// The OpenAI chat-completions encoder has no video wire format.
+		input: toInputCapabilities(entry.input_modalities).filter(modality => modality !== "video"),
 		cost: {
 			input: toNovitaCostPerMillion(entry.input_token_price_per_m),
 			output: toNovitaCostPerMillion(entry.output_token_price_per_m),
@@ -1539,7 +1543,7 @@ interface XAICuratedModel {
 	 * overrides `fetchOpenAICompatibleModels`' default of `["text"]` (which
 	 * otherwise strips image capability on every online refresh).
 	 */
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 }
 
 // Source of truth for the xai-oauth chat picker. Top of list = headline.
@@ -3870,7 +3874,7 @@ export function kimiCodeModelManagerOptions(
 
 /** Native LM Studio metadata keyed by model id from `/api/v0/models`. */
 export interface LmStudioNativeModelMetadata {
-	input: ("text" | "image")[];
+	input: InputModality[];
 	contextWindow?: number;
 }
 
@@ -3895,7 +3899,7 @@ function getLmStudioCapabilityNames(value: unknown): string[] {
 	return value.flatMap(item => (typeof item === "string" ? [item.toLowerCase()] : []));
 }
 
-function getLmStudioNativeInput(entry: Record<string, unknown>): ("text" | "image")[] {
+function getLmStudioNativeInput(entry: Record<string, unknown>): InputModality[] {
 	const modelType = typeof entry.type === "string" ? entry.type.toLowerCase() : "";
 	const capabilities = getLmStudioCapabilityNames(entry.capabilities);
 	const supportsImage = modelType === "vlm" || capabilities.includes("vision") || capabilities.includes("image");

@@ -6,7 +6,7 @@
  * - `omp --mode json "prompt"` - JSON event stream
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { MediaContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
@@ -23,8 +23,8 @@ export interface PrintModeOptions {
 	messages?: string[];
 	/** First message to send (may contain @file content) */
 	initialMessage?: string;
-	/** Images to attach to the initial message */
-	initialImages?: ImageContent[];
+	/** Media attachments to include with the initial message. */
+	initialImages?: MediaContent[];
 	/** If true, include thinking blocks in text output */
 	printThoughts?: boolean;
 	/** Whether the caller explicitly started the headless plan flow. */
@@ -168,7 +168,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	if (initialMessage !== undefined) {
 		writeTextWorkingIndicator();
 		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
+		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { attachments: initialImages }));
 	}
 
 	// Send remaining messages

@@ -36,7 +36,7 @@
  */
 import { buildModel } from "../build";
 import { Effort, THINKING_EFFORTS } from "../effort";
-import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type { Api, InputModality, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { resolveModelPolicy } from "./resolve";
 import { parseRevision, parseRevisionConstraint, type RevisionTerm, revisionSatisfies } from "./revision";
 import { collapseVariantId, collapseVocabulary, stripThinkingVariantSuffix } from "./taxonomy";
@@ -832,9 +832,11 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			if (family.suppressWhenOff) thinking.suppressWhenOff = true;
 		}
 
-		const input: ("text" | "image")[] = [];
+		const input: InputModality[] = [];
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
 		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
+		if (memberSpecs.some(spec => spec.input.includes("audio"))) input.push("audio");
+		if (memberSpecs.some(spec => spec.input.includes("video"))) input.push("video");
 
 		const collapsed: TSpec = {
 			...firstMember,
