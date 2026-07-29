@@ -342,6 +342,27 @@ describe("convertToLlm custom message mapping", () => {
 		}
 		expect(converted[1].content.filter(content => content.type === "image")).toEqual([image]);
 	});
+
+	it("keeps sibling audio in image-bearing custom messages", () => {
+		const image: ImageContent = { type: "image", data: "YWR2aXNvcg==", mimeType: "image/png" };
+		const audio = { type: "audio" as const, data: "UklGRg==", mimeType: "audio/wav" };
+		const converted = convertToLlm([
+			{
+				role: "custom",
+				customType: "advisor",
+				content: [{ type: "text", text: "Advisor body" }, image, audio],
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+		]);
+
+		if (converted[1]?.role !== "user" || !Array.isArray(converted[1].content)) {
+			throw new Error("Expected user custom media");
+		}
+		expect(converted[1].content).toContainEqual(image);
+		expect(converted[1].content).toContainEqual(audio);
+	});
 });
 
 function getUserText(message: AgentMessage | undefined): string {

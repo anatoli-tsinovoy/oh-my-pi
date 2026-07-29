@@ -25,6 +25,7 @@ import {
 import {
 	encodeResponsesToolResultOutput,
 	hoistInterleavedResponsesToolBatchMessages,
+	openAIAudioFormat,
 	parseAzureDeploymentNameMap,
 	parseTextSignature,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
@@ -554,7 +555,26 @@ export function buildOpenAiNativeHistory(
 							detail: "auto",
 							image_url: `data:${block.mimeType};base64,${block.data}`,
 						});
+						continue;
 					}
+					if (block.type === "audio") {
+						const format = openAIAudioFormat(block.mimeType);
+						if (model.input.includes("audio") && format) {
+							contentBlocks.push({ type: "input_audio", input_audio: { data: block.data, format } });
+						} else {
+							contentBlocks.push({
+								type: "input_text",
+								text: format
+									? "[audio omitted during remote compaction: model does not support audio input]"
+									: "[audio omitted during remote compaction: OpenAI supports only WAV and MP3 input]",
+							});
+						}
+						continue;
+					}
+					contentBlocks.push({
+						type: "input_text",
+						text: "[video omitted during remote compaction: OpenAI Responses does not support video input]",
+					});
 				}
 			}
 			if (contentBlocks.length > 0) {

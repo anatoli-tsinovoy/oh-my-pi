@@ -306,6 +306,38 @@ describe("buildOpenAiNativeHistory custom tool calls", () => {
 	});
 });
 
+describe("buildOpenAiNativeHistory media", () => {
+	test("retains supported audio and explicitly marks unsupported video", () => {
+		const items = buildOpenAiNativeHistory(
+			[
+				{
+					role: "user",
+					content: [
+						{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" },
+						{ type: "video", mimeType: "video/mp4", data: "AAAA" },
+					],
+					timestamp: 1,
+				},
+			],
+			makeOpenAiModel({ input: ["text", "audio"] }),
+		);
+
+		expect(items).toEqual([
+			{
+				type: "message",
+				role: "user",
+				content: [
+					{ type: "input_audio", input_audio: { data: "UklGRg==", format: "wav" } },
+					{
+						type: "input_text",
+						text: "[video omitted during remote compaction: OpenAI Responses does not support video input]",
+					},
+				],
+			},
+		]);
+	});
+});
+
 const ZERO_USAGE = {
 	input: 0,
 	output: 0,

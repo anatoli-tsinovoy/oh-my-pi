@@ -93,6 +93,23 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output.startsWith("# Spawnling (idle)\n")).toBe(true);
 	});
 
+	it("distinguishes audio and video attachments", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "user",
+				content: [
+					{ type: "audio", mimeType: "audio/wav", data: "UklGRg==" },
+					{ type: "video", mimeType: "video/mp4", data: "AAAA" },
+				],
+				timestamp: 1,
+			},
+		]);
+
+		expect(output).toContain("[audio]");
+		expect(output).toContain("[video]");
+		expect(output).not.toContain("[image]");
+	});
+
 	it("renders watched roles using bold text rather than level-2 headers when watchedRoles is true", () => {
 		const output = formatSessionHistoryMarkdown(buildMessages(), { watchedRoles: true });
 		expect(output).toContain("**user**:");

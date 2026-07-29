@@ -3374,7 +3374,9 @@ export function zenmuxModelManagerOptions(config?: ZenMuxModelManagerConfig): Mo
 						api: isAnthropicModel ? "anthropic-messages" : "openai-completions",
 						baseUrl: isAnthropicModel ? anthropicBaseUrl : openAiBaseUrl,
 						reasoning: capabilities?.reasoning === true || defaults.reasoning,
-						input: toInputCapabilities(entry.input_modalities),
+						input: toInputCapabilities(entry.input_modalities).filter(
+							modality => isAnthropicModel || modality !== "video",
+						),
 						cost: {
 							input: getZenMuxPricingValue(pricings, "prompt"),
 							output: getZenMuxPricingValue(pricings, "completion"),
@@ -6481,6 +6483,38 @@ export interface ModelsDevProviderDescriptor {
 	resolveApi?: (modelId: string, raw: ModelsDevModel) => { api: Api; baseUrl: string } | null;
 }
 
+/**
+ * OpenAI-family wire APIs whose shared Responses/Completions converter has no
+ * video transport and always replaces a video block with an omission
+ * placeholder (audio is forwarded via `input_audio`, so only video is gated).
+ */
+function isOpenAIWireApi(api: Api): boolean {
+	return (
+		api === "openai-completions" ||
+		api === "openai-responses" ||
+		api === "azure-openai-responses" ||
+		api === "openai-codex-responses"
+	);
+}
+
+/**
+ * Whether the wire converter for `api` replaces `modality` with an omission
+ * placeholder instead of forwarding it to the provider. Advertising such a
+ * modality would lie about what the model accepts, so the models.dev mapper
+ * drops it here.
+ *
+ * OpenAI Responses/Completions has no video transport. The Bedrock Converse
+ * converter has no audio or video wire block — it replaces both with
+ * `[unsupported …]` text placeholders (see the audio/video cases in
+ * `convertMessages`) — so both are dropped. Google and Anthropic converters
+ * genuinely forward every modality they advertise, so they are not gated.
+ */
+function isUnsupportedConverterModality(api: Api, modality: InputModality): boolean {
+	if (modality === "video" && isOpenAIWireApi(api)) return true;
+	if ((modality === "audio" || modality === "video") && api === "bedrock-converse-stream") return true;
+	return false;
+}
+
 /** Generic mapper that converts models.dev data using provider descriptors. */
 export function mapModelsDevToModels(
 	data: Record<string, unknown>,
@@ -6513,7 +6547,9 @@ export function mapModelsDevToModels(
 				provider: desc.providerId as ModelSpec<Api>["provider"],
 				baseUrl: resolved.baseUrl,
 				reasoning: m.reasoning === true,
-				input: toInputCapabilities(m.modalities?.input),
+				input: toInputCapabilities(m.modalities?.input).filter(
+					modality => !isUnsupportedConverterModality(resolved.api, modality),
+				),
 				cost: {
 					input: toNumber(m.cost?.input) ?? 0,
 					output: toNumber(m.cost?.output) ?? 0,

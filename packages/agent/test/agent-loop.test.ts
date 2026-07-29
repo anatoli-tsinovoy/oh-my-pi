@@ -17,7 +17,15 @@ import type {
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
 import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core/types";
-import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	AssistantMessageEvent,
+	Context,
+	MediaContent,
+	Message,
+	TextContent,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -4316,6 +4324,47 @@ describe("agentLoopContinue with AgentMessage", () => {
 			expect(toolResultMessage.isError).toBe(true);
 			expect(toolResultMessage.content).toEqual([{ type: "text", text: "rewritten" }]);
 		}
+	});
+
+	it("preserves declared audio and video returned by a tool", async () => {
+		const toolSchema = type({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "record",
+			label: "Record",
+			description: "Record media",
+			parameters: toolSchema,
+			async execute() {
+				return {
+					content: [
+						{ type: "audio", data: "UklGRg==", mimeType: "audio/wav" },
+						{ type: "video", data: "AAAA", mimeType: "video/mp4" },
+					],
+					details: {},
+				};
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-media", name: "record", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop(
+			[createUserMessage("record")],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter },
+			undefined,
+			mock.stream,
+		)) {
+			events.push(event);
+		}
+
+		const toolEnd = events.find(event => event.type === "tool_execution_end");
+		if (toolEnd?.type !== "tool_execution_end") throw new Error("Expected a completed tool result");
+		expect(toolEnd.isError).toBe(false);
+		expect(toolEnd.result.content.map((block: TextContent | MediaContent) => block.type)).toEqual(["audio", "video"]);
 	});
 
 	it("fails closed when afterToolCall returns malformed computer provider metadata", async () => {

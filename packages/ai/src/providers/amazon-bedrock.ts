@@ -888,6 +888,10 @@ function convertMessages(
 							case "image":
 								contentBlocks.push({ image: createImageBlock(c.mimeType, c.data) });
 								break;
+							case "audio":
+							case "video":
+								contentBlocks.push({ text: `[unsupported ${c.type}: ${c.mimeType}]` });
+								break;
 							default:
 								throw new AIError.ValidationError("Unknown user content type");
 						}

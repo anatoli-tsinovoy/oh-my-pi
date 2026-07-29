@@ -195,3 +195,22 @@ describe("estimate cache invalidation seams", () => {
 		expect(second.countMessage(result as AgentMessage)).toBeGreaterThan(before);
 	});
 });
+
+describe("media token estimation", () => {
+	test("charges conservative costs for user and tool-result audio/video", () => {
+		const textOnly = estimateTokens({ role: "user", content: "listen", timestamp: 1 } as AgentMessage);
+		const userAudio = estimateTokens({
+			role: "user",
+			content: [{ type: "audio", mimeType: "audio/wav", data: "a".repeat(64) }],
+			timestamp: 2,
+		} as AgentMessage);
+		const toolVideo = estimateTokens(
+			toolResult("", {
+				content: [{ type: "video", mimeType: "video/mp4", data: "a".repeat(64) }],
+			}) as AgentMessage,
+		);
+
+		expect(userAudio).toBeGreaterThan(textOnly);
+		expect(toolVideo).toBeGreaterThan(userAudio);
+	});
+});

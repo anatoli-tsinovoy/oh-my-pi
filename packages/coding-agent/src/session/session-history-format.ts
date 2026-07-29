@@ -111,13 +111,13 @@ export function formatExecutionSourcePreview(source: string): string {
 	return oneLine(source);
 }
 
-/** Join the text blocks of a string-or-blocks content field. Images become `[image]`. */
+/** Join the text blocks of a string-or-blocks content field and mark attached media by modality. */
 function contentToText(content: string | readonly (TextContent | MediaContent)[]): string {
 	if (typeof content === "string") return content;
 	const parts: string[] = [];
 	for (const block of content) {
 		if (block.type === "text") parts.push(block.text);
-		else parts.push("[image]");
+		else parts.push(`[${block.type}]`);
 	}
 	return parts.join("\n");
 }
