@@ -20,6 +20,7 @@ import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
+import { validateContextMedia } from "./media-input";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -271,7 +272,7 @@ async function writeProviderInFlightInfo(dir: string, token: string): Promise<vo
 		await fs.writeFile(tempPath, JSON.stringify(info), "utf8");
 		await fs.rename(tempPath, infoPath);
 	} catch (error) {
-		await fs.rm(tempPath, { force: true }).catch(() => {});
+		await fs.rm(tempPath, { force: true }).catch(() => { });
 		throw error;
 	}
 }
@@ -339,7 +340,7 @@ async function releaseProviderInFlightStaleLock(lockDir: string, stale: Provider
 		const stat = await fs.stat(lockDir);
 		if (stat.mtimeMs !== stale.mtimeMs || Date.now() - stat.mtimeMs <= PROVIDER_INFLIGHT_LOCK_STALE_MS) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch { }
 }
 
 // Best-effort token-checked release. A token mismatch means another process has
@@ -349,7 +350,7 @@ async function releaseProviderInFlightLock(lockDir: string, token: string): Prom
 		const info = await readProviderInFlightInfo(path.join(lockDir, "info.json"));
 		if (!info || info.token !== token) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch { }
 }
 
 async function releaseProviderInFlightLockDirIfSame(
@@ -361,7 +362,7 @@ async function releaseProviderInFlightLockDirIfSame(
 		const current = await readProviderInFlightLockIdentity(lockDir);
 		if (!isSameProviderInFlightLock(current, identity)) return;
 		await fs.rm(lockDir, { recursive: true, force: true });
-	} catch {}
+	} catch { }
 }
 
 async function acquireProviderInFlightLock(provider: string, signal?: AbortSignal): Promise<() => Promise<void>> {
@@ -445,7 +446,7 @@ async function tryAcquireProviderInFlightLease(
 			await fs.mkdir(leaseDir);
 			await writeProviderInFlightInfo(leaseDir, token);
 		} catch (error) {
-			await removeProviderInFlightLeaseDir(leaseDir).catch(() => {});
+			await removeProviderInFlightLeaseDir(leaseDir).catch(() => { });
 			throw error;
 		}
 		let heartbeatActive = true;
@@ -465,7 +466,7 @@ async function tryAcquireProviderInFlightLease(
 						await write();
 					}
 				})
-				.catch(() => {});
+				.catch(() => { });
 		};
 		const heartbeat = setInterval(
 			touchHeartbeat,
@@ -489,7 +490,7 @@ async function signalProviderInFlightWaitersInDir(dir: string): Promise<void> {
 	try {
 		await fs.mkdir(dir, { recursive: true });
 		await Bun.write(path.join(dir, ".wakeup"), String(Date.now()));
-	} catch {}
+	} catch { }
 }
 
 async function signalProviderInFlightWaiters(provider: string): Promise<void> {
@@ -599,7 +600,7 @@ async function acquireProviderInFlightSlot(
 	limit: number | undefined,
 	signal?: AbortSignal,
 ): Promise<() => Promise<void>> {
-	if (limit === undefined) return async () => {};
+	if (limit === undefined) return async () => { };
 	let loggedWait = false;
 	while (true) {
 		if (signal?.aborted) throw signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
@@ -789,12 +790,12 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 		const host = resolveVertexEndpointHost(location);
 		const rewritten = hasPlaceholder
 			? url
-					.replace("https://{location}-aiplatform.googleapis.com", `https://${host}`)
-					.replace("https://%7Blocation%7D-aiplatform.googleapis.com", `https://${host}`)
-					.replaceAll("{project}", encodeURIComponent(project))
-					.replaceAll("%7Bproject%7D", encodeURIComponent(project))
-					.replaceAll("{location}", encodeURIComponent(location))
-					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
+				.replace("https://{location}-aiplatform.googleapis.com", `https://${host}`)
+				.replace("https://%7Blocation%7D-aiplatform.googleapis.com", `https://${host}`)
+				.replaceAll("{project}", encodeURIComponent(project))
+				.replaceAll("%7Bproject%7D", encodeURIComponent(project))
+				.replaceAll("{location}", encodeURIComponent(location))
+				.replaceAll("%7Blocation%7D", encodeURIComponent(location))
 			: url;
 		return rewritten.replace(":streamRawPredict/v1/messages", ":streamRawPredict");
 	};
@@ -883,9 +884,24 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	if (!model.requiresGlyphTokenization) {
-		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+	const directOptions = options as
+		| {
+			effort?: Effort;
+			reasoning?: Effort;
+			requestModelId?: string;
+			chatModelUid?: string;
+			wireModelId?: string;
+		}
+		| undefined;
+	const routedModel = validateContextMedia(
+		model,
+		context,
+		directOptions?.effort ?? directOptions?.reasoning,
+		directOptions?.requestModelId ?? directOptions?.chatModelUid ?? directOptions?.wireModelId,
+	);
+	if (!routedModel.requiresGlyphTokenization) {
+		return withThinkingLoopGuard(routedModel, options, opts =>
+			withProviderInFlightLimit(routedModel, opts, () => streamDispatch(routedModel, context, opts)),
 		);
 	}
 	const codec = applyGlyphCodec(context);
@@ -893,8 +909,8 @@ export function stream<TApi extends Api>(
 	const wireOptions: OptionsForApi<TApi> | undefined =
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
-		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+		withThinkingLoopGuard(routedModel, wireOptions, opts =>
+			withProviderInFlightLimit(routedModel, opts, () => streamDispatch(routedModel, codec.context, opts)),
 		),
 	);
 }
@@ -960,10 +976,10 @@ function streamDispatch<TApi extends Api>(
 	}
 	const providerOptions = isGoogleVertexAuthenticatedModel(providerModel)
 		? {
-				...preparedOptions,
-				apiKey: "vertex-adc",
-				fetch: createVertexAuthenticatedFetch(preparedOptions),
-			}
+			...preparedOptions,
+			apiKey: "vertex-adc",
+			fetch: createVertexAuthenticatedFetch(preparedOptions),
+		}
 		: { ...preparedOptions, apiKey };
 
 	const api: Api = providerModel.api;
@@ -1450,8 +1466,23 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, options);
+	const directOptions = options as
+		| {
+			effort?: Effort;
+			reasoning?: Effort;
+			requestModelId?: string;
+			chatModelUid?: string;
+			wireModelId?: string;
+		}
+		| undefined;
+	const routedModel = validateContextMedia(
+		model,
+		context,
+		directOptions?.effort ?? directOptions?.reasoning,
+		directOptions?.requestModelId ?? directOptions?.chatModelUid ?? directOptions?.wireModelId,
+	);
+	if (!routedModel.requiresGlyphTokenization) {
+		return streamSimpleWithAnthropicCacheRefresh(routedModel, context, options);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
@@ -1460,11 +1491,11 @@ export function streamSimple<TApi extends Api>(
 		wrappedExecHandlers === undefined
 			? options
 			: {
-					...options,
-					execHandlers: wrappedExecHandlers,
-					cursorExecHandlers: wrappedExecHandlers,
-				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+				...options,
+				execHandlers: wrappedExecHandlers,
+				cursorExecHandlers: wrappedExecHandlers,
+			};
+	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(routedModel, codec.context, wireOptions));
 }
 
 function streamSimpleRequest<TApi extends Api>(
@@ -1606,11 +1637,11 @@ function streamSimpleRequest<TApi extends Api>(
 				const nativeOptions =
 					model.api === "bedrock-converse-stream"
 						? {
-								...opts,
-								guardrailIdentifier: model.guardrailIdentifier ?? opts?.guardrailIdentifier,
-								guardrailVersion: model.guardrailVersion ?? opts?.guardrailVersion,
-								guardrailTrace: model.guardrailTrace ?? opts?.guardrailTrace,
-							}
+							...opts,
+							guardrailIdentifier: model.guardrailIdentifier ?? opts?.guardrailIdentifier,
+							guardrailVersion: model.guardrailVersion ?? opts?.guardrailVersion,
+							guardrailTrace: model.guardrailTrace ?? opts?.guardrailTrace,
+						}
 						: opts;
 				return streamPiNative(model, context, nativeOptions);
 			}),

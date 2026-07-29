@@ -1,3 +1,5 @@
+import type { Provider, SupportedMediaForm } from "@oh-my-pi/pi-catalog/types";
+
 import { attach, create, Flag } from "./flags";
 
 /**
@@ -12,6 +14,51 @@ export class ValidationError extends Error {
 	constructor(message: string, options?: { cause?: unknown }) {
 		super(message, options?.cause === undefined ? undefined : { cause: options.cause });
 		this.name = "ValidationError";
+	}
+}
+
+export type MediaInputPosition =
+	| Readonly<{
+			kind: "message";
+			messageIndex: number;
+			contentIndex: number;
+			role: "user" | "developer";
+	  }>
+	| Readonly<{
+			kind: "toolResult";
+			messageIndex: number;
+			contentIndex: number;
+			toolCallId: string;
+			toolName: string;
+	  }>;
+
+/** Media cannot be represented by the exact routed provider wire contract. */
+export class UnsupportedMediaError extends ValidationError {
+	readonly provider: Provider;
+	readonly wireModel: string;
+	readonly mediaType: "audio" | "video";
+	readonly mimeType: string;
+	readonly position: MediaInputPosition;
+	readonly supportedForms: readonly SupportedMediaForm[];
+
+	constructor(details: {
+		provider: Provider;
+		wireModel: string;
+		mediaType: "audio" | "video";
+		mimeType: string;
+		position: MediaInputPosition;
+		supportedForms: readonly SupportedMediaForm[];
+	}) {
+		super(
+			`${details.provider}/${details.wireModel} does not support ${details.mediaType} input (${details.mimeType}) at ${details.position.kind}`,
+		);
+		this.name = "UnsupportedMediaError";
+		this.provider = details.provider;
+		this.wireModel = details.wireModel;
+		this.mediaType = details.mediaType;
+		this.mimeType = details.mimeType;
+		this.position = Object.freeze({ ...details.position });
+		this.supportedForms = Object.freeze([...details.supportedForms]);
 	}
 }
 

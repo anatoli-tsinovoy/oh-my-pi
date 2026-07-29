@@ -1043,6 +1043,24 @@ export type ModelTokenizer =
 	| "deepseek-v3"
 	| "kimi-k2"
 	| "glm5";
+/** A concrete media form that OMP can serialize for one request position. */
+export interface SupportedMediaForm {
+	modality: "audio" | "video";
+	mimeTypes: readonly string[];
+	wireShape: string;
+	/** Provider wire format after MIME normalization, when the wire uses one. */
+	normalizedFormat?: string;
+}
+
+/** Exact capability evidence and effective encoders selected for one wire route. */
+export interface ResolvedModelRoute {
+	wireModelId: string;
+	vendorInput: readonly InputModality[];
+	input: readonly InputModality[];
+	toolResultInput: readonly InputModality[];
+	userMediaForms: readonly SupportedMediaForm[];
+	toolResultMediaForms: readonly SupportedMediaForm[];
+}
 
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
@@ -1089,6 +1107,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	tokenizer?: ModelTokenizer;
 	input: InputModality[];
+	/** Trusted vendor/discovery evidence for the default wire route. Built models always materialize it. */
+	vendorInput?: InputModality[];
+	/** Effective modalities accepted specifically inside tool results. Built models always materialize it. */
+	toolResultInput?: InputModality[];
+	/** Trusted evidence keyed by exact routed wire model for collapsed families. */
+	vendorInputByWireModel?: Readonly<Record<string, readonly InputModality[]>>;
 	/**
 	 * Decoder family used for image inputs when it has narrower format support
 	 * than OMP's general image pipeline. `stb` local backends reject WebP.
@@ -1224,7 +1248,16 @@ export interface ModelSpec<TApi extends Api = Api> extends Omit<
 	| "requiresGlyphTokenization"
 	| "requiresCursorToolSchemaProjection"
 	| "supportsComputerUseConfig"
+	| "vendorInput"
+	| "toolResultInput"
+	| "vendorInputByWireModel"
 > {
+	/**
+	 * Optional explicit vendor evidence. Authored `input` remains accepted for
+	 * compatibility and is used as evidence when this field is absent.
+	 */
+	vendorInput?: InputModality[];
+	vendorInputByWireModel?: Readonly<Record<string, readonly InputModality[]>>;
 	/** Sparse compatibility overrides; resolved into `Model.compat` by `buildModel`. */
 	compat?: CompatConfigOf<TApi>;
 }

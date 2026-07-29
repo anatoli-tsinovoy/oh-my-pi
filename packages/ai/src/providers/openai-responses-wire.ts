@@ -2863,7 +2863,7 @@ export declare namespace ResponseInputAudio {
 /**
  * A text input to the model.
  */
-export type ResponseInputContent = ResponseInputText | ResponseInputImage | ResponseInputAudio | ResponseInputFile;
+export type ResponseInputContent = ResponseInputText | ResponseInputImage | ResponseInputFile;
 /**
  * A file input to the model.
  */
@@ -2988,6 +2988,7 @@ export interface ResponseInputImageContent {
 export type ResponseInputItem =
 	| EasyInputMessage
 	| ResponseInputItem.Message
+	| ResponseInputAudio
 	| ResponseOutputMessage
 	| ResponseFileSearchToolCall
 	| ResponseComputerToolCall

@@ -46,6 +46,7 @@ import {
 	recoverHarmonyToolCall,
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import { resolveModelRoute, withResolvedModelRoute } from "@oh-my-pi/pi-catalog/media-capabilities";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
@@ -1593,7 +1594,9 @@ async function prepareProviderCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedProviderCall> {
-	const model = config.getModel?.() ?? config.model;
+	const baseModel = config.getModel?.() ?? config.model;
+	const requestedEffort = config.getDisableReasoning?.() ? undefined : config.getReasoning?.();
+	const model = withResolvedModelRoute(baseModel, resolveModelRoute(baseModel, requestedEffort));
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);

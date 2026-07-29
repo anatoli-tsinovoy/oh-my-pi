@@ -574,7 +574,7 @@
 - Fixed `pi_bash` results reaching Cursor clipped with no truncation notice. Two truncation records exist locally: `read`/`grep` set `details.truncation`, which carries an explicit `truncated` flag, while `bash` sets `details.meta.truncation`, whose record has no such flag — its presence is the signal. `piTruncation` read only the first shape and required the flag, so every real Bash truncation was dropped and the server was told the clipped output was complete. Both shapes now translate, and an explicit `truncated: false` still suppresses the field.
 ### Added
 
-- Added audio and video input message content, with Gemini inline media, OpenAI audio input, and safe unsupported-media fallbacks.
+- Added route-resolved audio/video preflight with typed failures before credentials or dispatch; OpenAI Chat/Responses audio and Google inline media now use verified MIME and wire forms without silent placeholders.
 
 ## [17.1.8] - 2026-07-28
 

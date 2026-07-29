@@ -2767,7 +2767,15 @@ async function applyToolResultHandler(
 }
 
 function toolResultToText(toolResult: ToolResultMessage): string {
-	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return toolResult.content
+		.map(item => {
+			if (item.type === "text") return item.text;
+			if (item.type === "image") return `[${item.mimeType} image]`;
+			throw new AIError.ValidationError(
+				`Cursor tool results cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		})
+		.join("\n");
 }
 
 /**
@@ -4004,12 +4012,15 @@ function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolR
 				},
 			});
 		}
+		if (item.type !== "text") {
+			throw new AIError.ValidationError(
+				`Cursor MCP results cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		}
 		return create(McpToolResultContentItemSchema, {
 			content: {
 				case: "text",
-				value: create(McpTextContentSchema, {
-					text: item.type === "text" ? item.text : `[unsupported ${item.type}: ${item.mimeType}]`,
-				}),
+				value: create(McpTextContentSchema, { text: item.text }),
 			},
 		});
 	});
@@ -4728,7 +4739,9 @@ function buildCursorRootPromptContent(content: string | (TextContent | MediaCont
 		} else if (item.type === "image") {
 			parts.push({ type: "image", image: `data:${item.mimeType};base64,${item.data}`, mediaType: item.mimeType });
 		} else {
-			parts.push({ type: "text", text: `[unsupported ${item.type}: ${item.mimeType}]` });
+			throw new AIError.ValidationError(
+				`Cursor root prompts cannot encode ${item.type}; routed media preflight must reject it`,
+			);
 		}
 	}
 	return parts;
@@ -5487,7 +5500,13 @@ function hasImages(content: (TextContent | MediaContent)[]): boolean {
 }
 function extractText(content: (TextContent | MediaContent)[]): string {
 	return content
-		.map(c => (c.type === "text" ? c.text : c.type === "image" ? "" : `[unsupported ${c.type}: ${c.mimeType}]`))
+		.map(item => {
+			if (item.type === "text") return item.text;
+			if (item.type === "image") return "";
+			throw new AIError.ValidationError(
+				`Cursor transport cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		})
 		.filter(Boolean)
 		.join("\n");
 }

@@ -280,7 +280,7 @@ interface ParsedCodexModelEntry {
 	name: string;
 	contextWindow: number | null;
 	reasoning: boolean;
-	input: ("text" | "image")[];
+	input: InputModality[];
 	preferWebsockets: boolean;
 	useResponsesLite: boolean;
 	toolMode: boolean;
@@ -360,6 +360,7 @@ function buildNormalizedCodexModel(
 			baseUrl,
 			reasoning: parsed.reasoning,
 			input: parsed.input,
+			vendorInput: parsed.input,
 			// Daybreak standard API pricing is rule-owned (`providers/openai-codex.kdl`
 			// cost-patch) and corrected at build time.
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },

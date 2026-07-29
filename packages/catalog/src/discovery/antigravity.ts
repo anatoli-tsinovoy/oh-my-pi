@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 import { collapseVariants, type VariantCollapseTable } from "../compat/collapse";
-import type { ModelSpec } from "../types";
+import type { InputModality, ModelSpec } from "../types";
 import { discoveryFetch, toPositiveNumber } from "../utils";
 import { ensureAntigravityVersion, getAntigravityUserAgent } from "../wire/gemini-headers";
 
@@ -210,6 +210,9 @@ export async function fetchAntigravityDiscoveryModels(
 			}
 
 			const supportsImages = model.supportsImages === true;
+			const vendorInput: InputModality[] = ["text"];
+			if (supportsImages) vendorInput.push("image");
+			if (model.supportsVideo === true) vendorInput.push("video");
 			models.push({
 				id: modelId,
 				name: model.displayName || modelId,
@@ -217,7 +220,8 @@ export async function fetchAntigravityDiscoveryModels(
 				provider: "google-antigravity",
 				baseUrl: endpoint,
 				reasoning: model.supportsThinking === true,
-				input: supportsImages ? ["text", "image"] : ["text"],
+				input: vendorInput,
+				vendorInput,
 				cost: {
 					input: 0,
 					output: 0,

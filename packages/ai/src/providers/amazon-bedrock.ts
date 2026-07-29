@@ -857,6 +857,14 @@ function buildSystemPrompt(
 	return blocks;
 }
 
+function convertToolResultContentBlock(content: ToolResultMessage["content"][number]): TextBlockWire | ImageBlockWire {
+	if (content.type === "text") return { text: content.text.toWellFormed() };
+	if (content.type === "image") return { image: createImageBlock(content.mimeType, content.data) };
+	throw new AIError.ValidationError(
+		`Bedrock has no proven ${content.type} encoder on this branch; routed media preflight must reject it`,
+	);
+}
+
 function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
@@ -890,8 +898,9 @@ function convertMessages(
 								break;
 							case "audio":
 							case "video":
-								contentBlocks.push({ text: `[unsupported ${c.type}: ${c.mimeType}]` });
-								break;
+								throw new AIError.ValidationError(
+									`Bedrock has no proven ${c.type} encoder on this branch; routed media preflight must reject it`,
+								);
 							default:
 								throw new AIError.ValidationError("Unknown user content type");
 						}
@@ -963,13 +972,7 @@ function convertMessages(
 				toolResults.push({
 					toolResult: {
 						toolUseId: normalizeToolCallId(m.toolCallId),
-						content: m.content.map(c =>
-							c.type === "image"
-								? { image: createImageBlock(c.mimeType, c.data) }
-								: c.type === "text"
-									? { text: c.text.toWellFormed() }
-									: { text: `[unsupported ${c.type}: ${c.mimeType}]` },
-						),
+						content: m.content.map(convertToolResultContentBlock),
 						status: m.isError ? "error" : "success",
 					},
 				});
@@ -980,13 +983,7 @@ function convertMessages(
 					toolResults.push({
 						toolResult: {
 							toolUseId: normalizeToolCallId(nextMsg.toolCallId),
-							content: nextMsg.content.map(c =>
-								c.type === "image"
-									? { image: createImageBlock(c.mimeType, c.data) }
-									: c.type === "text"
-										? { text: c.text.toWellFormed() }
-										: { text: `[unsupported ${c.type}: ${c.mimeType}]` },
-							),
+							content: nextMsg.content.map(convertToolResultContentBlock),
 							status: nextMsg.isError ? "error" : "success",
 						},
 					});

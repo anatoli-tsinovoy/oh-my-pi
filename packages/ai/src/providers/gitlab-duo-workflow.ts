@@ -2214,7 +2214,15 @@ function buildGitLabDuoWorkflowActionResponse(
 }
 
 function gitLabToolResultToText(toolResult: ToolResultMessage): string {
-	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return toolResult.content
+		.map(item => {
+			if (item.type === "text") return item.text;
+			if (item.type === "image") return `[${item.mimeType} image]`;
+			throw new AIError.ValidationError(
+				`GitLab Duo Workflow cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		})
+		.join("\n");
 }
 
 function buildGitLabMcpToolDefinition(tool: Tool): GitLabMcpToolDefinition {
@@ -2736,7 +2744,15 @@ function gitLabDuoWorkflowMessageContentToText(message: Message): string {
 
 function gitLabDuoWorkflowUserContentToText(message: Exclude<Message, AssistantMessage>): string {
 	if (typeof message.content === "string") return message.content;
-	return message.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return message.content
+		.map(item => {
+			if (item.type === "text") return item.text;
+			if (item.type === "image") return `[${item.mimeType} image]`;
+			throw new AIError.ValidationError(
+				`GitLab Duo Workflow cannot encode ${item.type}; routed media preflight must reject it`,
+			);
+		})
+		.join("\n");
 }
 
 export function describeGitLabDuoWorkflowSocketEvent(event: unknown): string {

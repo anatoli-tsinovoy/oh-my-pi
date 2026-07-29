@@ -4,6 +4,7 @@ export * from "./discovery";
 export * from "./effort";
 export * from "./fireworks-model-id";
 export * from "./identity";
+export * from "./media-capabilities";
 export * from "./model-cache";
 export * from "./model-manager";
 export * from "./model-thinking";

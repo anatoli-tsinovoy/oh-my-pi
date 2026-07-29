@@ -983,7 +983,7 @@ export interface AssistantMessage {
 		| RedactedThinkingContent
 		| AnthropicFallbackContent
 		| AnthropicServerToolContent
-		| MediaContent
+		| ImageContent
 		| ToolCall
 	)[];
 	api: Api;

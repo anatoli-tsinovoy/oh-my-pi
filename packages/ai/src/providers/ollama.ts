@@ -185,11 +185,13 @@ function toPlainContent(
 	}
 	const textBlocks = content.filter((block): block is TextContent => block.type === "text");
 	const imageBlocks = content.filter((block): block is ImageContent => block.type === "image");
-	const unsupportedMedia = content.filter(block => block.type === "audio" || block.type === "video");
-	const text = [
-		...textBlocks.map(block => block.text),
-		...unsupportedMedia.map(block => `[unsupported ${block.type}: ${block.mimeType}]`),
-	].join("\n");
+	const unsupportedMedia = content.find(block => block.type === "audio" || block.type === "video");
+	if (unsupportedMedia) {
+		throw new AIError.ValidationError(
+			`Ollama Chat cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+		);
+	}
+	const text = textBlocks.map(block => block.text).join("\n");
 	return {
 		content: joinTextWithImagePlaceholder(text, !supportsImages && imageBlocks.length > 0),
 		...(supportsImages && imageBlocks.length > 0 ? { images: imageBlocks.map(block => block.data) } : {}),

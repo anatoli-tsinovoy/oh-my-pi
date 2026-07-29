@@ -1707,7 +1707,7 @@ export function openAIAudioFormat(mimeType: string): "wav" | "mp3" | undefined {
 export function convertResponsesInputContent(
 	content: string | Array<TextContent | MediaContent>,
 	supportsImages: boolean,
-	supportsAudio: boolean,
+	_supportsAudio: boolean,
 	supportsImageDetailOriginal: boolean,
 	escapeControlTokens = false,
 ): ResponseInputContent[] | undefined {
@@ -1724,9 +1724,6 @@ export function convertResponsesInputContent(
 
 	const normalizedContent: ResponseInputContent[] = [];
 	let omittedImages = false;
-	let omittedAudio = false;
-	let omittedUnsupportedAudio = false;
-	let omittedVideo = false;
 	for (const item of content) {
 		if (item.type === "text") {
 			const raw = item.text.toWellFormed();
@@ -1744,44 +1741,72 @@ export function convertResponsesInputContent(
 			}
 			continue;
 		}
-		if (item.type === "audio") {
-			const format = openAIAudioFormat(item.mimeType);
-			if (supportsAudio && format) {
-				normalizedContent.push({
-					type: "input_audio",
-					input_audio: { data: item.data, format },
-				} satisfies ResponseInputAudio);
-			} else if (supportsAudio) {
-				omittedUnsupportedAudio = true;
-			} else {
-				omittedAudio = true;
-			}
-			continue;
-		}
-		omittedVideo = true;
+		throw new AIError.ValidationError(
+			`${item.type} cannot be nested in Responses message content; routed media preflight must handle it`,
+		);
 	}
 	if (omittedImages) {
 		normalizedContent.push({ type: "input_text", text: NON_VISION_IMAGE_PLACEHOLDER } satisfies ResponseInputText);
 	}
-	if (omittedAudio) {
-		normalizedContent.push({
-			type: "input_text",
-			text: "[audio omitted: model does not support audio input]",
-		} satisfies ResponseInputText);
-	}
-	if (omittedUnsupportedAudio) {
-		normalizedContent.push({
-			type: "input_text",
-			text: "[audio omitted: OpenAI supports only WAV and MP3 input]",
-		} satisfies ResponseInputText);
-	}
-	if (omittedVideo) {
-		normalizedContent.push({
-			type: "input_text",
-			text: "[video omitted: OpenAI Responses does not support video input]",
-		} satisfies ResponseInputText);
-	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
+}
+function appendResponsesUserInput(
+	messages: ResponseInput,
+	content: string | Array<TextContent | MediaContent>,
+	supportsImages: boolean,
+	supportsAudio: boolean,
+	supportsImageDetailOriginal: boolean,
+	escapeControlTokens: boolean,
+	developerStringContent: boolean,
+	isDeveloper: boolean,
+): void {
+	if (typeof content === "string") {
+		const converted = convertResponsesInputContent(
+			content,
+			supportsImages,
+			supportsAudio,
+			supportsImageDetailOriginal,
+			escapeControlTokens,
+		);
+		if (!converted) return;
+		messages.push({
+			role: "user",
+			content: developerStringContent && isDeveloper ? content.toWellFormed() : converted,
+		});
+		return;
+	}
+	let pending: Array<TextContent | ImageContent> = [];
+	const flush = (): void => {
+		if (pending.length === 0) return;
+		const converted = convertResponsesInputContent(
+			pending,
+			supportsImages,
+			false,
+			supportsImageDetailOriginal,
+			escapeControlTokens,
+		);
+		pending = [];
+		if (converted) messages.push({ role: "user", content: converted });
+	};
+	for (const block of content) {
+		if (block.type === "text" || block.type === "image") {
+			pending.push(block);
+			continue;
+		}
+		if (block.type === "video") {
+			throw new AIError.ValidationError("Responses has no video input encoder");
+		}
+		flush();
+		const format = supportsAudio ? openAIAudioFormat(block.mimeType) : undefined;
+		if (!format) {
+			throw new AIError.ValidationError(`Unsupported Responses audio MIME type: ${block.mimeType}`);
+		}
+		messages.push({
+			type: "input_audio",
+			input_audio: { data: block.data, format },
+		} satisfies ResponseInputAudio);
+	}
+	flush();
 }
 
 /**
@@ -2033,27 +2058,16 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				msgIndex++;
 				continue;
 			}
-			const content = convertResponsesInputContent(
+			appendResponsesUserInput(
+				messages,
 				msg.content,
 				options.model.input.includes("image"),
 				options.model.input.includes("audio"),
 				supportsImageDetailOriginal,
 				escapeControlTokens,
+				options.developerStringContent === true,
+				msg.role === "developer",
 			);
-			if (!content) continue;
-			const developerText =
-				options.developerStringContent && msg.role === "developer" && typeof msg.content === "string"
-					? msg.content.toWellFormed()
-					: undefined;
-			messages.push({
-				role: "user",
-				content:
-					developerText !== undefined
-						? escapeControlTokens
-							? escapeHarmonyControlTokens(developerText)
-							: developerText
-						: content,
-			});
 		} else if (msg.role === "assistant") {
 			const assistantMsg = msg as AssistantMessage;
 			// Providers replay stale native items even when the current request has
@@ -2353,7 +2367,6 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 export interface ResponsesToolResultOutputEncoding {
 	output: string | ResponseFunctionCallOutputItemList;
 	outputText: string;
-	attachedAudio: ResponseInputAudio[];
 }
 
 const syntheticToolMediaMessages = new WeakSet<object>();
@@ -2375,69 +2388,65 @@ function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInpu
  *
  * Image-capable models receive an ordered native content array; text-only
  * models and callers without images receive the compatible string form.
- * Supported audio is returned separately because Responses function outputs
- * cannot carry `input_audio` content.
  */
 export function encodeResponsesToolResultOutput<TApi extends Api>(
 	toolResult: ToolResultMessage,
 	model: Model<TApi>,
 	supportsImageDetailOriginal: boolean,
 ): ResponsesToolResultOutputEncoding {
-	const supportsImages = model.input.includes("image");
-	const supportsAudio = model.input.includes("audio");
+	const supportsImages = (model.toolResultInput ?? model.input).includes("image");
+	const unsupportedMedia = toolResult.content.find(block => block.type === "audio" || block.type === "video");
+	if (unsupportedMedia) {
+		throw new AIError.ValidationError(
+			`Responses tool results cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+		);
+	}
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text)
 		.join("\n");
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
 	const omittedImages = hasImages && !supportsImages;
+	const escapeControlTokens = isHarmonyDialectModel(model);
 	const mediaContent = convertResponsesInputContent(
-		toolResult.content.filter((block): block is MediaContent => block.type !== "text"),
+		toolResult.content.filter((block): block is ImageContent => block.type === "image"),
 		supportsImages,
-		supportsAudio,
+		false,
 		supportsImageDetailOriginal,
-		isHarmonyDialectModel(model),
+		escapeControlTokens,
 	);
-	const attachedAudio =
-		mediaContent?.filter((block): block is ResponseInputAudio => block.type === "input_audio") ?? [];
-	const hasAttachedImage = mediaContent?.some(block => block.type === "input_image") === true;
-	const mediaOmissionText =
-		mediaContent
-			?.filter((block): block is ResponseInputText => block.type === "input_text")
-			.map(block => block.text)
-			.filter(text => !omittedImages || text !== NON_VISION_IMAGE_PLACEHOLDER)
-			.join("\n") ?? "";
-	const hasAttachedMedia = hasAttachedImage || attachedAudio.length > 0;
+	const hasAttachedMedia = mediaContent?.some(block => block.type === "input_image") === true;
+	const mediaOmissionText = mediaContent
+		?.filter((block): block is ResponseInputText => block.type === "input_text")
+		.map(block => block.text)
+		.filter(text => !omittedImages || text !== NON_VISION_IMAGE_PLACEHOLDER)
+		.join("\n");
+	// "(see attached image)" is only truthful when the result actually carries
+	// supported media in its native output. A genuinely empty text result
+	// (empty file read, silent tool) must stay empty.
 	const rawOutput = [
 		omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult,
 		mediaOmissionText,
-		!textResult && !mediaOmissionText && hasAttachedMedia
-			? attachedAudio.length > 0
-				? "(see attached media)"
-				: "(see attached image)"
-			: "",
+		!textResult && !mediaOmissionText && hasAttachedMedia ? "(see attached image)" : "",
 	]
 		.filter(Boolean)
 		.join("\n")
 		.toWellFormed();
-	const escapeControlTokens = isHarmonyDialectModel(model);
 	// Harmony-server models reject reserved control-token spellings even as tool
 	// data; escape the transport copy so a grep/read result cannot poison the
 	// session (#6913). Covers every downstream branch that consumes `output`.
 	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
 	const output: string | ResponseFunctionCallOutputItemList =
 		hasImages && supportsImages
-			? ((
-				convertResponsesInputContent(
-					toolResult.content,
-					supportsImages,
-					supportsAudio,
-					supportsImageDetailOriginal,
-					escapeControlTokens,
-				) ?? []
-			).filter(block => block.type !== "input_audio") as ResponseFunctionCallOutputItemList)
+			? ((convertResponsesInputContent(
+				toolResult.content,
+				supportsImages,
+				false,
+				supportsImageDetailOriginal,
+				escapeControlTokens,
+			) ?? []) as ResponseFunctionCallOutputItemList)
 			: outputText;
-	return { output, outputText, attachedAudio };
+	return { output, outputText };
 }
 
 
@@ -2453,11 +2462,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	supportsCustomToolCalls = true,
 	computerCallIds?: ReadonlySet<string>,
 ): void {
-	const { output, outputText, attachedAudio } = encodeResponsesToolResultOutput(
-		toolResult,
-		model,
-		supportsImageDetailOriginal,
-	);
+	const { output, outputText } = encodeResponsesToolResultOutput(toolResult, model, supportsImageDetailOriginal);
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
 
 	if (toolResult.providerMetadata?.type === "computer" && model.supportsComputerUse !== true) {
@@ -2522,16 +2527,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		});
 	}
 
-	if (attachedAudio.length === 0) return;
-	const mediaMessage = {
-		role: "user",
-		content: [
-			{ type: "input_text", text: "Attached media from tool result:" } satisfies ResponseInputText,
-			...attachedAudio,
-		],
-	} satisfies ResponseInput[number];
-	syntheticToolMediaMessages.add(mediaMessage);
-	messages.push(mediaMessage);
+	// Images are carried in the native function output above; Responses tool
+	// results have no proven audio/video output encoding.
 }
 
 /**

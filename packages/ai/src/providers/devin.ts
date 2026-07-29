@@ -229,7 +229,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const reader = body.getReader();
 			let pending = Buffer.alloc(0);
 
-			for (;;) {
+			for (; ;) {
 				const { done, value } = await reader.read();
 				if (value && value.length > 0) {
 					// Steady state drains fully per chunk; view the fresh reader chunk
@@ -645,6 +645,10 @@ function buildUserPrompt(msg: UserMessage | DeveloperMessage, messageId: string)
 				prompt += part.text;
 			} else if (part.type === "image") {
 				images.push(create(ImageDataSchema, { base64Data: part.data, mimeType: part.mimeType }));
+			} else {
+				throw new AIError.ValidationError(
+					`Devin transport cannot encode ${part.type}; routed media preflight must reject it`,
+				);
 			}
 		}
 	}
@@ -703,12 +707,16 @@ function buildChatMessagePrompts(
 			);
 		} else {
 			let resultText = "";
-			const images = [];
+			const images: ImageData[] = [];
 			for (const part of msg.content) {
 				if (part.type === "text") {
 					resultText += part.text;
 				} else if (part.type === "image") {
 					images.push(create(ImageDataSchema, { base64Data: part.data, mimeType: part.mimeType }));
+				} else {
+					throw new AIError.ValidationError(
+						`Devin tool results cannot encode ${part.type}; routed media preflight must reject it`,
+					);
 				}
 			}
 			prompts.push(

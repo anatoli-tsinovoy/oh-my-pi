@@ -74,6 +74,9 @@ interface ModelJson {
 	/** Supported thinking efforts when the model thinks, otherwise null. */
 	thinking: readonly Effort[] | null;
 	input: Model<Api>["input"];
+	vendorInput: Model<Api>["vendorInput"];
+	toolResultInput: Model<Api>["toolResultInput"];
+	vendorInputByWireModel?: Model<Api>["vendorInputByWireModel"];
 	cost: Model<Api>["cost"];
 }
 
@@ -114,6 +117,9 @@ function toModelJson(model: Model<Api>): ModelJson {
 		reasoning: model.reasoning,
 		thinking: model.thinking ? getSupportedEfforts(model) : null,
 		input: model.input,
+		vendorInput: model.vendorInput ?? model.input,
+		toolResultInput: model.toolResultInput ?? model.input,
+		...(model.vendorInputByWireModel ? { vendorInputByWireModel: model.vendorInputByWireModel } : {}),
 		cost: model.cost,
 	};
 }
@@ -243,7 +249,8 @@ function renderProviderModels(
 			formatLimit(model.contextWindow),
 			formatLimit(model.maxTokens),
 			model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? "yes" : "-",
-			model.input.includes("image") ? "yes" : "no",
+			model.input.join(","),
+			(model.toolResultInput ?? model.input).join(","),
 		]);
 		for (const line of boxTable(
 			[
@@ -251,7 +258,8 @@ function renderProviderModels(
 				{ header: "context", align: "right" },
 				{ header: "max-out", align: "right" },
 				{ header: "thinking" },
-				{ header: "images" },
+				{ header: "user" },
+				{ header: "tools" },
 			],
 			rows,
 		)) {

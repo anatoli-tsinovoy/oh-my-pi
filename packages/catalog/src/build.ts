@@ -10,6 +10,7 @@
 import { resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
+import { resolveEffectiveMediaCapabilities } from "./media-capabilities";
 import type { Api, Model, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
@@ -202,12 +203,17 @@ function supportsOpenAIGAComputerUse(
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const policy = resolveModelPolicy(spec);
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
+	const vendorInput = [...(spec.vendorInput ?? spec.input)];
+	const effective = resolveEffectiveMediaCapabilities(spec.api, vendorInput);
 	const model: Model<TApi> = {
 		...spec,
 		name: cleanModelName(spec.name),
 		identity: policy.identity,
 		requiresGlyphTokenization: policy.identity.class === "anthropic",
 		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
+		vendorInput,
+		input: [...effective.input],
+		toolResultInput: [...effective.toolResultInput],
 		thinking: policy.thinking,
 		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,

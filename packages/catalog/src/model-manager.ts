@@ -544,12 +544,14 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		endpointChanged ||
 		(existingModel.provider === "github-copilot" && dynamicModel.provider === "github-copilot") ||
 		(existingModel.provider === "deepinfra" && dynamicModel.provider === "deepinfra");
-	const inputModalities = new Set<InputModality>(
-		dynamicInputAuthoritative ? dynamicModel.input : existingModel.input,
-	);
-	if (!dynamicInputAuthoritative) {
-		for (const modality of dynamicModel.input) inputModalities.add(modality);
-	}
+	const dynamicVendorInput = dynamicModel.vendorInput ?? dynamicModel.input;
+	const existingVendorInput = existingModel.vendorInput ?? existingModel.input;
+	const vendorInput = dynamicInputAuthoritative
+		? dynamicVendorInput
+		: (["text", "image", "audio", "video"] as const).filter(
+				modality => existingVendorInput.includes(modality) || dynamicVendorInput.includes(modality),
+			);
+	const inputModalities = new Set<InputModality>(vendorInput);
 	const input: InputModality[] = ["text"];
 	for (const modality of ["image", "audio", "video"] as const) {
 		if (inputModalities.has(modality)) input.push(modality);
@@ -575,6 +577,8 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
 		input,
+		vendorInput: [...vendorInput],
+		vendorInputByWireModel: dynamicModel.vendorInputByWireModel ?? existingModel.vendorInputByWireModel,
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),

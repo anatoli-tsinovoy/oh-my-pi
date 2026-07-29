@@ -1096,7 +1096,6 @@ function convertContentBlocks(
 	const blocks: Array<{ type: "text"; text: string } | { type: "image"; source: AnthropicImageSource }> = [];
 	let sawText = false;
 	let sawImage = false;
-	let sawUnsupportedMedia = false;
 
 	for (const block of content) {
 		if (block.type === "text") {
@@ -1108,9 +1107,9 @@ function convertContentBlocks(
 		}
 
 		if (block.type === "audio" || block.type === "video") {
-			sawUnsupportedMedia = true;
-			blocks.push({ type: "text", text: `[unsupported ${block.type}: ${block.mimeType}]` });
-			continue;
+			throw new AIError.ValidationError(
+				`Anthropic Messages cannot encode ${block.type}; routed media preflight must reject it`,
+			);
 		}
 
 		if (!supportsImages) {
@@ -1136,7 +1135,7 @@ function convertContentBlocks(
 		blocks.push({ type: "image", source });
 	}
 
-	if (!supportsImages && !sawUnsupportedMedia) {
+	if (!supportsImages) {
 		return blocks
 			.filter((block): block is { type: "text"; text: string } => block.type === "text")
 			.map(block => block.text)

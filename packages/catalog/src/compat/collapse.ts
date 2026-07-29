@@ -832,6 +832,13 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			if (family.suppressWhenOff) thinking.suppressWhenOff = true;
 		}
 
+		const vendorInputByWireModel = Object.fromEntries(
+			rawPresent.map((id, index) => {
+				const spec = memberSpecs[index];
+				return [id, [...(spec.vendorInput ?? spec.input)]];
+			}),
+		);
+
 		const input: InputModality[] = [];
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
 		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
@@ -844,6 +851,8 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 			name: family.name,
 			reasoning,
 			input,
+			vendorInput: [...(firstMember.vendorInput ?? firstMember.input)],
+			vendorInputByWireModel,
 			contextWindow: maxOrNull(memberSpecs.map(spec => spec.contextWindow)),
 			maxTokens: maxOrNull(memberSpecs.map(spec => spec.maxTokens)),
 		};
@@ -859,6 +868,9 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 				: undefined;
 		const defaultWireId = preferredDefault ?? rawPresent.find(id => !retired?.has(id)) ?? rawPresent[0];
 		if (defaultWireId === undefined) continue;
+		const defaultVendorInput = vendorInputByWireModel[defaultWireId];
+		collapsed.input = [...defaultVendorInput];
+		collapsed.vendorInput = [...defaultVendorInput];
 		if (defaultWireId === family.id) {
 			if (usedAbsentEffortRoute) {
 				collapsed.requestModelId = defaultWireId;

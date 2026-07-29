@@ -793,7 +793,8 @@ export class ModelBrowser implements Component {
 		if (model.maxTokens) facts.push(`${formatNumber(model.maxTokens).toLowerCase()} out`);
 		facts.push(`${formatCostPair(model)} per M`);
 		if (model.reasoning) facts.push("reasoning");
-		if (model.input.includes("image")) facts.push("vision");
+		facts.push(`user: ${model.input.join("/") || "none"}`);
+		facts.push(`tools: ${(model.toolResultInput ?? model.input).join("/") || "none"}`);
 		const perf = this.#perf.get(selected.selector);
 		if (perf) {
 			facts.push(`~${formatTps(perf.tps)}`);

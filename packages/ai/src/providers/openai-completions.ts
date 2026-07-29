@@ -2045,9 +2045,6 @@ export function convertMessages(
 				const supportsAudio = model.input.includes("audio");
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
-				let omittedAudio = false;
-				let omittedUnsupportedAudio = false;
-				let omittedVideo = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
@@ -2066,41 +2063,23 @@ export function convertMessages(
 								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
 							},
 						} satisfies ChatCompletionContentPartImage);
-					} else if (item.type === "audio" && supportsAudio) {
-						const format = openAIAudioFormat(item.mimeType);
-						if (format) {
-							content.push({
-								type: "input_audio",
-								input_audio: { data: item.data, format },
-							} satisfies ChatCompletionContentPartInputAudio);
-						} else {
-							omittedUnsupportedAudio = true;
-						}
 					} else if (item.type === "audio") {
-						omittedAudio = true;
+						const format = supportsAudio ? openAIAudioFormat(item.mimeType) : undefined;
+						if (!format) {
+							throw new AIError.ValidationError(`Unsupported OpenAI Chat audio input: ${item.mimeType}`);
+						}
+						content.push({
+							type: "input_audio",
+							input_audio: { data: item.data, format },
+						} satisfies ChatCompletionContentPartInputAudio);
 					} else {
-						omittedVideo = true;
+						throw new AIError.ValidationError("OpenAI Chat Completions has no video input encoder");
 					}
 				}
 				if (omittedImages)
 					content.push({
 						type: "text",
 						text: NON_VISION_IMAGE_PLACEHOLDER,
-					} satisfies ChatCompletionContentPartText);
-				if (omittedAudio)
-					content.push({
-						type: "text",
-						text: "[audio omitted: model does not support audio input]",
-					} satisfies ChatCompletionContentPartText);
-				if (omittedUnsupportedAudio)
-					content.push({
-						type: "text",
-						text: "[audio omitted: OpenAI supports only WAV and MP3 input]",
-					} satisfies ChatCompletionContentPartText);
-				if (omittedVideo)
-					content.push({
-						type: "text",
-						text: "[video omitted: OpenAI Chat Completions does not support video input]",
 					} satisfies ChatCompletionContentPartText);
 				if (content.length === 0) continue;
 				params.push({
@@ -2353,7 +2332,7 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			// Batch consecutive tool results and collect all supported media.
-			const mediaBlocks: Array<ChatCompletionContentPartImage | ChatCompletionContentPartInputAudio> = [];
+			const mediaBlocks: ChatCompletionContentPartImage[] = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -2364,38 +2343,23 @@ export function convertMessages(
 					.filter(c => c.type === "text")
 					.map(c => (c as TextContent).text)
 					.join("\n");
-				const supportsImages = isOpenAICompletionsVisionSupported(model);
-				const supportsAudio = model.input.includes("audio");
+				const supportsImages = (model.toolResultInput ?? model.input).includes("image");
 				const hasImages = toolMsg.content.some(c => c.type === "image");
-				const hasAudio = toolMsg.content.some(c => c.type === "audio");
-				const hasVideo = toolMsg.content.some(c => c.type === "video");
+				const unsupportedMedia = toolMsg.content.find(c => c.type === "audio" || c.type === "video");
+				if (unsupportedMedia) {
+					throw new AIError.ValidationError(
+						`OpenAI Chat tool results cannot encode ${unsupportedMedia.type}; routed media preflight must reject it`,
+					);
+				}
 				const omittedImages = hasImages && !supportsImages;
-				const omittedAudio = hasAudio && !supportsAudio;
-				const omittedUnsupportedAudio = toolMsg.content.some(
-					c => c.type === "audio" && supportsAudio && openAIAudioFormat(c.mimeType) === undefined,
-				);
 
 				// Always send tool result text plus any explicit media omission placeholder.
-				const hasText = textResult.length > 0;
 				const remappedToolCallId = consumeToolCallId(toolMsg.toolCallId);
 				const resolvedToolCallId =
 					remappedToolCallId ?? ensureToolCallId(toolMsg.toolCallId, `${j}:${toolMsg.toolName ?? "tool"}`);
-				const toolResultContent = [
-					omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult,
-					omittedAudio ? "[audio omitted: model does not support audio input]" : "",
-					omittedUnsupportedAudio ? "[audio omitted: OpenAI supports only WAV and MP3 input]" : "",
-					hasVideo ? "[video omitted: OpenAI Chat Completions does not support video input]" : "",
-					!hasText &&
-					!omittedImages &&
-					!omittedAudio &&
-					!omittedUnsupportedAudio &&
-					!hasVideo &&
-					(hasImages || hasAudio)
-						? "(see attached media)"
-						: "",
-				]
-					.filter(Boolean)
-					.join("\n");
+				const toolResultContent = (
+					omittedImages ? joinTextWithImagePlaceholder(textResult, true) : textResult
+				).toWellFormed();
 				const toolResultMsg: OpenAICompletionsToolMessageParam = {
 					role: "tool",
 					content: toolResultContent.toWellFormed(),
@@ -2413,13 +2377,6 @@ export function convertMessages(
 							image_url: {
 								url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
 							},
-						});
-					} else if (block.type === "audio" && supportsAudio) {
-						const format = openAIAudioFormat(block.mimeType);
-						if (!format) continue;
-						mediaBlocks.push({
-							type: "input_audio",
-							input_audio: { data: block.data, format },
 						});
 					}
 				}
@@ -2441,7 +2398,7 @@ export function convertMessages(
 					content: [
 						{
 							type: "text",
-							text: "Attached media from tool result:",
+							text: "Attached image(s) from tool result:",
 						},
 						...mediaBlocks,
 					],
