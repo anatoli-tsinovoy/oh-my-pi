@@ -69,6 +69,7 @@ import {
 	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
 	splitAssistantMessageToolTimeline,
+	userMessageDisplayText,
 } from "./transcript-render-helpers";
 
 type TextBlock = { type: "text"; text: string };
@@ -274,7 +275,7 @@ export class UiHelpers {
 			}
 			case "user":
 			case "developer": {
-				const textContent = this.ctx.getUserMessageText(message);
+				const textContent = message.role === "user" ? userMessageDisplayText(message) : "";
 				if (textContent) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					const cached = options?.reuseSettledComponent

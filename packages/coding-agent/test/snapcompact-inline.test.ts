@@ -153,6 +153,31 @@ describe("SnapcompactInlineTransformer", () => {
 		expect(result.systemPrompt).toBe(context.systemPrompt);
 	});
 
+	it("keeps historical tool results carrying audio or video intact", async () => {
+		const audioResult: ToolResultMessage = {
+			...toolResult("audio", LARGE),
+			content: [
+				{ type: "text", text: LARGE },
+				{ type: "audio", data: "YQ==", mimeType: "audio/mpeg" },
+			],
+		};
+		const videoResult: ToolResultMessage = {
+			...toolResult("video", LARGE),
+			content: [
+				{ type: "text", text: LARGE },
+				{ type: "video", data: "YQ==", mimeType: "video/mp4" },
+			],
+		};
+		const context: Context = {
+			messages: [userMessage("first user prompt"), audioResult, videoResult, toolResult("latest", LARGE)],
+		};
+		const transformer = new SnapcompactInlineTransformer(
+			withTestShape({ renderSystemPrompt: "none", renderToolResults: true }),
+		);
+
+		expect(await transformer.transform(context, makeModel())).toBe(context);
+	});
+
 	it("reports per-tool-result savings to the sink for each imaged result only", async () => {
 		const received: Array<{ toolCallId: string; savedTokens: number }>[] = [];
 		let model = "";

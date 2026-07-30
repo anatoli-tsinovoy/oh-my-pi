@@ -24,6 +24,23 @@ import { theme } from "../theme/theme";
 
 type CustomOrHookMessage = Extract<AgentMessage, { role: "custom" | "hookMessage" }>;
 type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+type UserAgentMessage = Extract<AgentMessage, { role: "user" }>;
+
+/** Render text, or identify an otherwise invisible audio/video-only user prompt. */
+export function userMessageDisplayText(message: UserAgentMessage): string {
+	if (typeof message.content === "string") return message.content;
+	const text = message.content
+		.filter((block): block is { type: "text"; text: string } => block.type === "text")
+		.map(block => block.text)
+		.join("");
+	if (text) return text;
+
+	const hasAudio = message.content.some(block => block.type === "audio");
+	const hasVideo = message.content.some(block => block.type === "video");
+	if (hasAudio && hasVideo) return "[audio and video attachments]";
+	if (hasAudio) return "[audio attachment]";
+	return hasVideo ? "[video attachment]" : "";
+}
 
 /**
  * Render an `async-result` custom message (a completed background bash/task job,

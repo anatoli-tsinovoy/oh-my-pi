@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
-import { assistantUsageIsBilled } from "../../../src/modes/utils/transcript-render-helpers";
+import { assistantUsageIsBilled, userMessageDisplayText } from "../../../src/modes/utils/transcript-render-helpers";
 
 function usage(overrides: Partial<Usage> = {}): Usage {
 	return {
@@ -34,5 +35,32 @@ describe("assistantUsageIsBilled", () => {
 		const emptyFreeMessage: Pick<AssistantMessage, "usage"> = { usage: usage() };
 		expect(assistantUsageIsBilled(emptyBilledMessage.usage)).toBe(true);
 		expect(assistantUsageIsBilled(emptyFreeMessage.usage)).toBe(false);
+	});
+});
+
+describe("userMessageDisplayText", () => {
+	it("marks audio/video-only user prompts instead of rendering an empty transcript row", () => {
+		const audio: Extract<AgentMessage, { role: "user" }> = {
+			role: "user",
+			content: [{ type: "audio", data: "YQ==", mimeType: "audio/mpeg" }],
+			timestamp: 1,
+		};
+		const video: Extract<AgentMessage, { role: "user" }> = {
+			role: "user",
+			content: [{ type: "video", data: "YQ==", mimeType: "video/mp4" }],
+			timestamp: 1,
+		};
+		const mixed: Extract<AgentMessage, { role: "user" }> = {
+			role: "user",
+			content: [
+				{ type: "audio", data: "YQ==", mimeType: "audio/mpeg" },
+				{ type: "video", data: "YQ==", mimeType: "video/mp4" },
+			],
+			timestamp: 1,
+		};
+
+		expect(userMessageDisplayText(audio)).toBe("[audio attachment]");
+		expect(userMessageDisplayText(video)).toBe("[video attachment]");
+		expect(userMessageDisplayText(mixed)).toBe("[audio and video attachments]");
 	});
 });

@@ -2435,4 +2435,34 @@ describe("compact() remote compaction failure handling", () => {
 		).rejects.toThrow("Remote compaction failed");
 		expect(completeSpy).not.toHaveBeenCalled();
 	});
+
+	test("falls back to local summarization when remote history cannot encode user video", async () => {
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		preparation.messagesToSummarize = [
+			{
+				role: "user",
+				content: [{ type: "video", data: "YQ==", mimeType: "video/mp4" }],
+				timestamp: 1,
+			},
+		];
+		let remoteCalls = 0;
+		const fetchMock: FetchImpl = async () => {
+			remoteCalls++;
+			return new Response();
+		};
+
+		const result = await compact(
+			preparation,
+			makeOpenAiModel({ input: ["text", "video"] }),
+			"test-key",
+			undefined,
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(result.summary).toContain("local summary");
+		expect(completeSpy).toHaveBeenCalled();
+		expect(remoteCalls).toBe(0);
+	});
 });

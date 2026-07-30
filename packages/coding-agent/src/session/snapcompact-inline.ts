@@ -146,7 +146,7 @@ export interface InlineToolResultCandidate {
  id: string;
  /** Token count of all joined text blocks, including text beside images. */
  textTokens: number;
- /** Frames needed to render the joined text (0 = empty or below floor). */
+ /** Frames needed to render the joined text (0 for empty, below floor, or audio/video media). */
  frames: number;
  /** Error tool results must stay text-only for provider API validation. */
  isError?: boolean;
@@ -253,6 +253,7 @@ function buildInlineToolResultCandidate(
  const textBlocks: string[] = [];
  let sourceImageIndex = 0;
  let sourceMediaIndex = 0;
+ let hasAudioOrVideo = false;
  for (const block of blocks) {
   if (block.type === "text" && typeof block.text === "string") {
    textBlocks.push(block.text);
@@ -261,6 +262,7 @@ function buildInlineToolResultCandidate(
    textBlocks.push(`[Source image ${sourceImageIndex} was attached here in the original tool result.]`);
   } else if (block.type === "audio" || block.type === "video") {
    sourceMediaIndex++;
+   hasAudioOrVideo = true;
    textBlocks.push(`[Source ${block.type} ${sourceMediaIndex} was attached here in the original tool result.]`);
   }
  }
@@ -271,7 +273,10 @@ function buildInlineToolResultCandidate(
   candidate: {
    id: toolCallId,
    textTokens,
-   frames: !isError && textTokens >= MIN_TOOL_RESULT_TOKENS ? snapcompact.frames(text, { shape }) : 0,
+   frames:
+    !isError && !hasAudioOrVideo && textTokens >= MIN_TOOL_RESULT_TOKENS
+     ? snapcompact.frames(text, { shape })
+     : 0,
    isError,
   },
   text,

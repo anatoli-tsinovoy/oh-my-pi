@@ -2,7 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vm from "node:vm";
 import type { BunPlugin } from "bun";
+import { Marked } from "@oh-my-pi/pi-utils/marked";
+import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 import { getTemplate, resolveBundledHtmlAssetPath } from "../src/export/html/index";
 
 interface HeapProbeResult {
@@ -19,9 +22,9 @@ interface TemplateProbeResult {
 }
 
 const expectedTemplate: TemplateProbeResult = {
-	chars: 384_681,
-	bytes: 384_839,
-	sha256: "38176b9f29f520b366f5e5d97f634751a6e40ab9d325fbed15beefb8e237748d",
+	chars: 385_409,
+	bytes: 385_567,
+	sha256: "963ab54ed4a811679ba1a21c2ceab17e54018039108b7999978276e11b42bac1",
 	stableCache: true,
 	assetsRemoved: 0,
 };
@@ -89,6 +92,56 @@ async function runProbe(command: string[]): Promise<TemplateProbeResult> {
 	]);
 	expect(exitCode, stderr).toBe(0);
 	return JSON.parse(stdout) as TemplateProbeResult;
+}
+
+function renderExportedSession(entries: unknown[], leafId: string) {
+	const templateHtml = fs.readFileSync(new URL("template.html", assetDir), "utf8");
+	const templateJs = fs.readFileSync(new URL("template.js", assetDir), "utf8");
+	const { document, window } = parseHTML(templateHtml);
+	const sessionData = document.getElementById("session-data");
+	if (!sessionData) throw new Error("Export template is missing session data");
+	sessionData.textContent = Buffer.from(
+		JSON.stringify({
+			header: {
+				type: "session",
+				version: 3,
+				id: "html-media-test",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				cwd: "/tmp",
+			},
+			entries,
+			leafId,
+		}),
+	).toString("base64");
+	Object.defineProperty(window, "location", {
+		value: new URL("https://example.test/export.html"),
+		configurable: true,
+	});
+	Object.defineProperty(window, "matchMedia", {
+		value: () => ({ matches: false, addEventListener() { }, removeEventListener() { } }),
+		configurable: true,
+	});
+	const context = vm.createContext({
+		window,
+		document,
+		marked: new Marked(),
+		hljs: {
+			getLanguage: () => false,
+			highlight: () => ({ value: "" }),
+			highlightAuto: () => ({ value: "" }),
+		},
+		URL,
+		URLSearchParams,
+		TextDecoder,
+		Uint8Array,
+		atob,
+		navigator: { clipboard: null },
+		localStorage: { getItem: () => null, setItem() { } },
+		setTimeout: () => 0,
+		clearTimeout() { },
+	});
+	vm.runInContext(templateJs, context);
+	return document;
 }
 
 beforeAll(async () => {
@@ -212,4 +265,55 @@ describe("HTML export template", () => {
 		const result = JSON.parse(stdout) as HeapProbeResult;
 		expect(result, JSON.stringify(result)).toEqual({ retainedAssetStrings: 0, retainedAssets: [] });
 	}, 30_000);
+
+	test("renders audio/video-only and mixed messages", () => {
+		const audio = { type: "audio", mimeType: "audio/wav", data: "UklGRg==" };
+		const video = { type: "video", mimeType: "video/mp4", data: "AAAA" };
+		const entries = [
+			{
+				type: "message",
+				id: "user-audio-only",
+				parentId: null,
+				timestamp: "2026-01-01T00:00:01.000Z",
+				message: { role: "user", content: [audio], timestamp: 1 },
+			},
+			{
+				type: "message",
+				id: "user-video-only",
+				parentId: "user-audio-only",
+				timestamp: "2026-01-01T00:00:02.000Z",
+				message: { role: "user", content: [video], timestamp: 2 },
+			},
+			{
+				type: "message",
+				id: "assistant-mixed",
+				parentId: "user-video-only",
+				timestamp: "2026-01-01T00:00:03.000Z",
+				message: {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "before media" },
+						audio,
+						video,
+						{ type: "text", text: "after media" },
+					],
+					stopReason: "stop",
+					timestamp: 3,
+				},
+			},
+		];
+		const document = renderExportedSession(entries, "assistant-mixed");
+
+		const userAudio = document.querySelector("#entry-user-audio-only audio");
+		const userVideo = document.querySelector("#entry-user-video-only video");
+		const assistant = document.getElementById("entry-assistant-mixed");
+		expect(userAudio?.getAttribute("src")).toBe("data:audio/wav;base64,UklGRg==");
+		expect(userAudio?.hasAttribute("controls")).toBe(true);
+		expect(userVideo?.getAttribute("src")).toBe("data:video/mp4;base64,AAAA");
+		expect(userVideo?.hasAttribute("controls")).toBe(true);
+		expect(assistant?.querySelector("audio")?.getAttribute("src")).toBe("data:audio/wav;base64,UklGRg==");
+		expect(assistant?.querySelector("video")?.getAttribute("src")).toBe("data:video/mp4;base64,AAAA");
+		expect(assistant?.textContent).toContain("before media");
+		expect(assistant?.textContent).toContain("after media");
+	});
 });

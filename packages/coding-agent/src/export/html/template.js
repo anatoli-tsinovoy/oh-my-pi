@@ -1238,6 +1238,12 @@
                 }
                 html += '</div>';
               }
+              for (const aud of content.filter(c => c.type === 'audio')) {
+                html += `<audio controls src="data:${aud.mimeType};base64,${aud.data}"></audio>`;
+              }
+              for (const vid of content.filter(c => c.type === 'video')) {
+                html += `<video controls class="message-image" src="data:${vid.mimeType};base64,${vid.data}"></video>`;
+              }
             }
 
             const text = typeof content === 'string' ? content : 
@@ -1282,6 +1288,10 @@
                 </div>`;
               } else if (block.type === 'image') {
                 html += `<div class="message-images" id="${blockId}"><img src="data:${block.mimeType};base64,${block.data}" class="message-image" /></div>`;
+              } else if (block.type === 'audio') {
+                html += `<audio controls src="data:${block.mimeType};base64,${block.data}"></audio>`;
+              } else if (block.type === 'video') {
+                html += `<video controls class="message-image" src="data:${block.mimeType};base64,${block.data}"></video>`;
               } else if (block.type === 'toolCall') {
                 html += renderToolCall(block, sctx, blockId);
               }

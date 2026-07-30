@@ -1688,14 +1688,20 @@ export async function compact(
 				: previousV2Compaction?.provider === model.provider
 					? previousV2Compaction.replacementHistory
 					: undefined;
-		const remoteHistory = buildOpenAiNativeHistory(
-			(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
-			model,
-			previousReplacementHistory,
-			openAiCompatSupportsImageDetailOriginal(model),
-		);
-		if (remoteHistory.length > 0) {
-			try {
+		let remoteHistoryBuilt = false;
+		try {
+			// History construction runs inside the fallback boundary so a media
+			// block the compact model can't encode (e.g. video on an OpenAI
+			// compact of a video-capable main model) falls back to local
+			// summarization instead of aborting the whole compaction.
+			const remoteHistory = buildOpenAiNativeHistory(
+				(summaryOptions.convertToLlm ?? defaultConvertToLlm)(remoteMessages),
+				model,
+				previousReplacementHistory,
+				openAiCompatSupportsImageDetailOriginal(model),
+			);
+			remoteHistoryBuilt = true;
+			if (remoteHistory.length > 0) {
 				const remote = await withAuth(
 					apiKey,
 					key =>
@@ -1716,18 +1722,25 @@ export async function compact(
 				);
 				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
 				usedRemoteCompaction = true;
-			} catch (err) {
-				// A user/session abort is a cancellation, not a remote failure —
-				// swallowing it here would downgrade Esc into "fall back to local
-				// summarization" and keep compaction running on an aborted signal.
-				if (signal?.aborted) throw err;
+			}
+		} catch (err) {
+			// A user/session abort is a cancellation, not a remote failure —
+			// swallowing it here would downgrade Esc into "fall back to local
+			// summarization" and keep compaction running on an aborted signal.
+			if (signal?.aborted) throw err;
+			if (remoteHistoryBuilt) {
 				nativeCompactionError = selectNativeCompactionError(nativeCompactionError, err);
-				logger.warn("OpenAI remote compaction failed", {
+			}
+			logger.warn(
+				remoteHistoryBuilt
+					? "OpenAI remote compaction failed"
+					: "OpenAI remote compaction history construction failed, falling back to local summarization",
+				{
 					error: err instanceof Error ? err.message : String(err),
 					model: model.id,
 					provider: model.provider,
-				});
-			}
+				},
+			);
 		}
 	}
 

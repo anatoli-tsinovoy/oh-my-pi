@@ -125,11 +125,14 @@ describe("route-resolved media capability policy", () => {
 		}
 	});
 
-	test("MIME gates distinguish OpenAI aliases from unsupported Ogg", () => {
-		const forms = resolveModelRoute(model("openai-responses")).userMediaForms;
-		expect(findSupportedMediaForm(forms, "audio", "audio/x-wav")?.normalizedFormat).toBe("wav");
-		expect(findSupportedMediaForm(forms, "audio", "audio/mpeg")?.normalizedFormat).toBe("mp3");
-		expect(findSupportedMediaForm(forms, "audio", "audio/ogg")).toBeUndefined();
+	test("MIME gates accept canonical MP3 forms and reject unsupported Ogg", () => {
+		const openAiForms = resolveModelRoute(model("openai-responses")).userMediaForms;
+		expect(findSupportedMediaForm(openAiForms, "audio", "audio/x-wav")?.normalizedFormat).toBe("wav");
+		expect(findSupportedMediaForm(openAiForms, "audio", "audio/mpeg")?.normalizedFormat).toBe("mp3");
+		expect(findSupportedMediaForm(openAiForms, "audio", "audio/ogg")).toBeUndefined();
+
+		const googleForms = resolveModelRoute(model("google-generative-ai")).userMediaForms;
+		expect(findSupportedMediaForm(googleForms, "audio", "audio/mpeg")?.wireShape).toBe("inlineData");
 	});
 
 	test("selected collapsed member evidence changes effective support without a family union", () => {
