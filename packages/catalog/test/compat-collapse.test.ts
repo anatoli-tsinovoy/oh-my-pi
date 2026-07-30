@@ -557,6 +557,21 @@ describe("collapseVariants with a reviewed table", () => {
 		expect(pro?.thinking?.mode).toBe("budget");
 		expect(pro?.thinking?.effortBudgets).toEqual({ low: 1001, high: 10001 });
 	});
+	it("seeds a preserve-absent effort route target from the primary member's vendor input", () => {
+		// `claude-sonnet-4-5` is a reviewed thinking-pair family with
+		// preserveAbsentEffortRoutes: off routes to the bare id, every effort to
+		// the -thinking twin. When discovery advertises only the bare id, the
+		// absent -thinking target stays preserved — and must be seeded from the
+		// primary present member's vendor input so a selected effort does not
+		// resolve to an empty capability set and drop supported media.
+		const out = collapseVariants([memberSpec("claude-sonnet-4-5")], { table: antigravityTable });
+		const collapsed = out.find(m => m.id === "claude-sonnet-4-5");
+		expect(collapsed).toBeDefined();
+		// The absent -thinking route target is preserved …
+		expect(collapsed?.thinking?.effortRouting?.[Effort.High]).toBe("claude-sonnet-4-5-thinking");
+		// … and seeded from the bare member's input rather than left undefined.
+		expect(collapsed?.vendorInputByWireModel?.["claude-sonnet-4-5-thinking"]).toEqual(["text", "image"]);
+	});
 });
 
 describe("stripThinkingVariantSuffix", () => {

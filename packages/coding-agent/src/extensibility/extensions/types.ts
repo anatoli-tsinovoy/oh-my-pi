@@ -758,6 +758,8 @@ export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
 	prompt: string;
 	images?: ImageContent[];
+	/** Audio/video attachments forwarded without image normalization. */
+	attachments?: MediaContent[];
 	systemPrompt: string[];
 }
 

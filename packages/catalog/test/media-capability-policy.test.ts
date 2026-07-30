@@ -151,4 +151,30 @@ describe("route-resolved media capability policy", () => {
 		expect(resolveModelRoute(routed).input).toContain("audio");
 		expect(resolveModelRoute(routed, Effort.High).input).toEqual(["text"]);
 	});
+	test("an unannotated routed wire id falls back to the model's default vendor input", () => {
+		// Bundled models predate per-wire vendor evidence (models.json was not
+		// regenerated for audio/video), so a routed wire id absent from the
+		// per-wire map must fall back to the model's default vendor input rather
+		// than resolving to an empty capability set that silently drops media.
+		const routed = model("openai-responses", {
+			id: "family",
+			requestModelId: "family-off",
+			reasoning: true,
+			vendorInput: ["text", "image", "audio"],
+			vendorInputByWireModel: {
+				"family-off": ["text"],
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High],
+				effortRouting: { [Effort.High]: "family-high" },
+			},
+		});
+		// `family-high` is the routed wire id but is absent from the per-wire map.
+		const route = resolveModelRoute(routed, Effort.High);
+		expect(route.wireModelId).toBe("family-high");
+		expect(route.vendorInput).toEqual(["text", "image", "audio"]);
+		// The default fallback preserves audio support an empty set would drop.
+		expect(route.input).toContain("audio");
+	});
 });

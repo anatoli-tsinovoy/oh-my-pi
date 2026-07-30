@@ -54,6 +54,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
  AssistantMessage,
+ AudioContent,
  CodexCompactionContext,
  ImageContent,
  MediaContent,
@@ -75,6 +76,7 @@ import type {
  ToolResultMessage,
  UsageReport,
  UserMessage,
+ VideoContent,
 } from "@oh-my-pi/pi-ai";
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -6089,7 +6091,7 @@ export class AgentSession {
  async #promptWithMessage(
   message: AgentMessage,
   expandedText: string,
-  options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
+  options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck" | "attachments"> & {
    prependMessages?: AgentMessage[];
    skipPostPromptRecoveryWait?: boolean;
    acceptTerminalEmptyStop?: boolean;
@@ -6217,6 +6219,7 @@ export class AgentSession {
      expandedText,
      options?.images,
      beforeAgentStartSystemPrompt,
+     options?.attachments,
     );
     if (result?.messages) {
      const promptAttribution: "user" | "agent" | undefined =
@@ -6963,7 +6966,7 @@ export class AgentSession {
   // Normalize content to text string + optional images
   let text: string;
   let images: ImageContent[] | undefined;
-  let attachments: MediaContent[] | undefined;
+  let attachments: (AudioContent | VideoContent)[] | undefined;
 
   if (typeof content === "string") {
    text = content;

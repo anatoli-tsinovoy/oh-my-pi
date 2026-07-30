@@ -48,8 +48,23 @@ export function isImageBlock(value: unknown): value is { type: "image"; data: st
 	);
 }
 
+export function isMediaBlock(
+	value: unknown,
+): value is { type: "image" | "audio" | "video"; data: string; mimeType?: string } {
+	if (typeof value !== "object" || value === null) return false;
+	if (!("type" in value) || !("data" in value)) return false;
+	const { type, data } = value;
+	return (type === "image" || type === "audio" || type === "video") && typeof data === "string";
+}
+
 function isImageMimeType(value: unknown): value is string {
 	return typeof value === "string" && value.toLowerCase().startsWith("image/");
+}
+
+function isMediaMimeType(value: unknown): value is string {
+	if (typeof value !== "string") return false;
+	const lowered = value.toLowerCase();
+	return lowered.startsWith("image/") || lowered.startsWith("audio/") || lowered.startsWith("video/");
 }
 
 export function isImageDataPayload(value: unknown): value is { data: string; mimeType?: string } {
@@ -62,27 +77,42 @@ export function isImageDataPayload(value: unknown): value is { data: string; mim
 	);
 }
 
+export function isMediaDataPayload(value: unknown): value is { data: string; mimeType?: string } {
+	if (typeof value !== "object" || value === null || !("data" in value)) return false;
+	if (typeof value.data !== "string") return false;
+	if (isMediaBlock(value)) return true;
+	return "mimeType" in value && isMediaMimeType(value.mimeType);
+}
+
 /**
- * True when an image payload sits in a persistence position whose base64 is
+ * True when a media payload sits in a persistence position whose base64 is
  * externalized to the blob store instead of truncated as a generic string: a
- * `content` image block, an `images[]` entry, or a snapcompact frame under
- * `frames[]`. Shared by the persist path ({@link shouldExternalizeImagePayload})
+ * `content` media block, an `images[]` entry, or a snapcompact frame under
+ * `frames[]`. Shared by the persist path ({@link shouldExternalizeMediaPayload})
  * and the load path (`resolvePersistedBlobRefs`) so the two never drift and
  * strand a payload externalized on write but not resolved on read.
  */
+export function isExternalizableMediaPosition(
+	value: unknown,
+	key: string | undefined,
+): value is { data: string; mimeType?: string } {
+	if (!isMediaDataPayload(value)) return false;
+	return (key === TEXT_CONTENT_KEY && isMediaBlock(value)) || key === "images" || key === SNAPCOMPACT_FRAMES_KEY;
+}
+
+/** Compatibility alias for callers that predate audio/video media support. */
 export function isExternalizableImagePosition(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
-	if (!isImageDataPayload(value)) return false;
-	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images" || key === SNAPCOMPACT_FRAMES_KEY;
+	return isExternalizableMediaPosition(value, key);
 }
 
-function shouldExternalizeImagePayload(
+function shouldExternalizeMediaPayload(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
-	if (!isExternalizableImagePosition(value, key)) return false;
+	if (!isExternalizableMediaPosition(value, key)) return false;
 	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
 	return true;
 }
@@ -118,7 +148,7 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	) {
 		return { ...obj, result: externalizeImageDataSync(blobStore, obj.result) };
 	}
-	if (shouldExternalizeImagePayload(obj, key)) {
+	if (shouldExternalizeMediaPayload(obj, key)) {
 		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
 	}
 	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/

@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AudioContent, ImageContent, VideoContent } from "@oh-my-pi/pi-ai";
 import type { RestoredQueuedMessage } from "./agent-session-types";
 import { type CustomMessage, readQueueChipText } from "./messages";
 
@@ -13,15 +13,18 @@ function queuedTextContent(message: AgentMessage): string | undefined {
 	return undefined;
 }
 
-function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
+function queuedBlocksOfType<T extends ImageContent | AudioContent | VideoContent>(
+	message: AgentMessage,
+	type: T["type"],
+): T[] | undefined {
 	if (!("content" in message) || typeof message.content === "string") return undefined;
-	const images: ImageContent[] = [];
+	const blocks: T[] = [];
 	for (const part of message.content) {
-		if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
-			images.push(part);
+		if (part.type === type && typeof part.data === "string" && typeof part.mimeType === "string") {
+			blocks.push(part as T);
 		}
 	}
-	return images.length > 0 ? images : undefined;
+	return blocks.length > 0 ? blocks : undefined;
 }
 
 /** Whether a queued message should render in the queue UI. */
@@ -90,10 +93,18 @@ export function queueChipText(message: AgentMessage): string {
 	}
 	const text = queuedTextContent(message) ?? "";
 	if (text) return text;
-	return queuedImageContent(message) ? "[Image]" : "";
+	if (queuedBlocksOfType<ImageContent>(message, "image")) return "[Image]";
+	if (queuedBlocksOfType<AudioContent>(message, "audio")) return "[Audio]";
+	if (queuedBlocksOfType<VideoContent>(message, "video")) return "[Video]";
+	return "";
 }
 
 /** Converts a queued user message to editor-restorable content. */
 export function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
-	return { text: queueChipText(message), images: queuedImageContent(message) };
+	return {
+		text: queueChipText(message),
+		images: queuedBlocksOfType<ImageContent>(message, "image"),
+		audio: queuedBlocksOfType<AudioContent>(message, "audio"),
+		video: queuedBlocksOfType<VideoContent>(message, "video"),
+	};
 }

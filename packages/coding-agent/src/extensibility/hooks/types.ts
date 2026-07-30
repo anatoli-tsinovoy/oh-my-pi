@@ -282,6 +282,8 @@ export interface BeforeAgentStartEvent {
 	prompt: string;
 	/** Any images attached to the prompt */
 	images?: ImageContent[];
+	/** Audio/video attachments forwarded without image normalization. */
+	attachments?: MediaContent[];
 }
 
 export type {

@@ -110,14 +110,13 @@ export function resolveModelRoute<TApi extends Api>(
 	effort?: Effort,
 	explicitWireModelId?: string,
 ): ResolvedModelRoute {
-	const defaultWireModelId = model.requestModelId ?? model.id;
 	const wireModelId = explicitWireModelId ?? resolveWireModelId(model, effort);
 	const defaultVendorInput = model.vendorInput ?? model.input;
-	const vendorInput = model.vendorInputByWireModel
-		? (model.vendorInputByWireModel[wireModelId] ?? (wireModelId === defaultWireModelId ? defaultVendorInput : []))
-		: wireModelId === defaultWireModelId
-			? defaultVendorInput
-			: [];
+	// Bundled models predate per-wire vendor evidence (models.json was not
+	// regenerated for audio/video), so an unannotated routed id must fall back
+	// to the model's default vendor input rather than resolving to an empty
+	// capability set that silently drops supported media.
+	const vendorInput = model.vendorInputByWireModel?.[wireModelId] ?? defaultVendorInput;
 	return {
 		wireModelId,
 		vendorInput,

@@ -9,7 +9,13 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
-import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
+import type {
+	CredentialDisabledEvent,
+	ImageContent,
+	MediaContent,
+	Model,
+	ProviderResponseMetadata,
+} from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -1716,6 +1722,7 @@ export class ExtensionRunner {
 		prompt: string,
 		images: ImageContent[] | undefined,
 		systemPrompt: string[],
+		attachments?: MediaContent[],
 	): Promise<BeforeAgentStartCombinedResult | undefined> {
 		const ctx = this.createContext();
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
@@ -1731,6 +1738,7 @@ export class ExtensionRunner {
 					type: "before_agent_start",
 					prompt,
 					images,
+					attachments,
 					systemPrompt: currentSystemPrompt,
 				};
 				const handlerResult = await this.#runHandlerWithTimeout(

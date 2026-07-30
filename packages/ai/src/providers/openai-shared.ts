@@ -1741,9 +1741,16 @@ export function convertResponsesInputContent(
 			}
 			continue;
 		}
-		throw new AIError.ValidationError(
-			`${item.type} cannot be nested in Responses message content; routed media preflight must handle it`,
-		);
+		if (item.type === "audio" || item.type === "video") {
+			// Audio/video ride as top-level Responses items, not nested message
+			// content (see appendResponsesUserInput / buildOpenAiNativeHistory).
+			// Degrade to a modality placeholder rather than aborting the request,
+			// consistent with the remote-compaction history builder.
+			normalizedContent.push({
+				type: "input_text",
+				text: `[${item.type} attachment omitted]`,
+			} satisfies ResponseInputText);
+		}
 	}
 	if (omittedImages) {
 		normalizedContent.push({ type: "input_text", text: NON_VISION_IMAGE_PLACEHOLDER } satisfies ResponseInputText);

@@ -389,6 +389,24 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 // Cut point detection
 // ============================================================================
 
+const AUDIO_TOKEN_ESTIMATE = 8_000;
+const VIDEO_TOKEN_ESTIMATE = 24_000;
+
+/**
+ * Tokenizer.countMessage intentionally only models text and image blocks.
+ * Compaction still needs a bounded charge for lifecycle media so a large
+ * base64 payload cannot distort cut-point selection.
+ */
+function estimateMediaTokens(message: AgentMessage): number {
+	if (!("content" in message) || typeof message.content === "string" || !Array.isArray(message.content)) return 0;
+	let total = 0;
+	for (const block of message.content) {
+		if (block.type === "audio") total += AUDIO_TOKEN_ESTIMATE;
+		else if (block.type === "video") total += VIDEO_TOKEN_ESTIMATE;
+	}
+	return total;
+}
+
 function estimateEntriesTokens(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
@@ -399,7 +417,7 @@ function estimateEntriesTokens(
 	for (let i = startIndex; i < endIndex; i++) {
 		const msg = getMessageFromEntry(entries[i]);
 		if (msg) {
-			total += tokenizer.countMessage(msg);
+			total += tokenizer.countMessage(msg) + estimateMediaTokens(msg);
 		}
 	}
 	return total;
@@ -518,7 +536,7 @@ export function findCutPoint(
 		if (entry.type !== "message") continue;
 
 		// Estimate this message's size
-		const messageTokens = tokenizer.countMessage(entry.message);
+		const messageTokens = tokenizer.countMessage(entry.message) + estimateMediaTokens(entry.message);
 		accumulatedTokens += messageTokens;
 
 		// Check if we've exceeded the budget

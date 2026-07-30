@@ -5,7 +5,7 @@ import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./b
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
-import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
+import { isExternalizableMediaPosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import {
 	parseTitleSlotFromContent,
@@ -330,9 +330,12 @@ export async function visitEntriesFromFile(
 function hasImageUrl(value: unknown): value is { image_url: string } {
 	return typeof value === "object" && value !== null && "image_url" in value && typeof value.image_url === "string";
 }
+function shouldResolveMediaPayload(value: unknown, key: string | undefined): value is { data: string } {
+	return isExternalizableMediaPosition(value, key) && isBlobRef(value.data);
+}
 
 async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, key?: string): Promise<void> {
-	if (isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
+	if (shouldResolveMediaPayload(value, key)) {
 		value.data = await resolveImageData(blobStore, value.data);
 		return;
 	}

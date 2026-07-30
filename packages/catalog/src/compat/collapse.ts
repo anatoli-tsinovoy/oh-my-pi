@@ -838,6 +838,18 @@ function collapseWithTable<TSpec extends VariantSpecLike>(
 				return [id, [...(spec.vendorInput ?? spec.input)]];
 			}),
 		);
+		// Preserve-absent effort routes target a backing id discovery did not
+		// return (e.g. a bare-only family that keeps the absent -thinking
+		// target). Seed those routed ids from the primary present member so a
+		// selected effort does not resolve to an empty capability set and drop
+		// supported media.
+		const primaryVendorInput = [...(memberSpecs[0].vendorInput ?? memberSpecs[0].input)];
+		for (const effortKey in routing) {
+			const target = routing[effortKey as Effort | "off"];
+			if (target !== undefined && !(target in vendorInputByWireModel)) {
+				vendorInputByWireModel[target] = [...primaryVendorInput];
+			}
+		}
 
 		const input: InputModality[] = [];
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");

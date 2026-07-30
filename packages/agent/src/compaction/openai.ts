@@ -83,6 +83,8 @@ export const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE = prompt.render(contextWind
 const REMOTE_COMPACTION_REQUEST_OVERHEAD_TOKENS = 256;
 const REMOTE_COMPACTION_IMAGE_TOKEN_ESTIMATE = 12_000;
 const TOOL_RESULT_IMAGE_ATTACHMENT_TEXT = "Attached image(s) from tool result:";
+const TOOL_RESULT_AUDIO_ATTACHMENT_TEXT = "Attached audio from tool result:";
+const TOOL_RESULT_VIDEO_PLACEHOLDER_TEXT = "[video attachment omitted from tool result]";
 
 interface NormalizedEstimateValue {
 	value: unknown;
@@ -573,7 +575,11 @@ export function buildOpenAiNativeHistory(
 						input.push({ type: "input_audio", input_audio: { data: block.data, format } });
 						continue;
 					}
-					throw new Error("OpenAI remote compaction has no video encoder");
+					// OpenAI Responses has no video input encoder; record the
+					// attachment as an explicit placeholder so the compaction
+					// summary cannot silently forget it (and so a single video
+					// block no longer aborts the whole compaction).
+					contentBlocks.push({ type: "input_text", text: `[video attachment omitted: ${block.mimeType}]` });
 				}
 			}
 			flushContent();
@@ -710,7 +716,21 @@ export function buildOpenAiNativeHistory(
 
 		if (message.role === "toolResult") {
 			const normalized = normalizeResponsesToolCallId(message.toolCallId);
-			const { output, outputText } = encodeResponsesToolResultOutput(message, model, supportsImageDetailOriginal);
+			const hasAudio = message.content.some(block => block.type === "audio");
+			const hasVideo = message.content.some(block => block.type === "video");
+			const encodableMessage =
+				hasAudio || hasVideo
+					? {
+							...message,
+							content: message.content.filter(block => block.type === "text" || block.type === "image"),
+						}
+					: message;
+			const { output, outputText: encodedOutputText } = encodeResponsesToolResultOutput(
+				encodableMessage,
+				model,
+				supportsImageDetailOriginal,
+			);
+			const outputText = encodedOutputText || (hasAudio || hasVideo ? "(see attached media)" : "");
 			if (demotedComputerCallIds.has(normalized.callId)) {
 				const resultItem =
 					message.providerMetadata?.type === "computer"
@@ -762,6 +782,31 @@ export function buildOpenAiNativeHistory(
 				call_id: normalized.callId,
 				output,
 			});
+			const toolResultInput =
+				"toolResultInput" in model && Array.isArray(model.toolResultInput) ? model.toolResultInput : model.input;
+			if (hasAudio && toolResultInput.includes("audio")) {
+				input.push({
+					type: "message",
+					role: "user",
+					content: [{ type: "input_text", text: TOOL_RESULT_AUDIO_ATTACHMENT_TEXT }],
+				});
+				for (const block of message.content) {
+					if (block.type !== "audio") continue;
+					const format = openAIAudioFormat(block.mimeType);
+					if (!format) continue;
+					input.push({ type: "input_audio", input_audio: { data: block.data, format } });
+				}
+			}
+			if (hasVideo) {
+				// OpenAI Responses has no video encoder; record the attachment so
+				// the compaction summary cannot silently lose tool output that
+				// carried video.
+				input.push({
+					type: "message",
+					role: "user",
+					content: [{ type: "input_text", text: TOOL_RESULT_VIDEO_PLACEHOLDER_TEXT }],
+				});
+			}
 		}
 
 		msgIndex++;

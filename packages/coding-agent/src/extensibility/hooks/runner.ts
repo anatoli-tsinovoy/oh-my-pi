@@ -2,7 +2,7 @@
  * Hook runner - executes hooks and manages their lifecycle.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { SessionManager } from "../../session/session-manager";
 import { createNoOpUIContext } from "../utils";
@@ -391,7 +391,8 @@ export class HookRunner {
 	 */
 	async emitBeforeAgentStart(
 		prompt: string,
-		images?: import("@oh-my-pi/pi-ai").ImageContent[],
+		images?: ImageContent[],
+		attachments?: MediaContent[],
 	): Promise<BeforeAgentStartEventResult | undefined> {
 		const ctx = this.#createContext();
 		let result: BeforeAgentStartEventResult | undefined;
@@ -402,7 +403,12 @@ export class HookRunner {
 
 			for (const handler of handlers) {
 				try {
-					const event: BeforeAgentStartEvent = { type: "before_agent_start", prompt, images };
+					const event: BeforeAgentStartEvent = {
+						type: "before_agent_start",
+						prompt,
+						images,
+						attachments,
+					};
 					const handlerResult = await handler(event, ctx);
 
 					// Take the first message returned

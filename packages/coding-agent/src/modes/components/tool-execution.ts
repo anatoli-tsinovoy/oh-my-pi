@@ -1504,6 +1504,21 @@ export class ToolExecutionComponent extends Container {
 			output = output ? `${output}\n${imageIndicators}` : imageIndicators;
 		}
 
+		const mediaBlocks =
+			this.#result.content?.filter(
+				(c: { type: string }): c is { type: "audio" | "video"; mimeType?: string } =>
+					c.type === "audio" || c.type === "video",
+			) ?? [];
+		if (mediaBlocks.length > 0) {
+			// The terminal cannot play audio/video, so a media-only tool result
+			// otherwise renders with no output at all even though the model
+			// received the attachment. Surface a modality marker instead.
+			const mediaIndicators = mediaBlocks
+				.map(block => `[${block.type} attachment${block.mimeType ? `: ${block.mimeType}` : ""}]`)
+				.join("\n");
+			output = output ? `${output}\n${mediaIndicators}` : mediaIndicators;
+		}
+
 		return output;
 	}
 
