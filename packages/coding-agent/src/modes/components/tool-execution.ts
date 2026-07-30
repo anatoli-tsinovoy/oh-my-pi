@@ -1514,7 +1514,7 @@ export class ToolExecutionComponent extends Container {
 			// otherwise renders with no output at all even though the model
 			// received the attachment. Surface a modality marker instead.
 			const mediaIndicators = mediaBlocks
-				.map(block => `[${block.type} attachment${block.mimeType ? `: ${block.mimeType}` : ""}]`)
+				.map(block => `[${block.type} attachment${block.mimeType ? `: ${sanitizeText(block.mimeType)}` : ""}]`)
 				.join("\n");
 			output = output ? `${output}\n${mediaIndicators}` : mediaIndicators;
 		}

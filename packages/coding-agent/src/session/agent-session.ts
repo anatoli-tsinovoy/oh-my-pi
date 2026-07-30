@@ -1481,6 +1481,7 @@ export class AgentSession {
    settings: this.settings,
    modelRegistry: this.#modelRegistry,
    model: () => this.model,
+   activeRouteModel: () => this.#models.activeRouteModel,
    sessionId: () => this.sessionId,
    localProtocolOptions: () => this.#localProtocolOptions(),
    transformContext: (messages, signal) => this.#transformContext(messages, signal),
@@ -5721,7 +5722,7 @@ export class AgentSession {
  }
 
  #normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
-  return normalizeModelContextImages(images, { model: this.model });
+  return normalizeModelContextImages(images, { model: this.#models.activeRouteModel ?? this.model });
  }
 
  #buildImageDescriptionNotice(
