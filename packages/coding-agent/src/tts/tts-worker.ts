@@ -1,7 +1,9 @@
 import { createRequire } from "node:module";
 import type { ProgressInfo, RawAudio } from "@huggingface/transformers";
-import { ensureRuntimeInstalled, getTinyModelsCacheDir, resolveRuntimeModule } from "@oh-my-pi/pi-utils";
+import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils/dirs";
+import { ensureRuntimeInstalled, resolveRuntimeModule } from "@oh-my-pi/pi-utils/runtime-install";
 import {
+	configureTransformers as configureSharedTransformers,
 	errorMessage,
 	errorText,
 	installSharpStubResolver,
@@ -10,17 +12,12 @@ import {
 	sendLog,
 	sendProgress,
 	TRANSFORMERS_PACKAGE,
+	withAndroidWebRuntime,
 } from "../subprocess/worker-runtime";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "../tiny/device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "../tiny/dtype";
 import { getTtsLocalModelSpec, resolveTtsVoice, type TtsLocalModelKey, type TtsLocalModelSpec } from "./models";
-import {
-	getTtsRuntimeDir,
-	KOKORO_PACKAGE,
-	KOKORO_VERSION,
-	ONNXRUNTIME_NODE_PACKAGE,
-	ONNXRUNTIME_NODE_VERSION,
-} from "./runtime";
+import { getTtsRuntimeDir, KOKORO_PACKAGE, KOKORO_VERSION, ttsRuntimePlan } from "./runtime";
 import type { TtsTransport, TtsWorkerInbound } from "./tts-protocol";
 
 const TTS_TASK = "text-to-speech";
@@ -67,10 +64,16 @@ interface TransformersEnv {
 		backends?: {
 			onnx?: {
 				logLevel?: unknown;
+				wasm?: { numThreads?: number; proxy?: boolean; wasmPaths?: { wasm: string } };
 			};
 		};
+		useCustomCache?: boolean;
+		customCache?: {
+			match(request: string): Promise<Response | undefined>;
+			put(request: string, response: Response): Promise<void>;
+		};
 	};
-	LogLevel?: {
+	LogLevel: {
 		ERROR: unknown;
 	};
 }
@@ -109,10 +112,8 @@ function toKokoroDevice(device: TinyModelDevice): KokoroDevice {
 	return "cpu";
 }
 
-function configureTransformers(transformers: TransformersEnv): void {
-	transformers.env.cacheDir = getTinyModelsCacheDir();
-	transformers.env.allowLocalModels = false;
-	transformers.env.logLevel = transformers.LogLevel?.ERROR ?? "error";
+function configureTtsTransformers(transformers: TransformersEnv, androidWasm?: string): void {
+	configureSharedTransformers(transformers, androidWasm);
 	if (transformers.env.backends?.onnx) transformers.env.backends.onnx.logLevel = "error";
 }
 
@@ -132,12 +133,13 @@ function loadKokoroRuntime(
 	modelKey: TtsLocalModelKey,
 ): Promise<KokoroRuntime> {
 	return kokoroRuntime.load(async () => {
+		const plan = ttsRuntimePlan();
 		const runtimeDir = await ensureRuntimeInstalled({
 			runtimeDir: getTtsRuntimeDir(),
 			install: {
 				dependencies: { [KOKORO_PACKAGE]: KOKORO_VERSION },
-				overrides: { [ONNXRUNTIME_NODE_PACKAGE]: ONNXRUNTIME_NODE_VERSION },
-				trustedDependencies: [ONNXRUNTIME_NODE_PACKAGE],
+				overrides: plan.overrides,
+				trustedDependencies: plan.trustedDependencies,
 			},
 			probePackage: KOKORO_PACKAGE,
 			onPhase: phase =>
@@ -150,11 +152,24 @@ function loadKokoroRuntime(
 		const nodeModules = await installSharpStubResolver(runtimeDir);
 		const kokoroEntry = resolveRuntimeModule(nodeModules, KOKORO_PACKAGE);
 		if (!kokoroEntry) throw new Error(`Unable to resolve ${KOKORO_PACKAGE} in runtime at ${nodeModules}`);
-		const transformersEntry = resolveRuntimeModule(nodeModules, TRANSFORMERS_PACKAGE);
-		if (!transformersEntry) throw new Error(`Unable to resolve ${TRANSFORMERS_PACKAGE} in runtime at ${nodeModules}`);
+		const transformersEntry = resolveRuntimeModule(nodeModules, plan.transformersSpecifier);
+		if (!transformersEntry) throw new Error(`Unable to resolve ${plan.transformersSpecifier} in runtime at ${nodeModules}`);
+		if (process.platform === "android") {
+			await installSharpStubResolver(runtimeDir, { [TRANSFORMERS_PACKAGE]: transformersEntry });
+		}
 		const runtimeRequire = createRequire(kokoroEntry);
-		configureTransformers(runtimeRequire(transformersEntry) as TransformersEnv);
-		return runtimeRequire(kokoroEntry) as KokoroRuntime;
+		const android = process.platform === "android";
+		const androidWasm = android
+			? resolveRuntimeModule(nodeModules, "onnxruntime-web/dist/ort-wasm-simd-threaded.wasm")
+			: undefined;
+		if (android && !androidWasm) throw new Error(`Unable to resolve onnxruntime-web runtime at ${nodeModules}`);
+		const transformers = android
+			? withAndroidWebRuntime(() => runtimeRequire(transformersEntry) as TransformersEnv)
+			: (runtimeRequire(transformersEntry) as TransformersEnv);
+		configureTtsTransformers(transformers, androidWasm ?? undefined);
+		return android
+			? withAndroidWebRuntime(() => runtimeRequire(kokoroEntry) as KokoroRuntime)
+			: (runtimeRequire(kokoroEntry) as KokoroRuntime);
 	});
 }
 
