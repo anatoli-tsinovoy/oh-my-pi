@@ -1237,6 +1237,13 @@ describe("ACP agent", () => {
 				speeds: Array<{ value: unknown }>;
 			};
 		};
+		const expectedSttDefault = process.platform === "android" ? "local/whisper-base" : "local/parakeet-tdt-0.6b-v3";
+		const expectedSttModels = [
+			"local/whisper-base",
+			"local/whisper-small",
+			"local/whisper-large-v3-turbo",
+			...(process.platform === "android" ? [] : ["local/parakeet-tdt-0.6b-v3"]),
+		];
 
 		expect(result).toMatchObject({
 			settings: {
@@ -1248,14 +1255,14 @@ describe("ACP agent", () => {
 				speechSpeed: "speech.speed",
 			},
 			defaults: {
-				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				speechToTextModel: expectedSttDefault,
 				textToSpeechModel: "local/kokoro",
 				voice: "af_heart",
 				speed: 1,
 			},
 			speechToText: {
 				setting: "modelRoles.dictation",
-				defaultValue: "local/parakeet-tdt-0.6b-v3",
+				defaultValue: expectedSttDefault,
 			},
 			textToSpeech: {
 				modelSetting: "modelRoles.speech",
@@ -1269,12 +1276,7 @@ describe("ACP agent", () => {
 				speedRange: { min: 0.5, max: 2.5 },
 			},
 		});
-		expect(result.speechToText.models.map(model => model.value)).toEqual([
-			"local/whisper-base",
-			"local/whisper-small",
-			"local/whisper-large-v3-turbo",
-			"local/parakeet-tdt-0.6b-v3",
-		]);
+		expect(result.speechToText.models.map(model => model.value)).toEqual(expectedSttModels);
 		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 		// Speed presets are numbers so clients can write them straight into the numeric settings.
