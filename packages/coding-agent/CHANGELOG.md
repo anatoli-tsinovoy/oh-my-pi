@@ -345,6 +345,7 @@
 - Fixed session saving on Windows to avoid UI stalls caused by repeated session-file access.
 - Fixed automatic chart selection so generated charts use compatible data and chart types.
 - Fixed `bash` previews for `env -i` commands so they display the requested command rather than generated shell setup code.
+- Added local Android speech recognition through ONNX WASM.
 
 ## [18.18.9] - 2026-11-11
 
