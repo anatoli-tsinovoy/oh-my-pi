@@ -14,7 +14,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use opus::{Application, Channels, Decoder, Encoder};
 use parking_lot::Mutex;
 use tokio::{sync::watch, task::JoinHandle};
 use webrtc::{
@@ -44,6 +43,7 @@ use webrtc::{
 use crate::{
 	VoiceResult,
 	audio::{PlaybackStream, PlaybackWriter},
+	codec::{Application, Channels, Decoder, Encoder},
 };
 
 const DATA_CHANNEL_LABEL: &str = "oai-events";
