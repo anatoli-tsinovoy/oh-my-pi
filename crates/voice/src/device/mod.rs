@@ -1,12 +1,12 @@
-//! In-house default-device audio backends.
+//! Default-device audio backends.
 //!
-//! One backend per platform, each implementing the same two devices against
-//! the OS audio API directly: `CoreAudio` `AudioQueue` on macOS, shared-mode
-//! WASAPI with automatic format conversion on Windows, and the `PulseAudio`
-//! simple API with an ALSA fallback (both loaded via `dlopen`) on Linux.
-//! Every backend delegates format conversion, channel mixing, and resampling
-//! to the OS so the engine keeps a single mono `f32` contract at the
-//! requested logical sample rate.
+//! One backend per platform, each implementing the same two devices: bundled
+//! miniaudio/OpenSL ES on Android, `CoreAudio` `AudioQueue` on macOS,
+//! shared-mode WASAPI with automatic format conversion on Windows, and the
+//! `PulseAudio` simple API with an ALSA fallback (both loaded via `dlopen`) on
+//! Linux. Every backend delegates format conversion, channel mixing, and
+//! resampling to its platform audio implementation so the engine keeps a
+//! single mono `f32` contract at the requested logical sample rate.
 //!
 //! # Contract
 //! - [`PlaybackDevice::start`] opens the default speaker and invokes `fill`
@@ -25,6 +25,11 @@
 //!   stops from callbacks; the carve-out exists for contract soundness, not for
 //!   use. Dropping a device stops it.
 
+#[cfg(target_os = "android")]
+mod android;
+#[cfg(target_os = "android")]
+use android as imp;
+
 #[cfg(target_os = "macos")]
 mod coreaudio;
 #[cfg(target_os = "macos")]
@@ -40,9 +45,19 @@ mod linux;
 #[cfg(target_os = "linux")]
 use linux as imp;
 
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(
+	target_os = "android",
+	target_os = "macos",
+	target_os = "windows",
+	target_os = "linux",
+)))]
 mod unsupported;
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(not(any(
+	target_os = "android",
+	target_os = "macos",
+	target_os = "windows",
+	target_os = "linux",
+)))]
 use unsupported as imp;
 
 use crate::VoiceResult;
@@ -62,6 +77,7 @@ pub struct DeviceConfig {
 	pub period_ms:   u32,
 }
 
+#[cfg(not(target_os = "android"))]
 impl DeviceConfig {
 	/// Samples per callback period at the logical rate (never zero).
 	pub fn period_samples(self) -> usize {
