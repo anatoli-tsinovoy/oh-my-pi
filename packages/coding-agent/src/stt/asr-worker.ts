@@ -87,6 +87,7 @@ interface TransformersRuntime {
 			device: TinyModelDevice;
 			dtype: TinyModelDtype;
 			progress_callback: (info: ProgressInfo) => void;
+			session_options?: { graphOptimizationLevel: "disabled" };
 		},
 	) => Promise<AutomaticSpeechRecognitionPipeline>;
 }
@@ -130,6 +131,7 @@ async function loadPipelineOnDevice(
 		device,
 		dtype: sttModelDtypeOverride ?? spec.dtype,
 		progress_callback: info => sendProgress(transport, requestId, modelKey, info),
+		session_options: process.platform === "android" ? { graphOptimizationLevel: "disabled" } : undefined,
 	});
 }
 
