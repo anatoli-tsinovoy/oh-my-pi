@@ -156,7 +156,7 @@ class OnnxModel {
 	): Promise<{ generator: TextGenerationPipeline; device: TinyOnnxDevice }> {
 		const devices = tinyModelDeviceLoadOrder(this.#devicePreference);
 		if (devices[0] !== this.#devicePreference.device) {
-			logger.warn("tiny-model: requested device is not an ONNX provider usable in the worker; using CPU", {
+			logger.warn("tiny-model: requested device is unavailable in this worker; using compatible backend", {
 				modelKey: this.#modelKey,
 				requestedDevice: this.#devicePreference.device,
 				device: devices[0],
