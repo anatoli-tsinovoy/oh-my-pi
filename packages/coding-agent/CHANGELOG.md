@@ -6,6 +6,7 @@
 
 - Added standalone Android ARM64/Termux executables bundling Bun 1.4.4, with Linux cross-build support.
 - Added local Android speech recognition through ONNX WASM.
+- Added local Android text-to-speech through ONNX WASM.
 
 ## [18.18.9] - 2026-11-11
 
