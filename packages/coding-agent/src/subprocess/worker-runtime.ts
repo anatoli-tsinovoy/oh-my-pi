@@ -253,17 +253,6 @@ export async function ensureOnnxRuntimeCudaProviders(
 	);
 }
 
-/**
- * Prepare a freshly-installed compiled runtime for loading and return the
- * absolute entrypoint of `packageName` to `require`.
- */
-async function prepareCompiledRuntime(runtimeDir: string, packageName: string): Promise<string> {
-	const nodeModules = await installSharpStubResolver(runtimeDir);
-	const entry = resolveRuntimeModule(nodeModules, packageName);
-	if (!entry) throw new Error(`Unable to resolve ${packageName} in compiled runtime at ${nodeModules}`);
-	return entry;
-}
-
 // ── Transformers version resolution ─────────────────────────────────
 
 function resolveTransformersVersionSpec(): string {
@@ -531,7 +520,7 @@ function configureTransformers<T extends ConfigurableTransformers>(
 	transformers.env.allowLocalModels = false;
 	transformers.env.logLevel = transformers.LogLevel.ERROR;
 	if (androidWasm) {
-		const onnx = (transformers.env.backends ??= {}).onnx ??= {};
+		const onnx = ((transformers.env.backends ??= {}).onnx ??= {});
 		const wasm = (onnx.wasm ??= {});
 		wasm.numThreads = 1;
 		wasm.proxy = false;

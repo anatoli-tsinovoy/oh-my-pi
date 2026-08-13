@@ -17,6 +17,17 @@ async function touch(file: string): Promise<void> {
 	await fs.writeFile(file, "x");
 }
 
+async function isSttModelCachedOnSupportedPlatform(key: string): Promise<boolean> {
+	const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+	if (!platformDescriptor) throw new Error("process.platform descriptor is unavailable");
+	Object.defineProperty(process, "platform", { ...platformDescriptor, value: "linux" });
+	try {
+		return await downloader.isSttModelCached(key);
+	} finally {
+		Object.defineProperty(process, "platform", platformDescriptor);
+	}
+}
+
 describe("isSttModelCached completeness", () => {
 	let state: SettingsTestState | undefined;
 	let tmp = "";
@@ -55,11 +66,13 @@ describe("isSttModelCached completeness", () => {
 		await touch(path.join(repoDir, "encoder.int8.onnx"));
 		await touch(path.join(repoDir, "decoder.int8.onnx"));
 		await touch(path.join(repoDir, "joiner.int8.onnx"));
-		// tokens.txt still missing.
-		expect(await downloader.isSttModelCached("parakeet")).toBe(false);
+		// tokens.txt still missing. Run this seam as a supported sherpa platform:
+		// Android intentionally resolves Parakeet to Whisper, but must not erase
+		// coverage of the provider's file-completeness contract.
+		expect(await isSttModelCachedOnSupportedPlatform("parakeet")).toBe(false);
 
 		await touch(path.join(repoDir, "tokens.txt"));
-		expect(await downloader.isSttModelCached("parakeet")).toBe(true);
+		expect(await isSttModelCachedOnSupportedPlatform("parakeet")).toBe(true);
 	});
 });
 
