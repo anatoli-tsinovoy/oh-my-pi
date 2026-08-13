@@ -5,6 +5,8 @@
 ### Added
 
 - Added standalone Android ARM64/Termux executables bundling Bun 1.4.4, with Linux cross-build support.
+- Added local Android speech recognition through ONNX WASM.
+- Added Android support for local CPU Phonon 31M text-to-speech (`local/phonon-31m`), with model checkpoints downloaded on demand.
 - Computer `el.setValue(75)` now writes the number as `"75"` instead of refusing a non-string; `NaN`, `Infinity`, booleans and objects are still refused, as are a whole number past 2^53 and a number that prints with an exponent, which are passed as text in digits instead ([#19405](https://github.com/can1357/oh-my-pi/pull/19405) by [@will-bogusz](https://github.com/will-bogusz))
 - Added a report of native windows to browser results on macOS for visible managed browsers, spawned Chromium browsers and a loopback relay: a `<select>` menu, colour or date picker, or a print, save, sign-in, passkey or permission sheet or bubble a call raised over its tab is named with its `computer.window()` id while the browser's tab list shows that tab in front of its window, by the next call when it shows just after the call returned, and on failed calls too; connected CDP endpoints, remote relays and page-backed popup windows are excluded ([#18925](https://github.com/can1357/oh-my-pi/pull/18925) by [@will-bogusz](https://github.com/will-bogusz))
 
@@ -345,7 +347,6 @@
 - Fixed session saving on Windows to avoid UI stalls caused by repeated session-file access.
 - Fixed automatic chart selection so generated charts use compatible data and chart types.
 - Fixed `bash` previews for `env -i` commands so they display the requested command rather than generated shell setup code.
-- Added local Android speech recognition through ONNX WASM.
 
 ## [18.18.9] - 2026-11-11
 

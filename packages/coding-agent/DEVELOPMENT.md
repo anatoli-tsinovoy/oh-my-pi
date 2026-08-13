@@ -56,6 +56,23 @@ omp --version
 `$PREFIX/bin` is already on Termux's `PATH`. Copy the executable into Termux's
 private storage rather than running it from shared Android storage.
 
+On a Termux ARM64 phone running Android 9 (API 28) or later, install and start
+PulseAudio before testing speech. The same PulseAudio server handles microphone
+capture and playback:
+
+```sh
+pkg install pulseaudio
+pulseaudio --start
+```
+
+Dictation is disabled by default (`stt.enabled: false`). Enable Speech-to-Text
+in settings, then run `omp` and hold/release Space (the default
+`app.stt.pushToTalk` binding) to dictate. For TTS, run
+`omp say "Android speech test"`. Dictation defaults to `local/whisper-base`
+through ONNX WASM. TTS defaults to `local/phonon-31m`, using upstream native
+Phonon 31M on CPU (not Kokoro or TTS WASM). Model checkpoints download on demand,
+so first use needs network access.
+
 Cross-compilation does not verify Android/Termux or seccomp compatibility;
 validate the executable on a native non-root Termux device before publishing.
 
