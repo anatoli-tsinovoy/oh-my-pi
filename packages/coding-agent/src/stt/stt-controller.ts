@@ -167,13 +167,18 @@ export class STTController {
 			// recording: when the weights are already cached, start now and warm the
 			// model in the background — the stream/transcribe paths load it on demand
 			// (memoized in the worker) and it is hot by the time recording stops.
-			// Only a genuine first-use download blocks (its progress shows in the
-			// download HUD), so we never record silently against missing weights.
+			// Only a genuine first-use download blocks, with explicit progress.
+			// Cached-model warmup must not clear an unrelated status line.
+			let wroteStatus = false;
 			if (await isSttModelCached(modelKey)) {
 				this.#warmModel(modelKey);
 			} else {
-				await downloadSttModel(modelKey);
+				await downloadSttModel(modelKey, progress => {
+					wroteStatus = true;
+					options.showStatus(`Downloading speech model ${progress.label} (${progress.percent}%)`);
+				});
 			}
+			if (wroteStatus) options.showStatus("");
 			this.#resolvedModelKey = modelKey;
 			return modelKey;
 		} catch (err) {

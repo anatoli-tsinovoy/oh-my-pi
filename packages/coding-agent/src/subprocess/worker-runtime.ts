@@ -253,17 +253,6 @@ export async function ensureOnnxRuntimeCudaProviders(
 	);
 }
 
-/**
- * Prepare a freshly-installed compiled runtime for loading and return the
- * absolute entrypoint of `packageName` to `require`.
- */
-async function prepareCompiledRuntime(runtimeDir: string, packageName: string): Promise<string> {
-	const nodeModules = await installSharpStubResolver(runtimeDir);
-	const entry = resolveRuntimeModule(nodeModules, packageName);
-	if (!entry) throw new Error(`Unable to resolve ${packageName} in compiled runtime at ${nodeModules}`);
-	return entry;
-}
-
 // ── Transformers version resolution ─────────────────────────────────
 
 function resolveTransformersVersionSpec(): string {
@@ -274,15 +263,20 @@ function resolveTransformersVersionSpec(): string {
 	const versionSpec =
 		manifest.optionalDependencies?.[TRANSFORMERS_PACKAGE] ?? manifest.dependencies?.[TRANSFORMERS_PACKAGE];
 	if (!versionSpec) throw new Error(`${TRANSFORMERS_PACKAGE} is missing from package.json optionalDependencies`);
-	return COMPILED_TRANSFORMERS_VERSION ?? versionSpec;
+	if (!versionSpec.startsWith("catalog:")) return versionSpec;
+	if (COMPILED_TRANSFORMERS_VERSION) return COMPILED_TRANSFORMERS_VERSION;
+	const installed = sourceRequire(`${TRANSFORMERS_PACKAGE}/package.json`) as { version: string };
+	return installed.version;
 }
 
 let cachedTransformersVersionSpec: string | undefined;
 
 /**
- * Lazily resolve and memoize the Transformers version spec. Compiled binaries
- * embed the exact build dependency version; source and published-package runs
- * use the concrete compatible range from this package's manifest.
+ * Lazily resolve (and memoize) the Transformers version spec. In the `catalog:`
+ * case {@link resolveTransformersVersionSpec} `require`s the installed
+ * `@huggingface/transformers/package.json`, so it is only ever touched on the
+ * side-runtime install path — loading a worker (smoke-test ping, online path)
+ * never triggers the transformers resolve/install dance.
  */
 export function getTransformersVersionSpec(): string {
 	cachedTransformersVersionSpec ??= resolveTransformersVersionSpec();
@@ -532,7 +526,7 @@ function configureTransformers<T extends ConfigurableTransformers>(
 	transformers.env.allowLocalModels = false;
 	transformers.env.logLevel = transformers.LogLevel.ERROR;
 	if (androidWasm) {
-		const onnx = (transformers.env.backends ??= {}).onnx ??= {};
+		const onnx = ((transformers.env.backends ??= {}).onnx ??= {});
 		const wasm = (onnx.wasm ??= {});
 		wasm.numThreads = 1;
 		wasm.proxy = false;
