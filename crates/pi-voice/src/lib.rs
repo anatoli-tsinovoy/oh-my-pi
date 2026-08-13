@@ -19,6 +19,7 @@
 //! worker threads and must not block.
 
 pub mod audio;
+pub(crate) mod codec;
 pub(crate) mod device;
 pub mod live;
 
