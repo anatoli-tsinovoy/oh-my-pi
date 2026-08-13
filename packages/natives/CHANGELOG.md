@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management; clipboard integration remains Termux API based.
 
 ## [18.1.15] - 2026-09-08
 

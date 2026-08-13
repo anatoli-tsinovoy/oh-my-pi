@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { compileCodingAgent } from "./compile-binary";
@@ -73,6 +74,22 @@ async function runCommand(
 	}
 }
 
+async function buildAndroidLauncher(outputPath: string): Promise<void> {
+	await runCommand(["bun", "run", "gen:bundle"]);
+
+	// Keep the Android artifact on the canonical shell-launcher path. Termux
+	// needs a different interpreter path because it does not provide /bin/sh;
+	// all symlink resolution, cwd isolation, and preload handling stay shared.
+	const canonicalLauncherPath = path.join(packageDir, "scripts", "omp");
+	const canonicalLauncher = await Bun.file(canonicalLauncherPath).text();
+	const launcher = canonicalLauncher.replace(/^#![^\n]*\n/, "#!/data/data/com.termux/files/usr/bin/sh\n");
+	if (launcher === canonicalLauncher) {
+		throw new Error(`Canonical launcher has no shebang: ${canonicalLauncherPath}`);
+	}
+	await Bun.write(outputPath, launcher);
+	await fs.chmod(outputPath, 0o755);
+}
+
 async function main(): Promise<void> {
 	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
 	const shouldAdhocSign = process.platform === "darwin" && !crossBuild && Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
@@ -92,18 +109,22 @@ async function main(): Promise<void> {
 			crossBuild ? { ...Bun.env, TARGET_PLATFORM: crossBuild.platform, TARGET_ARCH: crossBuild.arch } : Bun.env,
 		);
 		try {
-			await compileCodingAgent({
-				repoRoot,
-				entrypoint: path.join(packageDir, "src", "cli.ts"),
-				outfile: outputPath,
-				transformersVersion,
-				target: crossBuild?.target,
-				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
-				skipBuiltinCodesign: shouldAdhocSign,
-			});
+			if (process.platform === "android" && !crossBuild) {
+				await buildAndroidLauncher(outputPath);
+			} else {
+				await compileCodingAgent({
+					repoRoot,
+					entrypoint: path.join(packageDir, "src", "cli.ts"),
+					outfile: outputPath,
+					transformersVersion,
+					target: crossBuild?.target,
+					executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
+					skipBuiltinCodesign: shouldAdhocSign,
+				});
 
-			if (shouldAdhocSign) {
-				await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
+				if (shouldAdhocSign) {
+					await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
+				}
 			}
 		} finally {
 			await runCommand(["bun", "--cwd=../natives", "run", "gen:native:reset"]);
