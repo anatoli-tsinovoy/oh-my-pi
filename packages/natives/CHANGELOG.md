@@ -1,6 +1,13 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management; clipboard integration remains Termux API based.
+
+### Fixed
+
+- Android native-load failures now report attempted addon paths and rebuild guidance instead of incorrectly reporting an unsupported platform.
 
 ### Added
 - Added a `refuseMenu` option to `click`, `drag` and `holdMouse`: a macOS background left click on a menu button or popup button, or a drag or hold starting on one, throws `BackgroundUnavailable` before anything is sent ([#15191](https://github.com/can1357/oh-my-pi/pull/15191) by [@will-bogusz](https://github.com/will-bogusz))
