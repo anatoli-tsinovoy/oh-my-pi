@@ -303,7 +303,8 @@ interface TransformersCache {
 interface TransformersWasmEnvironment {
 	numThreads?: number;
 	proxy?: boolean;
-	wasmPaths?: { wasm: string };
+	wasmBinary?: Uint8Array;
+	wasmPaths?: { mjs: string };
 }
 
 /** The subset of the Transformers.js module surface {@link configureTransformers} touches. */
@@ -523,7 +524,7 @@ function createTransformersFileCache(cacheDir: string): TransformersCache {
 
 function configureTransformers<T extends ConfigurableTransformers>(
 	transformers: T,
-	androidWasm?: string,
+	androidWasm?: { binary: Uint8Array; module: string },
 ): T {
 	const cacheDir = getTinyModelsCacheDir();
 	transformers.env.cacheDir = cacheDir;
@@ -534,7 +535,8 @@ function configureTransformers<T extends ConfigurableTransformers>(
 		const wasm = (onnx.wasm ??= {});
 		wasm.numThreads = 1;
 		wasm.proxy = false;
-		wasm.wasmPaths = { wasm: androidWasm };
+		wasm.wasmBinary = androidWasm.binary;
+		wasm.wasmPaths = { mjs: androidWasm.module };
 		transformers.env.useCustomCache = true;
 		transformers.env.customCache = createTransformersFileCache(cacheDir);
 	}
@@ -616,12 +618,19 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 		if (!entry) throw new Error(`Unable to resolve ${plan.entrySpecifier} in runtime at ${nodeModules}`);
 		const require_ = createRequire(entry);
 		const android = process.platform === "android";
-		const androidWasm = android
-			? resolveRuntimeModule(nodeModules, "onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm")
+		const androidWasmPath = android
+			? resolveRuntimeModule(nodeModules, "onnxruntime-web/ort-wasm-simd-threaded.wasm")
 			: undefined;
-		if (android && !androidWasm) {
+		const androidWasmModule = android
+			? resolveRuntimeModule(nodeModules, "onnxruntime-web/ort-wasm-simd-threaded.mjs")
+			: undefined;
+		if (android && (!androidWasmPath || !androidWasmModule)) {
 			throw new Error(`Unable to resolve onnxruntime-web runtime at ${nodeModules}`);
 		}
+		const androidWasm =
+			androidWasmPath && androidWasmModule
+				? { binary: await Bun.file(androidWasmPath).bytes(), module: androidWasmModule }
+				: undefined;
 		const loaded = android ? loadAndroidTransformers<T>(require_, entry) : (require_(entry) as T);
 		return attachTransformersRuntimeMetadata(configureTransformers(loaded, androidWasm ?? undefined), {
 			__ompRuntimeNodeModules: nodeModules,
