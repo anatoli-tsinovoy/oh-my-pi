@@ -164,11 +164,14 @@ export function replayCachedReady<K, M>(
  * runtime's bare requires resolve against its own `node_modules`. Returns the
  * runtime's `node_modules` directory.
  */
-export async function installSharpStubResolver(runtimeDir: string): Promise<string> {
+export async function installSharpStubResolver(
+	runtimeDir: string,
+	stubs: Record<string, string> = {},
+): Promise<string> {
 	const nodeModules = path.join(runtimeDir, "node_modules");
 	const sharpStub = path.join(runtimeDir, "omp-sharp-stub.cjs");
 	await Bun.write(sharpStub, "module.exports = {};\n");
-	installRuntimeModuleResolver({ runtimeNodeModules: nodeModules, stubs: { sharp: sharpStub } });
+	installRuntimeModuleResolver({ runtimeNodeModules: nodeModules, stubs: { sharp: sharpStub, ...stubs } });
 	return nodeModules;
 }
 
@@ -317,7 +320,7 @@ interface ConfigurableTransformers {
 		useCustomCache?: boolean;
 		customCache?: TransformersCache;
 	};
-	LogLevel: { ERROR: unknown };
+	LogLevel?: { ERROR: unknown };
 }
 
 export interface TransformersRuntimePlan {
@@ -343,7 +346,7 @@ export function transformersRuntimePlan(
 	};
 }
 
-function loadAndroidTransformers<T extends ConfigurableTransformers>(require_: NodeRequire, entry: string): T {
+export function withAndroidWebRuntime<T>(load: () => T): T {
 	const release = process.release;
 	const descriptor = Object.getOwnPropertyDescriptor(release, "name");
 	Object.defineProperty(release, "name", {
@@ -353,12 +356,18 @@ function loadAndroidTransformers<T extends ConfigurableTransformers>(require_: N
 		value: "bun",
 	});
 	try {
-		return { ...(require_(entry) as T) };
+		return load();
 	} finally {
 		if (descriptor) Object.defineProperty(release, "name", descriptor);
 		else Reflect.deleteProperty(release, "name");
 	}
 }
+
+function loadAndroidTransformers<T extends ConfigurableTransformers>(require_: NodeRequire, entry: string): T {
+	const loaded = withAndroidWebRuntime(() => require_(entry) as T);
+	return { ...loaded };
+}
+
 export interface TransformersRuntimeMetadata {
 	__ompRuntimeNodeModules?: string;
 	__ompTransformersEntry?: string;
@@ -522,14 +531,14 @@ function createTransformersFileCache(cacheDir: string): TransformersCache {
 	};
 }
 
-function configureTransformers<T extends ConfigurableTransformers>(
+export function configureTransformers<T extends ConfigurableTransformers>(
 	transformers: T,
 	androidWasm?: { binary: Uint8Array; module: string },
 ): T {
 	const cacheDir = getTinyModelsCacheDir();
 	transformers.env.cacheDir = cacheDir;
 	transformers.env.allowLocalModels = false;
-	transformers.env.logLevel = transformers.LogLevel.ERROR;
+	transformers.env.logLevel = transformers.LogLevel?.ERROR ?? "error";
 	if (androidWasm) {
 		const onnx = (transformers.env.backends ??= {}).onnx ??= {};
 		const wasm = (onnx.wasm ??= {});
