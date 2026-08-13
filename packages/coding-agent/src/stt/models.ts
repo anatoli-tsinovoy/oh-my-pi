@@ -111,6 +111,11 @@ export const STT_MODELS = [
  */
 export const DEFAULT_STT_MODEL_KEY = "parakeet";
 
+/** Platform-aware default. Android cannot load sherpa-onnx's native Node addon. */
+export function getDefaultSttModelKey(platform: NodeJS.Platform | string = process.platform): SttModelKey {
+	return platform === "android" ? "fast" : DEFAULT_STT_MODEL_KEY;
+}
+
 export type SttModelKey = (typeof STT_MODELS)[number]["key"];
 
 /** A concrete entry from {@link STT_MODELS}; `key` is the literal tier union. */
@@ -127,11 +132,19 @@ const STT_MODEL_VALUES_MATCH_REGISTRY: MissingSttModelValue extends never
 	: never = true;
 void STT_MODEL_VALUES_MATCH_REGISTRY;
 
-export const STT_MODEL_OPTIONS = STT_MODELS.map(({ key, label, description }) => ({
-	value: key,
-	label,
-	description,
-})) satisfies ReadonlyArray<{ value: SttModelKey; label: string; description: string }>;
+export function getSttModelOptions(
+	platform: NodeJS.Platform | string = process.platform,
+): ReadonlyArray<{ value: SttModelKey; label: string; description: string }> {
+	return STT_MODELS.filter(model => platform !== "android" || model.engine !== "sherpa").map(
+		({ key, label, description }) => ({
+			value: key,
+			label,
+			description,
+		}),
+	);
+}
+
+export const STT_MODEL_OPTIONS = getSttModelOptions();
 
 export function isSttModelKey(value: string): value is SttModelKey {
 	return STT_MODELS.some(model => model.key === value);
@@ -143,8 +156,14 @@ export function getSttModelSpec(key: string): SttModel | undefined {
 
 /**
  * Resolve a (possibly stale or legacy) `stt.modelName` value onto a concrete
- * spec, falling back to the SoTA default when the key is unknown.
+ * spec. Android falls back from sherpa models because sherpa-onnx-node does not
+ * publish an android-arm64 native addon.
  */
-export function resolveSttModelSpec(key: string | undefined): SttModel {
-	return (key !== undefined ? getSttModelSpec(key) : undefined) ?? getSttModelSpec(DEFAULT_STT_MODEL_KEY)!;
+export function resolveSttModelSpec(
+	key: string | undefined,
+	platform: NodeJS.Platform | string = process.platform,
+): SttModel {
+	const model = key !== undefined ? getSttModelSpec(key) : undefined;
+	if (model !== undefined && (platform !== "android" || model.engine !== "sherpa")) return model;
+	return getSttModelSpec(getDefaultSttModelKey(platform))!;
 }
