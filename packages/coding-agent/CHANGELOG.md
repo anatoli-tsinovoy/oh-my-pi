@@ -20,6 +20,10 @@
 - Fixed fullscreen `/copy` outlining only a lazily created grouped Read card, so Enter copies the assistant yield instead of tool output.
 
 ## [18.1.11] - 2026-09-05
+### Fixed
+
+- Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
+- Android/Termux builds now produce a runnable bundled launcher instead of a Bun-compiled executable that crashes on startup.
 
 ### Added
 
