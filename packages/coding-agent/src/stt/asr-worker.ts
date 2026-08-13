@@ -190,7 +190,7 @@ async function loadPipelineWithDeviceFallback(
 ): Promise<{ pipeline: AutomaticSpeechRecognitionPipeline; device: TinyModelDevice }> {
 	const devices = tinyModelDeviceLoadOrder(sttModelDevicePreference);
 	if (devices[0] !== sttModelDevicePreference.device) {
-		sendLog(transport, "warn", "stt: requested device is unsafe in the worker; using CPU", {
+		sendLog(transport, "warn", "stt: requested device is unavailable in this worker; using compatible backend", {
 			modelKey,
 			repo: spec.repo,
 			requestedDevice: sttModelDevicePreference.device,
