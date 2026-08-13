@@ -5,31 +5,31 @@ import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
 	TINY_MODEL_DEVICE_SETTING_VALUES,
-	type TinyOnnxDevice,
 	tinyMlxSupported,
 	tinyModelDeviceLoadOrder,
 	tinyModelDeviceSettingToEnv,
 } from "@oh-my-pi/pi-coding-agent/tiny/device";
 
 describe("tiny model device selection", () => {
-	it("defaults to CPU-only inference on every platform", () => {
+	it("defaults to the platform's CPU-compatible backend", () => {
 		const preference = resolveTinyModelDevicePreference(undefined);
 
 		expect(preference.device).toBe("cpu");
-		expect(tinyModelDeviceLoadOrder(preference)).toEqual(["cpu"]);
+		expect(tinyModelDeviceLoadOrder(preference)).toEqual(process.platform === "android" ? ["wasm"] : ["cpu"]);
 	});
 
 	it("routes mlx and its metal alias to the MLX backend while ONNX workers stay CPU-only", () => {
 		expect(normalizeTinyModelDevice("metal")).toBe("mlx");
 		expect(normalizeTinyModelDevice("MLX")).toBe("mlx");
 		// STT/TTS only speak ONNX: `mlx` must never reach transformers.js as a device.
-		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("mlx"))).toEqual(["cpu"]);
-		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("metal"))).toEqual(["cpu"]);
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("mlx"), "linux")).toEqual(["cpu"]);
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("metal"), "linux")).toEqual(["cpu"]);
 	});
 
 	it("keeps webgpu off the macOS worker but usable elsewhere", () => {
-		const expectedOrder: readonly TinyOnnxDevice[] = process.platform === "darwin" ? ["cpu"] : ["webgpu", "cpu"];
-		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("webgpu"))).toEqual(expectedOrder);
+		const preference = resolveTinyModelDevicePreference("webgpu");
+		expect(tinyModelDeviceLoadOrder(preference, "darwin")).toEqual(["cpu"]);
+		expect(tinyModelDeviceLoadOrder(preference, "linux")).toEqual(["webgpu", "cpu"]);
 	});
 
 	it("only offers MLX on Apple silicon", () => {
@@ -42,7 +42,13 @@ describe("tiny model device selection", () => {
 		const preference = resolveTinyModelDevicePreference(" cpu ");
 
 		expect(preference.device).toBe("cpu");
-		expect(tinyModelDeviceLoadOrder(preference)).toEqual(["cpu"]);
+		expect(tinyModelDeviceLoadOrder(preference)).toEqual(process.platform === "android" ? ["wasm"] : ["cpu"]);
+	});
+
+	it("uses the WASM execution provider on Android", () => {
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference(undefined), "android")).toEqual(["wasm"]);
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference("cuda"), "android")).toEqual(["wasm"]);
+		expect(tinyModelDeviceLoadOrder(resolveTinyModelDevicePreference(undefined), "linux")).toEqual(["cpu"]);
 	});
 
 	it("rejects unknown ONNX execution providers", () => {

@@ -1,14 +1,14 @@
-import * as fsp from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import type { ProgressInfo } from "@huggingface/transformers";
+import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils/dirs";
+import { isCompiledBinary } from "@oh-my-pi/pi-utils/env";
 import {
 	ensureRuntimeInstalled,
-	getTinyModelsCacheDir,
 	installRuntimeModuleResolver,
-	isCompiledBinary,
 	resolveRuntimeModule,
-} from "@oh-my-pi/pi-utils";
+} from "@oh-my-pi/pi-utils/runtime-install";
 import packageJson from "../../package.json" with { type: "json" };
 
 /**
@@ -185,7 +185,7 @@ async function missingOnnxRuntimeCudaProviderFiles(binDir: string): Promise<stri
 	const missing: string[] = [];
 	for (const file of ONNX_RUNTIME_CUDA_PROVIDER_FILES) {
 		try {
-			await fsp.access(path.join(binDir, file));
+			await fs.access(path.join(binDir, file));
 		} catch {
 			missing.push(file);
 		}
@@ -201,7 +201,7 @@ async function readPipe(stream: ReadableStream<Uint8Array> | null): Promise<stri
 async function installOnnxRuntimeCudaProviders(packageDir: string, runtimeDir: string, binDir: string): Promise<void> {
 	const script = path.join(packageDir, "script", "install.js");
 	try {
-		await fsp.access(script);
+		await fs.access(script);
 	} catch {
 		throw new Error(
 			`ONNX Runtime CUDA provider binaries are missing from ${binDir}, and ${script} is unavailable. Remove the tiny-model side runtime cache at ${runtimeDir} and retry.`,
@@ -274,20 +274,15 @@ function resolveTransformersVersionSpec(): string {
 	const versionSpec =
 		manifest.optionalDependencies?.[TRANSFORMERS_PACKAGE] ?? manifest.dependencies?.[TRANSFORMERS_PACKAGE];
 	if (!versionSpec) throw new Error(`${TRANSFORMERS_PACKAGE} is missing from package.json optionalDependencies`);
-	if (!versionSpec.startsWith("catalog:")) return versionSpec;
-	if (COMPILED_TRANSFORMERS_VERSION) return COMPILED_TRANSFORMERS_VERSION;
-	const installed = sourceRequire(`${TRANSFORMERS_PACKAGE}/package.json`) as { version: string };
-	return installed.version;
+	return COMPILED_TRANSFORMERS_VERSION ?? versionSpec;
 }
 
 let cachedTransformersVersionSpec: string | undefined;
 
 /**
- * Lazily resolve (and memoize) the transformers version spec. In the `catalog:`
- * case {@link resolveTransformersVersionSpec} `require`s the installed
- * `@huggingface/transformers/package.json`, so it is only ever touched on the
- * compiled-binary runtime-install path — loading a worker (smoke-test ping,
- * online path) never triggers the transformers resolve/install dance.
+ * Lazily resolve and memoize the Transformers version spec. Compiled binaries
+ * embed the exact build dependency version; source and published-package runs
+ * use the concrete compatible range from this package's manifest.
  */
 export function getTransformersVersionSpec(): string {
 	cachedTransformersVersionSpec ??= resolveTransformersVersionSpec();
@@ -296,12 +291,73 @@ export function getTransformersVersionSpec(): string {
 
 // ── Transformers runtime loader ─────────────────────────────────────
 
+interface TransformersCache {
+	match(request: string): Promise<Response | undefined>;
+	put(
+		request: string,
+		response: Response,
+		progress?: (data: { progress: number; loaded: number; total: number }) => void,
+	): Promise<void>;
+}
+
+interface TransformersWasmEnvironment {
+	numThreads?: number;
+	proxy?: boolean;
+	wasmPaths?: { wasm: string };
+}
+
 /** The subset of the Transformers.js module surface {@link configureTransformers} touches. */
 interface ConfigurableTransformers {
-	env: { cacheDir?: string; allowLocalModels?: boolean; logLevel?: unknown };
+	env: {
+		cacheDir?: string;
+		allowLocalModels?: boolean;
+		logLevel?: unknown;
+		backends?: { onnx?: { wasm?: TransformersWasmEnvironment } };
+		useCustomCache?: boolean;
+		customCache?: TransformersCache;
+	};
 	LogLevel: { ERROR: unknown };
 }
 
+export interface TransformersRuntimePlan {
+	useSideRuntime: boolean;
+	entrySpecifier: string;
+	overrides: Record<string, string> | undefined;
+	trustedDependencies: string[] | undefined;
+}
+
+/** Select the native Node runtime on desktop and the WASM web runtime on Android. */
+export function transformersRuntimePlan(
+	platform: NodeJS.Platform | string = process.platform,
+	compiled = isCompiledBinary(),
+): TransformersRuntimePlan {
+	const android = platform === "android";
+	return {
+		useSideRuntime: compiled || android,
+		entrySpecifier: android ? `${TRANSFORMERS_PACKAGE}/dist/transformers.web.js` : TRANSFORMERS_PACKAGE,
+		overrides: android
+			? { "onnxruntime-node": "npm:onnxruntime-common@1.24.3", sharp: "npm:is-even@1.0.0" }
+			: undefined,
+		trustedDependencies: android ? undefined : ["onnxruntime-node"],
+	};
+}
+
+function loadAndroidTransformers<T extends ConfigurableTransformers>(require_: NodeRequire, entry: string): T {
+	const release = process.release;
+	const descriptor = Object.getOwnPropertyDescriptor(release, "name");
+	Object.defineProperty(release, "name", {
+		configurable: true,
+		enumerable: descriptor?.enumerable ?? true,
+		writable: true,
+		value: "bun",
+	});
+	try {
+		return { ...(require_(entry) as T) };
+	} finally {
+		if (descriptor) Object.defineProperty(release, "name", descriptor);
+		else Reflect.deleteProperty(release, "name");
+	}
+}
 export interface TransformersRuntimeMetadata {
 	__ompRuntimeNodeModules?: string;
 	__ompTransformersEntry?: string;
@@ -410,10 +466,78 @@ export async function formatOnnxRuntimeCudaDiagnostics(
 	return lines.join("\n");
 }
 
-function configureTransformers<T extends ConfigurableTransformers>(transformers: T): T {
-	transformers.env.cacheDir = getTinyModelsCacheDir();
+function transformersCachePath(cacheDir: string, request: string): string | null {
+	let relative = request;
+	try {
+		const url = new URL(request);
+		const match = /^\/(.+?)\/resolve\/[^/]+\/(.+)$/.exec(url.pathname);
+		if (!match) return null;
+		relative = `${match[1]}/${match[2]}`;
+	} catch {
+		relative = relative.replace(/^\/models\//, "");
+	}
+	const normalized = path.posix.normalize(relative).replace(/^\/+/, "");
+	if (!normalized || normalized === ".." || normalized.startsWith("../")) return null;
+	return path.join(cacheDir, ...normalized.split("/"));
+}
+
+function createTransformersFileCache(cacheDir: string): TransformersCache {
+	return {
+		async match(request) {
+			const file = transformersCachePath(cacheDir, request);
+			if (!file || !(await Bun.file(file).exists())) return undefined;
+			return new Response(Bun.file(file));
+		},
+		async put(request, response, progress) {
+			const file = transformersCachePath(cacheDir, request);
+			if (!file) throw new Error(`Unsupported Transformers cache key: ${request}`);
+			const temporary = `${file}.part.${process.pid}.${crypto.randomUUID()}`;
+			const total = Number(response.headers.get("content-length")) || 0;
+			await fs.mkdir(path.dirname(temporary), { recursive: true });
+			let loaded = 0;
+			const reader = response.body?.getReader();
+			if (!reader) throw new Error(`Transformers download returned no body for ${request}`);
+			const sink = Bun.file(temporary).writer();
+			let completed = false;
+			try {
+				for (;;) {
+					const chunk = await reader.read();
+					if (chunk.done) break;
+					await sink.write(chunk.value);
+					loaded += chunk.value.byteLength;
+					progress?.({ progress: total > 0 ? (loaded / total) * 100 : 0, loaded, total });
+				}
+				await sink.end();
+				await fs.rename(temporary, file);
+				completed = true;
+			} finally {
+				if (!completed) {
+					await reader.cancel().catch(() => undefined);
+					await Promise.resolve(sink.end()).catch(() => undefined);
+					await fs.rm(temporary, { force: true }).catch(() => undefined);
+				}
+			}
+		},
+	};
+}
+
+function configureTransformers<T extends ConfigurableTransformers>(
+	transformers: T,
+	androidWasm?: string,
+): T {
+	const cacheDir = getTinyModelsCacheDir();
+	transformers.env.cacheDir = cacheDir;
 	transformers.env.allowLocalModels = false;
 	transformers.env.logLevel = transformers.LogLevel.ERROR;
+	if (androidWasm) {
+		const onnx = (transformers.env.backends ??= {}).onnx ??= {};
+		const wasm = (onnx.wasm ??= {});
+		wasm.numThreads = 1;
+		wasm.proxy = false;
+		wasm.wasmPaths = { wasm: androidWasm };
+		transformers.env.useCustomCache = true;
+		transformers.env.customCache = createTransformersFileCache(cacheDir);
+	}
 	return transformers;
 }
 
@@ -437,10 +561,10 @@ export class MemoizedRuntime<T> {
 }
 
 /**
- * Load the `@huggingface/transformers` runtime into `holder` (memoized): from
- * the ambient install when running from source, or from a version-keyed side
- * runtime (resolved lazily at `runtimeDir()`) when running as a compiled binary.
- * The result is cast to the caller's concrete runtime type `T`.
+ * Load `@huggingface/transformers` into `holder` (memoized). Desktop source
+ * runs use the ambient native Node runtime; compiled binaries use a side
+ * runtime. Android always uses a side runtime because npm skips the package's
+ * unsupported `onnxruntime-node` dependency, then loads the web/WASM entry.
  */
 export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 	holder: MemoizedRuntime<T>,
@@ -449,9 +573,10 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 	modelKey: K,
 	runtimeDir: () => string,
 ): Promise<T> {
+	const plan = transformersRuntimePlan();
 	return holder.load(async () => {
-		if (!isCompiledBinary()) {
-			const entry = sourceRequire.resolve(TRANSFORMERS_PACKAGE);
+		if (!plan.useSideRuntime) {
+			const entry = sourceRequire.resolve(plan.entrySpecifier);
 			return attachTransformersRuntimeMetadata(configureTransformers(sourceRequire(entry) as T), {
 				__ompTransformersEntry: entry,
 			});
@@ -460,7 +585,8 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 			runtimeDir: runtimeDir(),
 			install: {
 				dependencies: { [TRANSFORMERS_PACKAGE]: getTransformersVersionSpec() },
-				trustedDependencies: ["onnxruntime-node"],
+				overrides: plan.overrides,
+				trustedDependencies: plan.trustedDependencies,
 			},
 			probePackage: TRANSFORMERS_PACKAGE,
 			onPhase: phase =>
@@ -475,18 +601,30 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 				}),
 		});
 		let cudaRepairError: string | undefined;
-		try {
-			await ensureOnnxRuntimeCudaProviders(installedDir);
-		} catch (repairError) {
-			// Deferred failure: keep loading Transformers so `loadPipelineWithDeviceFallback`
-			// still gets its CUDA→CPU retry. The error is surfaced through the CUDA
-			// diagnostics attached to the runtime metadata.
-			cudaRepairError = errorMessage(repairError);
+		if (process.platform !== "android") {
+			try {
+				await ensureOnnxRuntimeCudaProviders(installedDir);
+			} catch (repairError) {
+				// Deferred failure: keep loading Transformers so `loadPipelineWithDeviceFallback`
+				// still gets its CUDA→CPU retry. The error is surfaced through the CUDA
+				// diagnostics attached to the runtime metadata.
+				cudaRepairError = errorMessage(repairError);
+			}
 		}
-		const entry = await prepareCompiledRuntime(installedDir, TRANSFORMERS_PACKAGE);
+		const nodeModules = await installSharpStubResolver(installedDir);
+		const entry = resolveRuntimeModule(nodeModules, plan.entrySpecifier);
+		if (!entry) throw new Error(`Unable to resolve ${plan.entrySpecifier} in runtime at ${nodeModules}`);
 		const require_ = createRequire(entry);
-		return attachTransformersRuntimeMetadata(configureTransformers(require_(entry) as T), {
-			__ompRuntimeNodeModules: path.join(installedDir, "node_modules"),
+		const android = process.platform === "android";
+		const androidWasm = android
+			? resolveRuntimeModule(nodeModules, "onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm")
+			: undefined;
+		if (android && !androidWasm) {
+			throw new Error(`Unable to resolve onnxruntime-web runtime at ${nodeModules}`);
+		}
+		const loaded = android ? loadAndroidTransformers<T>(require_, entry) : (require_(entry) as T);
+		return attachTransformersRuntimeMetadata(configureTransformers(loaded, androidWasm ?? undefined), {
+			__ompRuntimeNodeModules: nodeModules,
 			__ompTransformersEntry: entry,
 			__ompCudaRepairError: cudaRepairError,
 		});
