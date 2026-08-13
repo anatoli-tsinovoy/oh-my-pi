@@ -14,7 +14,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use opus::{Application, Channels, Decoder, Encoder};
 use parking_lot::Mutex;
 use tokio::{sync::watch, task::JoinHandle};
 use webrtc::{
@@ -44,6 +43,7 @@ use webrtc::{
 use crate::{
 	VoiceResult,
 	audio::{PlaybackStream, PlaybackWriter},
+	codec::{Application, Channels, Decoder, Encoder, Error as OpusError},
 };
 
 const DATA_CHANNEL_LABEL: &str = "oai-events";
@@ -667,7 +667,7 @@ struct OutputDecoder {
 }
 
 impl OutputDecoder {
-	fn new() -> Result<Self, opus::Error> {
+	fn new() -> Result<Self, OpusError> {
 		Ok(Self {
 			decoder:           Decoder::new(OUTPUT_SAMPLE_RATE, Channels::Mono)?,
 			decoded:           vec![0.0; MAX_DECODED_OPUS_SAMPLES].into_boxed_slice(),
