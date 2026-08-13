@@ -8,6 +8,7 @@
 - Android/Termux builds now produce a relocatable bundled launcher with its generated CLI and native assets, so copied artifacts run without the original repository layout.
 - Fixed legacy extensions resolving bundled resources against the current project instead of the relocated Android bundle.
 - Fixed local Whisper speech-to-text on Android/Termux by using Transformers.js with the ONNX Runtime WebAssembly backend instead of the unavailable native Node binding.
+- Fixed local speech-to-text on Android/Termux by defaulting to Whisper when the sherpa native addon is unavailable and loading ONNX Runtime WebAssembly entirely from the local runtime.
 
 ## [18.2.0] - 2026-09-15
 
