@@ -10,19 +10,25 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-# Forces the static libopus build for the `opus` codec crate.
-audiopus_sys.workspace = true
 bytes.workspace = true
 flume.workspace = true
-opus.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
 webrtc.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+maudio = { workspace = true, features = ["generate-bindings", "no-aaudio"] }
+opus2.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # dlopen/dlsym for the PulseAudio and ALSA backends: no link-time dependency
 # on libpulse/libasound, so the prebuilt addon loads on systems without them.
 libc.workspace = true
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+# Forces the static libopus build for the `opus` codec crate.
+audiopus_sys.workspace = true
+opus.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys.workspace = true

@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Added
 
-- Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management, with audio capture/playback and live voice through bundled OpenSL ES/miniaudio; clipboard integration remains Termux API based.
+- Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management, with OpenSL ES/miniaudio audio capture and playback plus pure-Rust Opus live voice; clipboard integration remains Termux API based.
 
 ## [18.1.9] - 2026-09-04
 
