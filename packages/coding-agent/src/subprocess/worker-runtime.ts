@@ -253,17 +253,6 @@ export async function ensureOnnxRuntimeCudaProviders(
 	);
 }
 
-/**
- * Prepare a freshly-installed compiled runtime for loading and return the
- * absolute entrypoint of `packageName` to `require`.
- */
-async function prepareCompiledRuntime(runtimeDir: string, packageName: string): Promise<string> {
-	const nodeModules = await installSharpStubResolver(runtimeDir);
-	const entry = resolveRuntimeModule(nodeModules, packageName);
-	if (!entry) throw new Error(`Unable to resolve ${packageName} in compiled runtime at ${nodeModules}`);
-	return entry;
-}
-
 // ── Transformers version resolution ─────────────────────────────────
 
 function resolveTransformersVersionSpec(): string {
@@ -274,15 +263,20 @@ function resolveTransformersVersionSpec(): string {
 	const versionSpec =
 		manifest.optionalDependencies?.[TRANSFORMERS_PACKAGE] ?? manifest.dependencies?.[TRANSFORMERS_PACKAGE];
 	if (!versionSpec) throw new Error(`${TRANSFORMERS_PACKAGE} is missing from package.json optionalDependencies`);
-	return COMPILED_TRANSFORMERS_VERSION ?? versionSpec;
+	if (!versionSpec.startsWith("catalog:")) return versionSpec;
+	if (COMPILED_TRANSFORMERS_VERSION) return COMPILED_TRANSFORMERS_VERSION;
+	const installed = sourceRequire(`${TRANSFORMERS_PACKAGE}/package.json`) as { version: string };
+	return installed.version;
 }
 
 let cachedTransformersVersionSpec: string | undefined;
 
 /**
- * Lazily resolve and memoize the Transformers version spec. Compiled binaries
- * embed the exact build dependency version; source and published-package runs
- * use the concrete compatible range from this package's manifest.
+ * Lazily resolve (and memoize) the Transformers version spec. In the `catalog:`
+ * case {@link resolveTransformersVersionSpec} `require`s the installed
+ * `@huggingface/transformers/package.json`, so it is only ever touched on the
+ * side-runtime install path — loading a worker (smoke-test ping, online path)
+ * never triggers the transformers resolve/install dance.
  */
 export function getTransformersVersionSpec(): string {
 	cachedTransformersVersionSpec ??= resolveTransformersVersionSpec();
@@ -327,15 +321,14 @@ export interface TransformersRuntimePlan {
 	trustedDependencies: string[] | undefined;
 }
 
-/** Select the native Node runtime on desktop and the WASM web runtime on Android or relocated Android bundles. */
+/** Select the native Node runtime on desktop and the WASM web runtime on Android. */
 export function transformersRuntimePlan(
 	platform: NodeJS.Platform | string = process.platform,
 	compiled = isCompiledBinary(),
 ): TransformersRuntimePlan {
 	const android = platform === "android";
-	const androidBundle = process.env.PI_ANDROID_BUNDLE === "1";
 	return {
-		useSideRuntime: compiled || androidBundle || android,
+		useSideRuntime: compiled || android,
 		entrySpecifier: android ? `${TRANSFORMERS_PACKAGE}/dist/transformers.web.js` : TRANSFORMERS_PACKAGE,
 		overrides: android
 			? { "onnxruntime-node": "npm:onnxruntime-common@1.24.3", sharp: "npm:is-even@1.0.0" }
@@ -502,7 +495,7 @@ function createTransformersFileCache(cacheDir: string): TransformersCache {
 			const sink = Bun.file(temporary).writer();
 			let completed = false;
 			try {
-				for (; ;) {
+				for (;;) {
 					const chunk = await reader.read();
 					if (chunk.done) break;
 					await sink.write(chunk.value);
@@ -532,7 +525,7 @@ function configureTransformers<T extends ConfigurableTransformers>(
 	transformers.env.allowLocalModels = false;
 	transformers.env.logLevel = transformers.LogLevel.ERROR;
 	if (androidWasm) {
-		const onnx = (transformers.env.backends ??= {}).onnx ??= {};
+		const onnx = ((transformers.env.backends ??= {}).onnx ??= {});
 		const wasm = (onnx.wasm ??= {});
 		wasm.numThreads = 1;
 		wasm.proxy = false;
@@ -566,9 +559,8 @@ export class MemoizedRuntime<T> {
 /**
  * Load the `@huggingface/transformers` runtime into `holder` (memoized): from
  * the ambient install when running from source or a desktop bundle, or from
- * a version-keyed side runtime when running as a compiled binary, relocated
- * Android bundle, or Android platform. The result is cast to the caller's
- * concrete runtime type `T`.
+ * a version-keyed side runtime when running as a compiled binary or Android
+ * source run. The result is cast to the caller's concrete runtime type `T`.
  */
 export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 	holder: MemoizedRuntime<T>,
@@ -579,11 +571,9 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 ): Promise<T> {
 	const plan = transformersRuntimePlan();
 	return holder.load(async () => {
-		// Relocated Android bundles cannot resolve the source workspace's
-		// externalized Transformers.js package from a worker subprocess. Their
-		// bundle-time marker is included in `plan.useSideRuntime`, routing them
-		// through the same side-runtime install used by compiled binaries without
-		// changing normal source/desktop runs.
+		// Android source runs load the WASM Transformers entry from the
+		// version-keyed side runtime; compiled binaries use the same path.
+		// Other source/desktop runs continue to load the ambient package.
 		if (!plan.useSideRuntime) {
 			const entry = sourceRequire.resolve(plan.entrySpecifier);
 			return attachTransformersRuntimeMetadata(configureTransformers(sourceRequire(entry) as T), {

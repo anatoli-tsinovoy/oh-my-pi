@@ -72,7 +72,7 @@ import type { SessionInfo as StoredSessionInfo } from "../../session/session-lis
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
-import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
+import { getDefaultSttModelKey, getSttModelOptions } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { OTHER_OPTION } from "../../tools/ask";
@@ -434,7 +434,7 @@ type AcpSpeechTtsModelOption = AcpSpeechOption & {
 function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 	const localSelector = (modelId: string) => `local/${modelId}`;
 	const defaultSpeechModel = localSelector(TTS_LOCAL_MODELS[0].key);
-	const defaultDictationModel = localSelector(DEFAULT_STT_MODEL_KEY);
+	const defaultDictationModel = localSelector(getDefaultSttModelKey());
 	const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 	// Speed settings are numeric, so presets are advertised as numbers clients can write back as-is.
 	const speeds = TTS_SPEED_OPTIONS.map(({ value, label }) => ({ value: Number(value), label }));
@@ -456,8 +456,8 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 		speechToText: {
 			setting: "modelRoles.dictation",
 			defaultValue: defaultDictationModel,
-			models: STT_MODELS.map(({ key, label, description }) => ({
-				value: localSelector(key),
+			models: getSttModelOptions().map(({ value, label, description }) => ({
+				value: localSelector(value),
 				label,
 				description,
 			})),
