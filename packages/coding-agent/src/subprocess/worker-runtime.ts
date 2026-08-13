@@ -262,7 +262,6 @@ async function prepareInstalledRuntime(runtimeDir: string, packageName: string):
 	return entry;
 }
 
-
 // ── Transformers runtime loader ─────────────────────────────────────
 
 interface TransformersCache {
@@ -301,15 +300,14 @@ export interface TransformersRuntimePlan {
 	trustedDependencies: string[] | undefined;
 }
 
-/** Select the native Node runtime on desktop and the WASM web runtime on Android or relocated Android bundles. */
+/** Select the native Node runtime on desktop and the WASM web runtime on Android. */
 export function transformersRuntimePlan(
 	platform: NodeJS.Platform | string = process.platform,
 	compiled = isCompiledBinary(),
 ): TransformersRuntimePlan {
 	const android = platform === "android";
-	const androidBundle = process.env.PI_ANDROID_BUNDLE === "1";
 	return {
-		useSideRuntime: compiled || androidBundle || android,
+		useSideRuntime: compiled || android,
 		entrySpecifier: android ? `${TRANSFORMERS_PACKAGE}/dist/transformers.web.js` : TRANSFORMERS_PACKAGE,
 		overrides: android
 			? { "onnxruntime-node": "npm:onnxruntime-common@1.24.3", sharp: "npm:is-even@1.0.0" }
@@ -476,7 +474,7 @@ function createTransformersFileCache(cacheDir: string): TransformersCache {
 			const sink = Bun.file(temporary).writer();
 			let completed = false;
 			try {
-				for (; ;) {
+				for (;;) {
 					const chunk = await reader.read();
 					if (chunk.done) break;
 					await sink.write(chunk.value);
@@ -506,7 +504,7 @@ function configureTransformers<T extends ConfigurableTransformers>(
 	transformers.env.allowLocalModels = false;
 	transformers.env.logLevel = transformers.LogLevel.ERROR;
 	if (androidWasm) {
-		const onnx = (transformers.env.backends ??= {}).onnx ??= {};
+		const onnx = ((transformers.env.backends ??= {}).onnx ??= {});
 		const wasm = (onnx.wasm ??= {});
 		wasm.numThreads = 1;
 		wasm.proxy = false;
@@ -552,6 +550,7 @@ export function loadTransformersRuntime<T extends ConfigurableTransformers, K>(
 ): Promise<T> {
 	const plan = transformersRuntimePlan();
 	return holder.load(async () => {
+
 		const installedDir = await ensureRuntimeInstalled({
 			runtimeDir: runtimeDir(),
 			install: {
