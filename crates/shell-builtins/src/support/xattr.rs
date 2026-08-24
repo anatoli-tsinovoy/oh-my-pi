@@ -1,9 +1,16 @@
 //! Minimal extended-attribute probes used by `ls` and `mkdir`.
 
-#[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
-use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::{ffi, io, ptr};
+use std::{ffi, ptr};
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+use std::{
+	ffi::{OsStr, OsString},
+	io,
+	path::Path,
+};
+
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+use omp_core::FastHashMap;
 
 /// Returns whether a path has at least one extended ACL or attribute.
 #[cfg(all(unix, not(any(target_os = "android", target_os = "macos"))))]
@@ -94,6 +101,83 @@ fn get_xattr(path: &Path, name: &[u8]) -> io::Result<Vec<u8>> {
 	value.truncate(read as usize);
 	Ok(value)
 }
+/// Reads every extended attribute attached to `path`.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+pub(crate) fn retrieve_xattrs(
+	path: impl AsRef<Path>,
+) -> io::Result<FastHashMap<OsString, Vec<u8>>> {
+	#[cfg(target_os = "linux")]
+	{
+		use std::os::unix::ffi::OsStringExt;
+
+		let path = path.as_ref();
+		let names = list_xattrs(path)?;
+		let mut attrs = FastHashMap::default();
+		for name in names
+			.split(|byte| *byte == 0)
+			.filter(|name| !name.is_empty())
+		{
+			let mut terminated_name = Vec::with_capacity(name.len() + 1);
+			terminated_name.extend_from_slice(name);
+			terminated_name.push(0);
+			attrs.insert(OsString::from_vec(name.to_vec()), get_xattr(path, &terminated_name)?);
+		}
+		return Ok(attrs);
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = path;
+		Ok(FastHashMap::default())
+	}
+}
+
+/// Applies extended attributes to `path`.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+pub(crate) fn apply_xattrs(
+	path: impl AsRef<Path>,
+	xattrs: FastHashMap<OsString, Vec<u8>>,
+) -> io::Result<()> {
+	#[cfg(target_os = "linux")]
+	{
+		let path = path.as_ref();
+		for (name, value) in xattrs {
+			set_xattr(path, &name, &value)?;
+		}
+		return Ok(());
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		let _ = (path, xattrs);
+		Ok(())
+	}
+}
+
+/// Copies every extended attribute from `source` to `destination`.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+pub(crate) fn copy_xattrs(
+	source: impl AsRef<Path>,
+	destination: impl AsRef<Path>,
+) -> io::Result<()> {
+	let xattrs = retrieve_xattrs(source)?;
+	apply_xattrs(destination, xattrs)
+}
+
+#[cfg(target_os = "linux")]
+fn set_xattr(path: &Path, name: &OsStr, value: &[u8]) -> io::Result<()> {
+	use std::os::unix::ffi::OsStrExt;
+
+	let path = path_cstring(path)?;
+	let name = ffi::CString::new(name.as_bytes())
+		.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "attribute name contains NUL"))?;
+	// SAFETY: both C strings and the value slice remain live for the call.
+	let result = unsafe {
+		libc::setxattr(path.as_ptr(), name.as_ptr(), value.as_ptr().cast(), value.len(), 0)
+	};
+	if result < 0 {
+		return Err(io::Error::last_os_error());
+	}
+	Ok(())
+}
 
 #[cfg(target_os = "linux")]
 fn parse_default_acl_permissions(value: &[u8]) -> Option<u32> {
@@ -135,5 +219,27 @@ mod tests {
 			value.extend_from_slice(&u32::MAX.to_le_bytes());
 		}
 		assert_eq!(parse_default_acl_permissions(&value), Some(0o741));
+	}
+
+	#[test]
+	fn copies_extended_attributes() -> io::Result<()> {
+		let directory = tempfile::tempdir()?;
+		let source = directory.path().join("source");
+		let destination = directory.path().join("destination");
+		std::fs::write(&source, b"source")?;
+		std::fs::write(&destination, b"destination")?;
+
+		let name = OsStr::new("user.omp-test");
+		if let Err(error) = set_xattr(&source, name, b"value") {
+			if matches!(error.raw_os_error(), Some(libc::EOPNOTSUPP | libc::EPERM)) {
+				return Ok(());
+			}
+			return Err(error);
+		}
+
+		copy_xattrs(&source, &destination)?;
+		let copied = retrieve_xattrs(&destination)?;
+		assert_eq!(copied.get(name).map(Vec::as_slice), Some(b"value".as_slice()));
+		Ok(())
 	}
 }
