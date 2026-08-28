@@ -356,6 +356,40 @@ describe("run_experiment", () => {
 		await Bun.sleep(0);
 		await dbOverride.remove();
 	});
+	async function prepareRun(dir: string, body: string, watchSeconds: number | null) {
+		await writeHarnessStub(dir, body);
+		const runtime = createSessionRuntime();
+		runtime.watchSeconds = watchSeconds;
+		const init = createInitExperimentTool({
+			dashboard: dashboardStub(),
+			getRuntime: () => runtime,
+			pi: createPiHarness().api,
+		});
+		await init.execute(
+			"i",
+			{ name: "speed", primary_metric: "runtime_ms", metric_unit: "ms" },
+			undefined,
+			undefined,
+			createCtx(dir),
+		);
+		return {
+			run: createRunExperimentTool({
+				dashboard: dashboardStub(),
+				getRuntime: () => runtime,
+				pi: createPiHarness().api,
+			}),
+			ctx: createCtx(dir),
+		};
+	}
+
+	async function onlyStoredRun(dir: string) {
+		const storage = await openAutoresearchStorage(dir);
+		const session = storage.getActiveSession();
+		expect(session).not.toBeNull();
+		const runs = storage.listRuns(session!.id);
+		expect(runs).toHaveLength(1);
+		return runs[0]!;
+	}
 
 	it("rejects when no session is active", async () => {
 		const dir = freshRepo().dir;
@@ -405,6 +439,140 @@ describe("run_experiment", () => {
 		expect(runs).toHaveLength(1);
 		expect(runs[0].parsedPrimary).toBe(42);
 		expect(runs[0].status).toBeNull();
+	});
+
+	it("passes a watched run with a primary metric and persists its completion", async () => {
+		const dir = freshRepo().dir;
+		const { run, ctx } = await prepareRun(
+			dir,
+			"printf 'AUTORESEARCH_PROGRESS started\\n'\nprintf 'METRIC runtime_ms=42\\n'",
+			0.2,
+		);
+
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
+		const details = result.details as RunDetails;
+		expect(details).toMatchObject({
+			passed: true,
+			crashed: false,
+			watcherTimedOut: false,
+			missingPrimaryMetric: false,
+			watchSeconds: 0.2,
+			parsedPrimary: 42,
+		});
+		const stored = await onlyStoredRun(dir);
+		expect(stored).toMatchObject({ completedAt: expect.any(Number), timedOut: false, parsedPrimary: 42 });
+	});
+
+	it("fails a watched exit-zero run that omits its primary metric", async () => {
+		const dir = freshRepo().dir;
+		const { run, ctx } = await prepareRun(dir, "printf 'AUTORESEARCH_PROGRESS started\\n'", 0.2);
+
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
+		const details = result.details as RunDetails;
+		expect(details).toMatchObject({
+			exitCode: 0,
+			passed: false,
+			crashed: true,
+			timedOut: false,
+			watcherTimedOut: false,
+			missingPrimaryMetric: true,
+		});
+		const stored = await onlyStoredRun(dir);
+		expect(stored).toMatchObject({ completedAt: expect.any(Number), timedOut: false, parsedPrimary: null });
+	});
+
+	it("times out the watcher when ordinary output makes no semantic progress", async () => {
+		const dir = freshRepo().dir;
+		const { run, ctx } = await prepareRun(
+			dir,
+			"for i in {1..20}; do printf 'ordinary output %s\\n' \"$i\"; sleep 0.05; done",
+			0.5,
+		);
+
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
+		const details = result.details as RunDetails;
+		expect(details).toMatchObject({
+			passed: false,
+			timedOut: true,
+			watcherTimedOut: true,
+			lastProgressAgeSeconds: null,
+		});
+		expect(details.tailOutput).toContain("AUTORESEARCH_WATCHER_TIMEOUT");
+		const stored = await onlyStoredRun(dir);
+		expect(stored).toMatchObject({ completedAt: expect.any(Number), timedOut: true });
+	});
+
+	it("does not refresh the watcher for duplicate progress tokens", async () => {
+		const dir = freshRepo().dir;
+		const { run, ctx } = await prepareRun(
+			dir,
+			"for i in {1..20}; do printf 'AUTORESEARCH_PROGRESS unchanged\\n'; sleep 0.05; done",
+			0.5,
+		);
+
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
+		const details = result.details as RunDetails;
+		expect(details).toMatchObject({ passed: false, timedOut: true, watcherTimedOut: true });
+		expect(details.lastProgressAgeSeconds).not.toBeNull();
+		const stored = await onlyStoredRun(dir);
+		expect(stored).toMatchObject({ completedAt: expect.any(Number), timedOut: true });
+	});
+
+	it("accepts distinct progress tokens long enough for a watched run to complete", async () => {
+		const dir = freshRepo().dir;
+		const { run, ctx } = await prepareRun(
+			dir,
+			"for i in {1..20}; do printf 'AUTORESEARCH_PROGRESS %s\\n' \"$i\"; sleep 0.05; done\nprintf 'METRIC runtime_ms=7\\n'",
+			0.5,
+		);
+
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
+		const details = result.details as RunDetails;
+		expect(details).toMatchObject({
+			exitCode: 0,
+			passed: true,
+			timedOut: false,
+			watcherTimedOut: false,
+			parsedPrimary: 7,
+		});
+		const stored = await onlyStoredRun(dir);
+		expect(stored).toMatchObject({ completedAt: expect.any(Number), timedOut: false, parsedPrimary: 7 });
+	});
+
+	it("keeps an outer timeout distinct from the watcher timeout", async () => {
+		const dir = freshRepo().dir;
+		const { run, ctx } = await prepareRun(dir, "printf 'AUTORESEARCH_PROGRESS started\\n'\nsleep 5", 1);
+
+		const result = await run.execute("r", { timeout_seconds: 0.2 }, undefined, undefined, ctx);
+		const details = result.details as RunDetails;
+		expect(details).toMatchObject({
+			passed: false,
+			timedOut: true,
+			watcherTimedOut: false,
+			watchSeconds: 1,
+		});
+		const stored = await onlyStoredRun(dir);
+		expect(stored).toMatchObject({ completedAt: expect.any(Number), timedOut: true });
+	});
+
+	it("keeps the disabled exit-zero-without-metric behavior", async () => {
+		const dir = freshRepo().dir;
+		const { run, ctx } = await prepareRun(dir, "printf 'ordinary output\\n'", null);
+
+		const result = await run.execute("r", { timeout_seconds: 5 }, undefined, undefined, ctx);
+		const details = result.details as RunDetails;
+		expect(details).toMatchObject({
+			exitCode: 0,
+			passed: true,
+			crashed: false,
+			timedOut: false,
+			watcherTimedOut: false,
+			missingPrimaryMetric: false,
+			watchSeconds: null,
+			parsedPrimary: null,
+		});
+		const stored = await onlyStoredRun(dir);
+		expect(stored).toMatchObject({ completedAt: expect.any(Number), timedOut: false, parsedPrimary: null });
 	});
 
 	it("abandons a prior pending run instead of blocking", async () => {
@@ -579,6 +747,7 @@ describe("log_experiment", () => {
 			branch: null,
 			baselineCommit: null,
 			maxIterations: null,
+			watchSeconds: null,
 			scopePaths: ["src"],
 			offLimits: ["forbidden"],
 			constraints: [],

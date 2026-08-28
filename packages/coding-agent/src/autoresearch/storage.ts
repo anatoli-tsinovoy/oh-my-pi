@@ -30,6 +30,7 @@ export interface SessionRow {
 	baselineCommit: string | null;
 	currentSegment: number;
 	maxIterations: number | null;
+	watchSeconds: number | null;
 	scopePaths: string[];
 	offLimits: string[];
 	constraints: string[];
@@ -80,6 +81,7 @@ export interface OpenSessionParams {
 	branch: string | null;
 	baselineCommit: string | null;
 	maxIterations: number | null;
+	watchSeconds: number | null;
 	scopePaths: string[];
 	offLimits: string[];
 	constraints: string[];
@@ -90,6 +92,7 @@ export interface UpdateSessionParams {
 	goal?: string | null;
 	preferredCommand?: string | null;
 	maxIterations?: number | null;
+	watchSeconds?: number | null;
 	scopePaths?: string[];
 	offLimits?: string[];
 	constraints?: string[];
@@ -149,6 +152,7 @@ type SessionDbRow = {
 	baseline_commit: string | null;
 	current_segment: number;
 	max_iterations: number | null;
+	watch_seconds: number | null;
 	scope_paths_json: string;
 	off_limits_json: string;
 	constraints_json: string;
@@ -189,7 +193,7 @@ type RunDbRow = {
 	abandoned_at: number | null;
 };
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA_SQL = `
 PRAGMA journal_mode=WAL;
@@ -208,6 +212,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	baseline_commit TEXT,
 	current_segment INTEGER NOT NULL DEFAULT 0,
 	max_iterations INTEGER,
+	watch_seconds REAL,
 	scope_paths_json TEXT NOT NULL DEFAULT '[]',
 	off_limits_json TEXT NOT NULL DEFAULT '[]',
 	constraints_json TEXT NOT NULL DEFAULT '[]',
@@ -267,6 +272,12 @@ export class AutoresearchStorage {
 		this.#db.run(SCHEMA_SQL);
 		const versionRow = this.#db.query("PRAGMA user_version").get() as { user_version: number } | null;
 		const currentVersion = versionRow?.user_version ?? 0;
+		if (currentVersion < 2) {
+			const columns = this.#db.query("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+			if (!columns.some(column => column.name === "watch_seconds")) {
+				this.#db.run("ALTER TABLE sessions ADD COLUMN watch_seconds REAL");
+			}
+		}
 		if (currentVersion < SCHEMA_VERSION) {
 			this.#db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 		}
@@ -320,10 +331,10 @@ export class AutoresearchStorage {
 		const stmt = this.#db.prepare<{ id: number }, SQLQueryBindings[]>(
 			`INSERT INTO sessions (
 				name, goal, primary_metric, metric_unit, direction,
-				preferred_command, branch, baseline_commit, max_iterations,
+				preferred_command, branch, baseline_commit, max_iterations, watch_seconds,
 				scope_paths_json, off_limits_json, constraints_json, secondary_metrics_json,
 				created_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
 		);
 		const row = stmt.get(
 			params.name,
@@ -335,6 +346,7 @@ export class AutoresearchStorage {
 			params.branch,
 			params.baselineCommit,
 			params.maxIterations,
+			params.watchSeconds,
 			JSON.stringify(params.scopePaths),
 			JSON.stringify(params.offLimits),
 			JSON.stringify(params.constraints),
@@ -361,6 +373,10 @@ export class AutoresearchStorage {
 		if (updates.maxIterations !== undefined) {
 			setClauses.push("max_iterations = ?");
 			values.push(updates.maxIterations);
+		}
+		if (updates.watchSeconds !== undefined) {
+			setClauses.push("watch_seconds = ?");
+			values.push(updates.watchSeconds);
 		}
 		if (updates.scopePaths !== undefined) {
 			setClauses.push("scope_paths_json = ?");
@@ -613,6 +629,7 @@ function rowToSession(row: SessionDbRow): SessionRow {
 		branch: row.branch,
 		baselineCommit: row.baseline_commit,
 		currentSegment: row.current_segment,
+		watchSeconds: row.watch_seconds,
 		maxIterations: row.max_iterations,
 		scopePaths: parseStringArray(row.scope_paths_json),
 		offLimits: parseStringArray(row.off_limits_json),

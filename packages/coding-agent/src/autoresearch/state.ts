@@ -33,6 +33,7 @@ export function createExperimentState(): ExperimentState {
 		branch: null,
 		baselineCommit: null,
 		sessionId: null,
+		watchSeconds: null,
 	};
 }
 
@@ -49,6 +50,7 @@ export function createSessionRuntime(): AutoresearchRuntime {
 		lastRunSummary: null,
 		runningExperiment: null,
 		state: createExperimentState(),
+		watchSeconds: null,
 		goal: null,
 	};
 }
@@ -183,6 +185,7 @@ export function buildExperimentState(session: SessionRow, loggedRuns: RunRow[]):
 	state.branch = session.branch;
 	state.baselineCommit = session.baselineCommit;
 	state.sessionId = session.id;
+	state.watchSeconds = session.watchSeconds;
 	state.maxExperiments = session.maxIterations;
 	state.currentSegment = session.currentSegment;
 	state.secondaryMetrics = session.secondaryMetrics.map(name => ({ name, unit: inferMetricUnitFromName(name) }));
@@ -220,6 +223,7 @@ export function buildExperimentState(session: SessionRow, loggedRuns: RunRow[]):
 export function reconstructControlState(entries: SessionEntry[]): ReconstructedControlState {
 	let autoresearchMode = false;
 	let goal: string | null = null;
+	let watchSeconds: number | null = null;
 	let lastMode: ReconstructedControlState["lastMode"] = null;
 	for (const entry of entries) {
 		if (entry.type !== "custom" || entry.customType !== "autoresearch-control") continue;
@@ -228,11 +232,13 @@ export function reconstructControlState(entries: SessionEntry[]): ReconstructedC
 		lastMode = data.mode;
 		autoresearchMode = data.mode === "on";
 		goal = data.goal ?? goal;
+		watchSeconds = data.watchSeconds;
 		if (data.mode === "clear") {
 			goal = null;
+			watchSeconds = null;
 		}
 	}
-	return { autoresearchMode, goal, lastMode };
+	return { autoresearchMode, goal, watchSeconds, lastMode };
 }
 
 export function createRuntimeStore(): RuntimeStore {
@@ -263,9 +269,17 @@ function registerSecondaryMetrics(metrics: MetricDef[], values: NumericMetricMap
 
 function parseControlEntry(value: unknown): AutoresearchControlEntryData | null {
 	if (typeof value !== "object" || value === null) return null;
-	const candidate = value as { goal?: unknown; mode?: unknown };
+	const candidate = value as { goal?: unknown; mode?: unknown; watchSeconds?: unknown };
 	if (candidate.mode !== "on" && candidate.mode !== "off" && candidate.mode !== "clear") return null;
-	const data: AutoresearchControlEntryData = { mode: candidate.mode };
+	const data: AutoresearchControlEntryData = {
+		mode: candidate.mode,
+		watchSeconds:
+			typeof candidate.watchSeconds === "number" &&
+			Number.isFinite(candidate.watchSeconds) &&
+			candidate.watchSeconds > 0
+				? candidate.watchSeconds
+				: null,
+	};
 	if (typeof candidate.goal === "string" && candidate.goal.trim().length > 0) {
 		data.goal = candidate.goal;
 	}

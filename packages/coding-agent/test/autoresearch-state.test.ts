@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { createAutoresearchExtension } from "@oh-my-pi/pi-coding-agent/autoresearch";
 import {
@@ -8,7 +9,11 @@ import {
 	findBestKeptMetric,
 	reconstructControlState,
 } from "@oh-my-pi/pi-coding-agent/autoresearch/state";
-import { AutoresearchStorage, closeAllAutoresearchStorages } from "@oh-my-pi/pi-coding-agent/autoresearch/storage";
+import {
+	AutoresearchStorage,
+	closeAllAutoresearchStorages,
+	openAutoresearchStorage,
+} from "@oh-my-pi/pi-coding-agent/autoresearch/storage";
 import type { ExperimentResult } from "@oh-my-pi/pi-coding-agent/autoresearch/types";
 import type {
 	ExtensionAPI,
@@ -140,6 +145,7 @@ describe("AutoresearchStorage round-trip", () => {
 			offLimits: ["test"],
 			constraints: ["no api break"],
 			secondaryMetrics: ["memory_mb"],
+			watchSeconds: null,
 		});
 		const active = storage.getActiveSession();
 		expect(active?.id).toBe(session.id);
@@ -147,6 +153,78 @@ describe("AutoresearchStorage round-trip", () => {
 		expect(active?.scopePaths).toEqual(["src"]);
 		expect(active?.offLimits).toEqual(["test"]);
 		expect(active?.secondaryMetrics).toEqual(["memory_mb"]);
+		storage.close();
+	});
+
+	it("round-trips a configured watcher through SQLite", () => {
+		const storage = openStorage();
+		const session = storage.openSession({
+			name: "watched",
+			goal: "finish remotely",
+			primaryMetric: "runtime_ms",
+			metricUnit: "ms",
+			direction: "lower",
+			preferredCommand: "bun run bench",
+			branch: "autoresearch/watched",
+			baselineCommit: "abc1234",
+			maxIterations: null,
+			scopePaths: [],
+			offLimits: [],
+			constraints: [],
+			secondaryMetrics: [],
+			watchSeconds: 12.5,
+		});
+		storage.close();
+
+		const reopened = openStorage();
+		expect(reopened.getSessionById(session.id)?.watchSeconds).toBe(12.5);
+		reopened.close();
+	});
+
+	it("migrates a v1 session without losing its row", () => {
+		const dbPath = dbDir.join("v1.db");
+		const legacy = new Database(dbPath);
+		legacy.exec(`
+			CREATE TABLE sessions (
+				id INTEGER PRIMARY KEY,
+				name TEXT NOT NULL,
+				goal TEXT,
+				primary_metric TEXT NOT NULL,
+				metric_unit TEXT NOT NULL DEFAULT '',
+				direction TEXT NOT NULL DEFAULT 'lower',
+				preferred_command TEXT,
+				branch TEXT,
+				baseline_commit TEXT,
+				current_segment INTEGER NOT NULL DEFAULT 0,
+				max_iterations INTEGER,
+				scope_paths_json TEXT NOT NULL DEFAULT '[]',
+				off_limits_json TEXT NOT NULL DEFAULT '[]',
+				constraints_json TEXT NOT NULL DEFAULT '[]',
+				secondary_metrics_json TEXT NOT NULL DEFAULT '[]',
+				notes TEXT NOT NULL DEFAULT '',
+				created_at INTEGER NOT NULL,
+				closed_at INTEGER
+			);
+			INSERT INTO sessions (
+				id, name, goal, primary_metric, metric_unit, direction, branch, current_segment,
+				scope_paths_json, off_limits_json, constraints_json, secondary_metrics_json, notes, created_at
+			) VALUES (7, 'legacy', 'preserve me', 'runtime_ms', 'ms', 'lower', 'autoresearch/legacy', 2,
+				'["src"]', '[]', '[]', '["memory_mb"]', 'legacy notes', 123);
+			PRAGMA user_version = 1;
+		`);
+		legacy.close();
+
+		const storage = new AutoresearchStorage(dbPath, dbDir.path());
+		expect(storage.getActiveSession()).toMatchObject({
+			id: 7,
+			goal: "preserve me",
+			branch: "autoresearch/legacy",
+			currentSegment: 2,
+			scopePaths: ["src"],
+			secondaryMetrics: ["memory_mb"],
+			notes: "legacy notes",
+			watchSeconds: null,
+		});
 		storage.close();
 	});
 
@@ -166,6 +244,7 @@ describe("AutoresearchStorage round-trip", () => {
 			offLimits: [],
 			constraints: [],
 			secondaryMetrics: [],
+			watchSeconds: null,
 		});
 		const inserted = storage.insertRun({
 			sessionId: session.id,
@@ -233,6 +312,7 @@ describe("AutoresearchStorage round-trip", () => {
 			offLimits: [],
 			constraints: [],
 			secondaryMetrics: [],
+			watchSeconds: null,
 		});
 		expect(session.currentSegment).toBe(0);
 		expect(storage.bumpSegment(session.id).currentSegment).toBe(1);
@@ -256,6 +336,7 @@ describe("AutoresearchStorage round-trip", () => {
 			offLimits: [],
 			constraints: [],
 			secondaryMetrics: [],
+			watchSeconds: null,
 		});
 		const a = storage.insertRun({
 			sessionId: session.id,
@@ -298,6 +379,7 @@ describe("AutoresearchStorage round-trip", () => {
 			offLimits: [],
 			constraints: [],
 			secondaryMetrics: ["memory_mb"],
+			watchSeconds: null,
 		});
 		const run = storage.insertRun({
 			sessionId: session.id,
@@ -361,6 +443,7 @@ describe("AutoresearchStorage round-trip", () => {
 			offLimits: [],
 			constraints: [],
 			secondaryMetrics: [],
+			watchSeconds: null,
 		});
 		storage.updateSession(session.id, { notes: "## Plan\n- step 1\n" });
 		expect(storage.getSessionById(session.id)?.notes).toBe("## Plan\n- step 1\n");
@@ -391,6 +474,7 @@ describe("autoresearch control state", () => {
 interface AutoresearchCommandHarness {
 	command: RegisteredCommand;
 	ctx: ExtensionCommandContext;
+	controlEntries: Array<{ data: unknown; type: string }>;
 	execCalls: Array<{ args: string[]; command: string }>;
 	sentMessages: string[];
 	notifications: Array<{ message: string; type: "info" | "warning" | "error" | undefined }>;
@@ -400,6 +484,7 @@ function createCommandHarness(
 	cwd: string,
 	execImpl?: (command: string, args: string[]) => Promise<{ code: number; stderr: string; stdout: string }>,
 ): AutoresearchCommandHarness {
+	const controlEntries: Array<{ data: unknown; type: string }> = [];
 	const execCalls: Array<{ args: string[]; command: string }> = [];
 	const sentMessages: string[] = [];
 	const notifications: Array<{ message: string; type: "info" | "warning" | "error" | undefined }> = [];
@@ -445,7 +530,9 @@ function createCommandHarness(
 	});
 
 	const api = {
-		appendEntry(): void {},
+		appendEntry(type: string, data: unknown): void {
+			controlEntries.push({ type, data });
+		},
 		exec: async (commandName: string, args: string[]) => {
 			execCalls.push({ args: [...args], command: commandName });
 			return execImpl ? execImpl(commandName, args) : { code: 0, stderr: "", stdout: "" };
@@ -508,7 +595,18 @@ function createCommandHarness(
 		waitForIdle: async () => {},
 	} as unknown as ExtensionCommandContext;
 
-	return { command, ctx, execCalls, sentMessages, notifications };
+	return { command, ctx, controlEntries, execCalls, sentMessages, notifications };
+}
+
+function createCleanRepoHarness(dir: string, branch = "main"): AutoresearchCommandHarness {
+	return createCommandHarness(dir, async (_command, args) => {
+		if (args[0] === "rev-parse") return { code: 0, stderr: "", stdout: `${dir}\n` };
+		if (args[0] === "branch" && args[1] === "--show-current") return { code: 0, stderr: "", stdout: `${branch}\n` };
+		if (args[0] === "status") return { code: 0, stderr: "", stdout: "" };
+		if (args[0] === "show-ref") return { code: 1, stderr: "", stdout: "" };
+		if (args[0] === "checkout") return { code: 0, stderr: "", stdout: "" };
+		return { code: 0, stderr: "", stdout: "" };
+	});
 }
 
 describe("autoresearch slash command", () => {
@@ -575,6 +673,98 @@ describe("autoresearch slash command", () => {
 		expect(harness.notifications.some(n => n.message.includes("Autoresearch enabled"))).toBe(false);
 		expect(harness.execCalls.find(c => c.command === "git" && c.args[0] === "checkout")).toBeUndefined();
 		expect(harness.sentMessages).toEqual([]);
+	});
+
+	it("strips --watch from the goal and records its configured seconds", async () => {
+		const harness = createCleanRepoHarness(makeTempDir().path());
+
+		await harness.command.handler("--watch=12.5 reduce benchmark variance", harness.ctx);
+
+		expect(harness.sentMessages).toEqual(["reduce benchmark variance"]);
+		expect(harness.controlEntries).toEqual([
+			{
+				type: "autoresearch-control",
+				data: { goal: "reduce benchmark variance", mode: "on", watchSeconds: 12.5 },
+			},
+		]);
+	});
+
+	it("strips --no-watch from the goal and records an explicit disabled watcher", async () => {
+		const harness = createCleanRepoHarness(makeTempDir().path());
+
+		await harness.command.handler("--no-watch optimize startup", harness.ctx);
+
+		expect(harness.sentMessages).toEqual(["optimize startup"]);
+		expect(harness.controlEntries).toEqual([
+			{
+				type: "autoresearch-control",
+				data: { goal: "optimize startup", mode: "on", watchSeconds: null },
+			},
+		]);
+	});
+
+	it("preserves the session watcher when resuming without a watch flag", async () => {
+		const dir = makeTempDir().path();
+		const harness = createCleanRepoHarness(dir, "autoresearch/resume");
+		const storage = await openAutoresearchStorage(dir);
+		const session = storage.openSession({
+			name: "resume",
+			goal: "resume the benchmark",
+			primaryMetric: "runtime_ms",
+			metricUnit: "ms",
+			direction: "lower",
+			preferredCommand: null,
+			branch: "autoresearch/resume",
+			baselineCommit: null,
+			maxIterations: null,
+			scopePaths: [],
+			offLimits: [],
+			constraints: [],
+			secondaryMetrics: [],
+			watchSeconds: 30,
+		});
+
+		await harness.command.handler("", harness.ctx);
+
+		expect(storage.getSessionById(session.id)?.watchSeconds).toBe(30);
+		expect(harness.controlEntries[0]).toMatchObject({
+			type: "autoresearch-control",
+			data: { mode: "on", watchSeconds: 30 },
+		});
+	});
+
+	it("rejects invalid watch values before checkout, messaging, or session mutation", async () => {
+		const dir = makeTempDir().path();
+		const harness = createCleanRepoHarness(dir, "autoresearch/unchanged");
+		const storage = await openAutoresearchStorage(dir);
+		const session = storage.openSession({
+			name: "unchanged",
+			goal: "keep this",
+			primaryMetric: "runtime_ms",
+			metricUnit: "ms",
+			direction: "lower",
+			preferredCommand: null,
+			branch: "autoresearch/unchanged",
+			baselineCommit: null,
+			maxIterations: null,
+			scopePaths: [],
+			offLimits: [],
+			constraints: [],
+			secondaryMetrics: [],
+			watchSeconds: 15,
+		});
+		const callsBefore = harness.execCalls.length;
+
+		for (const args of ["--watch", "--watch=0", "--watch=-1", "--watch=NaN", "--watch=Infinity"]) {
+			await harness.command.handler(args, harness.ctx);
+		}
+
+		expect(harness.execCalls).toHaveLength(callsBefore);
+		expect(harness.sentMessages).toEqual([]);
+		expect(harness.controlEntries).toEqual([]);
+		expect(harness.notifications).toHaveLength(5);
+		expect(harness.notifications.every(n => n.type === "error" && n.message.includes("positive finite"))).toBe(true);
+		expect(storage.getSessionById(session.id)).toMatchObject({ goal: "keep this", watchSeconds: 15 });
 	});
 });
 

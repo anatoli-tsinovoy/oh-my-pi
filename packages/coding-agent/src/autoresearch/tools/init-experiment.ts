@@ -118,6 +118,7 @@ export function createInitExperimentTool(
 					branch,
 					baselineCommit,
 					maxIterations,
+					watchSeconds: runtime.watchSeconds,
 					scopePaths,
 					offLimits,
 					constraints,
@@ -153,6 +154,7 @@ export function createInitExperimentTool(
 			const state = buildExperimentState(session, loggedRuns);
 			runtime.state = state;
 			runtime.goal = session.goal;
+			runtime.watchSeconds = session.watchSeconds;
 			runtime.autoresearchMode = true;
 			runtime.autoResumeArmed = true;
 			runtime.lastAutoResumePendingRunNumber = null;
@@ -193,6 +195,9 @@ export function createInitExperimentTool(
 			}
 			if (session.maxIterations !== null) {
 				lines.push(`Max iterations per segment: ${session.maxIterations}`);
+			}
+			if (session.watchSeconds !== null) {
+				lines.push(`Progress watcher: ${session.watchSeconds} seconds`);
 			}
 			if (session.branch) {
 				lines.push(`Active branch: ${session.branch}`);
