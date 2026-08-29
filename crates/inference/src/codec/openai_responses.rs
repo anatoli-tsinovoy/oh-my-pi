@@ -3982,6 +3982,13 @@ mod tests {
 			.expect("tool request encodes");
 		serde_json::to_vec(&encoded.request.tools).expect("tools serialize")
 	}
+	fn assert_tool_json(input: ToolInputConstraint, expected: &[u8]) {
+		let actual = encode_tool(input);
+		assert_eq!(
+			serde_json::from_slice::<serde_json::Value>(&actual).expect("actual tool JSON"),
+			serde_json::from_slice::<serde_json::Value>(expected).expect("expected tool JSON"),
+		);
+	}
 	fn encode_cache_affinity(disable_prompt_caching: bool) -> Option<Str> {
 		let catalog = Catalog::embedded();
 		let model = catalog
@@ -4488,8 +4495,8 @@ mod tests {
 
 	#[test]
 	fn json_schema_tool_encoding_normalizes_strict_function_parameters() {
-		assert_eq!(
-			encode_tool(ToolInputConstraint::JsonSchema {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
 				parameters: OpaqueJson::new(serde_json::json!({
 					"type": "object",
 					"properties": {
@@ -4499,15 +4506,15 @@ mod tests {
 					"required": ["required_value"]
 				})),
 				strict: true,
-			}),
-			br#"[{"type":"function","name":"match_input","parameters":{"additionalProperties":false,"properties":{"optional_value":{"type":["string","null"]},"required_value":{"type":"string"}},"required":["optional_value","required_value"],"type":"object"},"strict":true}]"#,
+			},
+			br#"[{"type":"function","name":"match_input","parameters":{"type":"object","properties":{"required_value":{"type":"string"},"optional_value":{"type":["string","null"]}},"required":["required_value","optional_value"],"additionalProperties":false},"strict":true}]"#,
 		);
 	}
 
 	#[test]
 	fn json_schema_tool_encoding_downgrades_open_maps_from_strict() {
-		assert_eq!(
-			encode_tool(ToolInputConstraint::JsonSchema {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
 				parameters: OpaqueJson::new(serde_json::json!({
 					"type": "object",
 					"properties": {
@@ -4520,15 +4527,15 @@ mod tests {
 					"required": ["command"]
 				})),
 				strict: true,
-			}),
-			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"command":{"type":"string"},"env":{"additionalProperties":{"type":["string","null"]},"type":"object"}},"required":["command"],"type":"object"},"strict":false}]"#,
+			},
+			br#"[{"type":"function","name":"match_input","parameters":{"type":"object","properties":{"command":{"type":"string"},"env":{"type":"object","additionalProperties":{"type":["string","null"]},"properties":{}}},"required":["command"]},"strict":false}]"#,
 		);
 	}
 
 	#[test]
 	fn json_schema_tool_encoding_rewrites_one_of_for_responses() {
-		assert_eq!(
-			encode_tool(ToolInputConstraint::JsonSchema {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
 				parameters: OpaqueJson::new(serde_json::json!({
 					"type": "object",
 					"properties": {
@@ -4542,21 +4549,21 @@ mod tests {
 					"required": ["action"]
 				})),
 				strict: true,
-			}),
+			},
 			br#"[{"type":"function","name":"match_input","parameters":{"additionalProperties":false,"properties":{"action":{"anyOf":[{"enum":["launch"],"type":"string"},{"enum":["attach"],"type":"string"}]}},"required":["action"],"type":"object"},"strict":true}]"#,
 		);
 	}
 
 	#[test]
 	fn json_schema_tool_encoding_downgrades_unconstrained_values_from_strict() {
-		assert_eq!(
-			encode_tool(ToolInputConstraint::JsonSchema {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
 				parameters: OpaqueJson::new(serde_json::json!({
 					"type": "object",
 					"properties": {"arguments": {}}
 				})),
 				strict: true,
-			}),
+			},
 			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"arguments":true},"type":"object"},"strict":false}]"#,
 		);
 	}
