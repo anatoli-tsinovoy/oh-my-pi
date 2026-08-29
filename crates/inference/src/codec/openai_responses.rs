@@ -3505,6 +3505,10 @@ impl Decoder for ResponsesDecoderAdapter {
 		}
 		Ok(())
 	}
+
+	fn is_complete(&self) -> bool {
+		self.inner.is_terminal()
+	}
 }
 
 fn encoding_error(code: &'static str) -> Error {
@@ -4925,6 +4929,31 @@ mod tests {
 			true,
 		);
 		assert_eq!(action, RetryAction::Never);
+	}
+
+	#[test]
+	fn terminal_envelope_completes_the_transport_before_eof() {
+		let mut adapter = ResponsesDecoderAdapter {
+			inner: OpenAiResponsesDecoder::default(),
+			request_id: RequestId::new("request"),
+			provider: ProviderId::from("openai"),
+			route: RouteId::from("openai/responses"),
+			wire_model: Some(sf!("gpt")),
+			thinking_close_max_retries: None,
+		};
+		assert!(!adapter.is_complete());
+		adapter
+			.push(
+				Frame::Sse(crate::transport::SseEvent {
+					name: None,
+					data: Bytes::from_static(
+						br#"{"type":"response.completed","response":{"id":"resp_complete","status":"completed"}}"#,
+					),
+				}),
+				&mut |_| {},
+			)
+			.expect("terminal Responses event");
+		assert!(adapter.is_complete());
 	}
 
 	#[test]
