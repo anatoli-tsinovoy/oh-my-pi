@@ -1264,8 +1264,8 @@ fn lower_tools(
 			None
 		};
 		let parameters = match (normalize, flattened) {
-			(true, Some(flattened)) => strict_schema(&flattened)?,
-			(true, None) => strict_schema(parameters.as_value())?,
+			(true, Some(flattened)) => strict_schema(&flattened),
+			(true, None) => strict_schema(parameters.as_value()),
 			(false, Some(flattened)) => flattened,
 			(false, None) => parameters.as_value().clone(),
 		};
@@ -1372,15 +1372,27 @@ fn exclusive_required_branch(branch: &Value) -> bool {
 		.all(|key| matches!(key.as_str(), "required" | "description" | "title"))
 }
 
-fn strict_schema(schema: &Value) -> Result<Value, Error> {
+pub(crate) fn strict_schema(schema: &Value) -> Value {
 	match schema {
 		Value::Object(object) => {
 			let mut output = object.clone();
+			if let Some(constant) = output.remove("const") {
+				let values = output
+					.entry("enum")
+					.or_insert_with(|| Value::Array(Vec::new()));
+				if let Value::Array(values) = values
+					&& !values.contains(&constant)
+				{
+					values.push(constant);
+				}
+			}
+			output.remove("default");
+			output.remove("format");
 			if let Some(Value::Object(properties)) = object.get("properties") {
 				let mut normalized = serde_json::Map::with_capacity(properties.len());
 				let mut required = Vec::with_capacity(properties.len());
 				for (name, property) in properties {
-					normalized.insert(name.clone(), strict_schema(property)?);
+					normalized.insert(name.clone(), strict_schema(property));
 					required.push(Value::String(name.clone()));
 				}
 				output.insert("properties".into(), Value::Object(normalized));
@@ -1389,21 +1401,84 @@ fn strict_schema(schema: &Value) -> Result<Value, Error> {
 			}
 			for keyword in ["items", "additionalProperties", "not", "if", "then", "else"] {
 				if let Some(value) = object.get(keyword).filter(|value| value.is_object()) {
-					output.insert(keyword.into(), strict_schema(value)?);
+					output.insert(keyword.into(), strict_schema(value));
 				}
 			}
 			for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
 				if let Some(Value::Array(values)) = object.get(keyword) {
-					output.insert(
-						keyword.into(),
-						Value::Array(values.iter().map(strict_schema).collect::<Result<_, _>>()?),
-					);
+					output
+						.insert(keyword.into(), Value::Array(values.iter().map(strict_schema).collect()));
 				}
 			}
-			Ok(Value::Object(output))
+			Value::Object(output)
 		},
-		_ => Ok(schema.clone()),
+		_ => schema.clone(),
 	}
+}
+
+/// Reports whether recursive strict normalization can preserve an input
+/// schema's object semantics.
+pub(crate) fn strict_schema_supported(schema: &Value) -> bool {
+	let Value::Object(object) = schema else {
+		return false;
+	};
+	if object
+		.get("additionalProperties")
+		.is_some_and(|additional| additional != &Value::Bool(false))
+	{
+		return false;
+	}
+	let representable = object.contains_key("type")
+		|| object.contains_key("$ref")
+		|| object.get("not").is_some_and(Value::is_object)
+		|| ["anyOf", "oneOf", "allOf"]
+			.iter()
+			.any(|key| object.get(*key).is_some_and(Value::is_array));
+	if !representable {
+		return false;
+	}
+	for key in [
+		"properties",
+		"patternProperties",
+		"dependencies",
+		"dependentSchemas",
+		"$defs",
+		"definitions",
+	] {
+		if let Some(Value::Object(entries)) = object.get(key)
+			&& !entries.values().all(strict_schema_supported)
+		{
+			return false;
+		}
+	}
+	for key in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+		if let Some(Value::Array(entries)) = object.get(key)
+			&& !entries.iter().all(strict_schema_supported)
+		{
+			return false;
+		}
+	}
+	for key in [
+		"items",
+		"additionalItems",
+		"contains",
+		"contentSchema",
+		"propertyNames",
+		"if",
+		"then",
+		"else",
+		"not",
+		"unevaluatedItems",
+		"unevaluatedProperties",
+	] {
+		if let Some(child) = object.get(key)
+			&& child.is_object()
+			&& !strict_schema_supported(child)
+		{
+			return false;
+		}
+	}
+	true
 }
 
 fn lower_hosted_tools(
@@ -1501,7 +1576,7 @@ fn lower_output(output: &Setting<StructuredOutput>) -> Result<Option<ResponseFor
 			json_schema: JsonSchemaFormat {
 				name:   name.clone(),
 				schema: if *strict {
-					strict_schema(schema.as_value())?
+					strict_schema(schema.as_value())
 				} else {
 					schema.as_value().clone()
 				},

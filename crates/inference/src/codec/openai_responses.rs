@@ -2694,7 +2694,7 @@ impl OpenAiResponsesCodec {
 					&& apply_patch == Some(ApplyPatchWireKind::Freeform);
 				let (kind, parameters, strict, format) = match &tool.input {
 					ToolInputConstraint::JsonSchema { parameters, strict } if !freeform_patch => {
-						let mut schema = parameters.as_value().clone();
+						let mut schema = sanitize_tool_schema(parameters.as_value());
 						if flatten_root_unions {
 							if let Some(flattened) =
 								openai_chat::flatten_exclusive_required_root_union(&schema)
@@ -2706,7 +2706,11 @@ impl OpenAiResponsesCodec {
 								return None;
 							}
 						}
-						(ResponsesToolKind::Function, Some(schema), Some(*strict), None)
+						let effective_strict = *strict && openai_chat::strict_schema_supported(&schema);
+						if effective_strict {
+							schema = openai_chat::strict_schema(&schema);
+						}
+						(ResponsesToolKind::Function, Some(schema), Some(effective_strict), None)
 					},
 					ToolInputConstraint::JsonSchema { .. } => {
 						(ResponsesToolKind::Custom, None, None, None)
@@ -3222,6 +3226,78 @@ struct ResponsesDecoderAdapter {
 	wire_model: Option<Str>,
 	thinking_close_max_retries: Option<u32>,
 }
+fn sanitize_tool_schema(schema: &Value) -> Value {
+	let Value::Object(object) = schema else {
+		return schema.clone();
+	};
+	if object.is_empty() {
+		return Value::Bool(true);
+	}
+	let mut output = serde_json::Map::with_capacity(object.len());
+	for (key, value) in object {
+		if key == "oneOf" && value.is_array() {
+			continue;
+		}
+		let normalized = match key.as_str() {
+			"properties" | "patternProperties" | "dependencies" | "dependentSchemas" | "$defs"
+			| "definitions" => {
+				if let Value::Object(entries) = value {
+					Value::Object(
+						entries
+							.iter()
+							.map(|(name, schema)| (name.clone(), sanitize_tool_schema(schema)))
+							.collect(),
+					)
+				} else {
+					value.clone()
+				}
+			},
+			"anyOf" | "allOf" | "prefixItems" => {
+				if let Value::Array(entries) = value {
+					Value::Array(entries.iter().map(sanitize_tool_schema).collect())
+				} else {
+					value.clone()
+				}
+			},
+			"items"
+			| "additionalItems"
+			| "contains"
+			| "contentSchema"
+			| "propertyNames"
+			| "if"
+			| "then"
+			| "else"
+			| "not"
+			| "additionalProperties"
+			| "unevaluatedItems"
+			| "unevaluatedProperties"
+				if value.is_object() =>
+			{
+				sanitize_tool_schema(value)
+			},
+			_ => value.clone(),
+		};
+		output.insert(key.clone(), normalized);
+	}
+	if let Some(Value::Array(one_of)) = object.get("oneOf") {
+		let rewritten = one_of.iter().map(sanitize_tool_schema);
+		match output.get_mut("anyOf") {
+			Some(Value::Array(any_of)) => any_of.extend(rewritten),
+			_ => {
+				output.insert("anyOf".into(), Value::Array(rewritten.collect()));
+			},
+		}
+	}
+	let object_typed = match object.get("type") {
+		Some(Value::String(kind)) => kind == "object",
+		Some(Value::Array(kinds)) => kinds.iter().any(|kind| kind.as_str() == Some("object")),
+		_ => false,
+	};
+	if object_typed && !object.contains_key("properties") {
+		output.insert("properties".into(), Value::Object(serde_json::Map::new()));
+	}
+	Value::Object(output)
+}
 
 impl ResponsesDecoderAdapter {
 	fn emit_projection(&self, projection: ResponsesProjection, emit: &mut dyn FnMut(RawEvent)) {
@@ -3285,7 +3361,7 @@ impl ResponsesDecoderAdapter {
 
 	fn error_from_evidence(&self, evidence: ResponsesErrorEvidence) -> Error {
 		use crate::{
-			error::{Error, ErrorKind, ErrorPhase, RetryAction},
+			error::{Error, ErrorDetail, ErrorKind, ErrorPhase, RetryAction},
 			receipt::ExecutionReceipt,
 		};
 		let model_policy_denial = evidence.continuation == ResponsesContinuationFailure::NotStale
@@ -3343,6 +3419,7 @@ impl ResponsesDecoderAdapter {
 		)
 		.provider(self.provider.clone())
 		.route(self.route.clone())
+		.detail(ErrorDetail::provider(evidence.message))
 		.request_id(self.request_id.clone())
 		.optional_code(code)
 		.committed(committed)
@@ -4385,13 +4462,77 @@ mod tests {
 	}
 
 	#[test]
-	fn json_schema_tool_encoding_remains_a_strict_function_tool() {
+	fn json_schema_tool_encoding_normalizes_strict_function_parameters() {
 		assert_eq!(
 			encode_tool(ToolInputConstraint::JsonSchema {
-				parameters: OpaqueJson::new(serde_json::json!({"type": "object"})),
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {
+						"required_value": {"type": "string"},
+						"optional_value": {"type": ["string", "null"]}
+					},
+					"required": ["required_value"]
+				})),
 				strict: true,
 			}),
-			br#"[{"type":"function","name":"match_input","parameters":{"type":"object"},"strict":true}]"#,
+			br#"[{"type":"function","name":"match_input","parameters":{"additionalProperties":false,"properties":{"optional_value":{"type":["string","null"]},"required_value":{"type":"string"}},"required":["optional_value","required_value"],"type":"object"},"strict":true}]"#,
+		);
+	}
+
+	#[test]
+	fn json_schema_tool_encoding_downgrades_open_maps_from_strict() {
+		assert_eq!(
+			encode_tool(ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {
+						"command": {"type": "string"},
+						"env": {
+							"type": "object",
+							"additionalProperties": {"type": ["string", "null"]}
+						}
+					},
+					"required": ["command"]
+				})),
+				strict: true,
+			}),
+			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"command":{"type":"string"},"env":{"additionalProperties":{"type":["string","null"]},"type":"object"}},"required":["command"],"type":"object"},"strict":false}]"#,
+		);
+	}
+
+	#[test]
+	fn json_schema_tool_encoding_rewrites_one_of_for_responses() {
+		assert_eq!(
+			encode_tool(ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {
+						"action": {
+							"oneOf": [
+								{"type": "string", "const": "launch"},
+								{"type": "string", "const": "attach"}
+							]
+						}
+					},
+					"required": ["action"]
+				})),
+				strict: true,
+			}),
+			br#"[{"type":"function","name":"match_input","parameters":{"additionalProperties":false,"properties":{"action":{"anyOf":[{"enum":["launch"],"type":"string"},{"enum":["attach"],"type":"string"}]}},"required":["action"],"type":"object"},"strict":true}]"#,
+		);
+	}
+
+	#[test]
+	fn json_schema_tool_encoding_downgrades_unconstrained_values_from_strict() {
+		assert_eq!(
+			encode_tool(ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {"arguments": {}}
+				})),
+				strict: true,
+			}),
+			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"arguments":true},"type":"object"},"strict":false}]"#,
 		);
 	}
 
