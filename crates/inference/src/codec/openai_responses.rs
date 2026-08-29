@@ -171,6 +171,14 @@ impl ResponsesContent {
 			file_id:   None,
 		}
 	}
+
+	fn message_text(role: ResponsesRole, text: impl Into<Str>) -> Self {
+		let mut content = Self::input_text(text);
+		if role == ResponsesRole::Assistant {
+			content.kind = ResponsesContentKind::OutputText;
+		}
+		content
+	}
 }
 
 /// Message input content, preserving the API's string and typed-part shapes.
@@ -328,9 +336,9 @@ pub struct ResponsesInputItem {
 	/// Tool output.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub output: Option<ResponsesToolOutput>,
-	/// Reasoning summaries.
-	#[serde(default, skip_serializing_if = "Vec::is_empty")]
-	pub summary: Vec<ResponsesSummaryPart>,
+	/// Reasoning summaries; present, including when empty, on reasoning items.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub summary: Option<Vec<ResponsesSummaryPart>>,
 	/// Encrypted reasoning continuation payload.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub encrypted_content: Option<Str>,
@@ -371,7 +379,7 @@ impl ResponsesInputItem {
 			arguments: None,
 			input: None,
 			output: None,
-			summary: Vec::new(),
+			summary: None,
 			encrypted_content: None,
 			actions: Vec::new(),
 			pending_safety_checks: Vec::new(),
@@ -2391,7 +2399,7 @@ impl OpenAiResponsesCodec {
 						arguments: None,
 						input: None,
 						output: None,
-						summary: Vec::new(),
+						summary: None,
 						encrypted_content: None,
 						actions: Vec::new(),
 						pending_safety_checks: Vec::new(),
@@ -2459,13 +2467,14 @@ impl OpenAiResponsesCodec {
 								input.push(ResponsesInputItem::message(role, mem::take(&mut content)));
 							}
 							let mut item =
-								ResponsesInputItem::message(role, vec![ResponsesContent::input_text(
+								ResponsesInputItem::message(role, vec![ResponsesContent::message_text(
+									role,
 									text.clone(),
 								)]);
 							item.id = decoded.item_id;
 							input.push(item);
 						} else {
-							content.push(ResponsesContent::input_text(text.clone()));
+							content.push(ResponsesContent::message_text(role, text.clone()));
 						}
 					},
 					ContentPart::Reasoning { text, proof } => {
@@ -2509,11 +2518,11 @@ impl OpenAiResponsesCodec {
 							arguments: None,
 							input: None,
 							output: None,
-							summary: if text.is_empty() {
+							summary: Some(if text.is_empty() {
 								Vec::new()
 							} else {
 								vec![ResponsesSummaryPart { kind: sf!("summary_text"), text: text.clone() }]
-							},
+							}),
 							encrypted_content: decoded.encrypted_reasoning,
 							actions: Vec::new(),
 							pending_safety_checks: Vec::new(),
@@ -2588,7 +2597,7 @@ impl OpenAiResponsesCodec {
 								arguments: (!custom).then(|| serialized.into()),
 								input: custom_input,
 								output: None,
-								summary: Vec::new(),
+								summary: None,
 								encrypted_content: None,
 								actions: Vec::new(),
 								pending_safety_checks: Vec::new(),
@@ -2630,7 +2639,7 @@ impl OpenAiResponsesCodec {
 							arguments: None,
 							input: None,
 							output: Some(ResponsesToolOutput::Text(output.into())),
-							summary: Vec::new(),
+							summary: None,
 							encrypted_content: None,
 							actions: Vec::new(),
 							pending_safety_checks: Vec::new(),
@@ -3325,13 +3334,28 @@ impl ResponsesDecoderAdapter {
 				emit(RawEvent::ProviderState(ProviderStateEvent::OutputItem { index, id }));
 			},
 			ResponsesProjection::ReasoningSignature { index, item_id, signature } => {
-				if let Some(id) = item_id {
-					emit(RawEvent::ProviderState(ProviderStateEvent::OutputItem { index, id }));
+				if let Some(id) = item_id.as_ref() {
+					emit(RawEvent::ProviderState(ProviderStateEvent::OutputItem {
+						index,
+						id: id.clone(),
+					}));
 				}
-				emit(RawEvent::ProviderState(ProviderStateEvent::ReasoningSignature {
-					index,
-					signature,
-				}));
+				let proof = ResponsesProviderProof {
+					item_id,
+					encrypted_reasoning: Some(Str::new(String::from_utf8_lossy(&signature).as_ref())),
+					..ResponsesProviderProof::default()
+				};
+				match encode_provider_proof(&proof) {
+					Ok(signature) => {
+						emit(RawEvent::ProviderState(ProviderStateEvent::ReasoningSignature {
+							index,
+							signature,
+						}));
+					},
+					Err(_) => {
+						emit(RawEvent::Failure(encoding_error("responses_reasoning_proof_serialization")))
+					},
+				}
 			},
 			ResponsesProjection::HostedTool { index, kind, completed } => {
 				let data = serde_json::to_vec(&HostedCheckpoint { index, kind, completed })
@@ -3525,6 +3549,36 @@ fn encoding_error(code: &'static str) -> Error {
 	.code(Str::new(code))
 }
 
+pub(super) fn encode_error(error: ResponsesEncodeError) -> Error {
+	match error {
+		ResponsesEncodeError::MismatchedProviderProof => {
+			encoding_error("mismatched_responses_provider_proof")
+		},
+		ResponsesEncodeError::MissingWireTarget => encoding_error("missing_responses_wire_target"),
+		ResponsesEncodeError::MissingCallIdentity => {
+			encoding_error("missing_responses_call_identity")
+		},
+		ResponsesEncodeError::UnresolvedStoredMedia => encoding_error("unresolved_responses_media"),
+		ResponsesEncodeError::UnreplayableProviderProof => {
+			encoding_error("unreplayable_responses_provider_proof")
+		},
+		ResponsesEncodeError::UnsupportedOutputFormat => {
+			encoding_error("unsupported_responses_output_format")
+		},
+		ResponsesEncodeError::UnsupportedComputerUse => {
+			encoding_error("unsupported_responses_computer_use")
+		},
+		ResponsesEncodeError::UnsupportedComputerUseConfig => {
+			encoding_error("unsupported_responses_computer_use_config")
+		},
+		ResponsesEncodeError::MalformedServerState => {
+			encoding_error("malformed_responses_server_state")
+		},
+		ResponsesEncodeError::MismatchedServerState => {
+			encoding_error("mismatched_responses_server_state")
+		},
+	}
+}
 pub(super) fn responses_uri(base_url: &str) -> Str {
 	openai_chat::join_uri(base_url, "/responses")
 }
@@ -3765,40 +3819,7 @@ impl Codec for OpenAiResponsesCodec {
 		let OperationCall::Chat(request) = operation else {
 			return Err(encoding_error("responses_operation_unsupported"));
 		};
-		let encoded = self
-			.encode_chat(context, request)
-			.map_err(|error| match error {
-				ResponsesEncodeError::MismatchedProviderProof => {
-					encoding_error("mismatched_responses_provider_proof")
-				},
-				ResponsesEncodeError::MissingWireTarget => {
-					encoding_error("missing_responses_wire_target")
-				},
-				ResponsesEncodeError::MissingCallIdentity => {
-					encoding_error("missing_responses_call_identity")
-				},
-				ResponsesEncodeError::UnresolvedStoredMedia => {
-					encoding_error("unresolved_responses_media")
-				},
-				ResponsesEncodeError::UnreplayableProviderProof => {
-					encoding_error("unreplayable_responses_provider_proof")
-				},
-				ResponsesEncodeError::UnsupportedOutputFormat => {
-					encoding_error("unsupported_responses_output_format")
-				},
-				ResponsesEncodeError::UnsupportedComputerUse => {
-					encoding_error("unsupported_responses_computer_use")
-				},
-				ResponsesEncodeError::UnsupportedComputerUseConfig => {
-					encoding_error("unsupported_responses_computer_use_config")
-				},
-				ResponsesEncodeError::MalformedServerState => {
-					encoding_error("malformed_responses_server_state")
-				},
-				ResponsesEncodeError::MismatchedServerState => {
-					encoding_error("mismatched_responses_server_state")
-				},
-			})?;
+		let encoded = self.encode_chat(context, request).map_err(encode_error)?;
 		if !encoded.adjustments.is_empty() {
 			return Err(encoding_error("responses_adjustment_requires_planning"));
 		}
@@ -4932,6 +4953,43 @@ mod tests {
 	}
 
 	#[test]
+	fn reasoning_signature_is_stored_as_a_typed_responses_proof() {
+		let adapter = ResponsesDecoderAdapter {
+			inner: OpenAiResponsesDecoder::default(),
+			request_id: RequestId::new("request"),
+			provider: ProviderId::from("openai-codex"),
+			route: RouteId::from("openai-codex/primary"),
+			wire_model: Some(sf!("gpt")),
+			thinking_close_max_retries: None,
+		};
+		let mut events = Vec::new();
+		adapter.emit_projection(
+			ResponsesProjection::ReasoningSignature {
+				index:     2,
+				item_id:   Some(sf!("rs_1")),
+				signature: Bytes::from_static(b"enc_reasoning"),
+			},
+			&mut |event| events.push(event),
+		);
+		let RawEvent::ProviderState(crate::codec::ProviderStateEvent::ReasoningSignature {
+			index,
+			signature,
+		}) = &events[1]
+		else {
+			panic!("typed reasoning proof");
+		};
+		assert_eq!(*index, 2);
+		assert_eq!(
+			super::decode_provider_proof(signature).expect("proof decodes"),
+			ResponsesProviderProof {
+				item_id: Some(sf!("rs_1")),
+				encrypted_reasoning: Some(sf!("enc_reasoning")),
+				..ResponsesProviderProof::default()
+			}
+		);
+	}
+
+	#[test]
 	fn terminal_envelope_completes_the_transport_before_eof() {
 		let mut adapter = ResponsesDecoderAdapter {
 			inner: OpenAiResponsesDecoder::default(),
@@ -5121,12 +5179,40 @@ mod tests {
 		// Canonical message(s) → calls → outputs, byte-exact on the wire.
 		assert_eq!(
 			serde_json::to_string(&encoded.request.input).expect("input serializes"),
-			r#"[{"role":"assistant","content":[{"type":"input_text","text":"<think>\n</thinking\n</think>"}]},{"type":"function_call","name":"read","call_id":"call_a","arguments":"{\"path\":\"a\"}"},{"type":"function_call","name":"read","call_id":"call_b","arguments":"{\"path\":\"b\"}"},{"type":"function_call","name":"read","call_id":"call_c","arguments":"{\"path\":\"c\"}"},{"type":"function_call_output","call_id":"call_a","output":"out a"},{"type":"function_call_output","call_id":"call_b","output":"out b"},{"type":"function_call_output","call_id":"call_c","output":"out c"},{"role":"user","content":[{"type":"input_text","text":"continue"}]}]"#,
+			r#"[{"role":"assistant","content":[{"type":"output_text","text":"<think>\n</thinking\n</think>"}]},{"type":"function_call","name":"read","call_id":"call_a","arguments":"{\"path\":\"a\"}"},{"type":"function_call","name":"read","call_id":"call_b","arguments":"{\"path\":\"b\"}"},{"type":"function_call","name":"read","call_id":"call_c","arguments":"{\"path\":\"c\"}"},{"type":"function_call_output","call_id":"call_a","output":"out a"},{"type":"function_call_output","call_id":"call_b","output":"out b"},{"type":"function_call_output","call_id":"call_c","output":"out c"},{"role":"user","content":[{"type":"input_text","text":"continue"}]}]"#,
 		);
 		// Hoisting is idempotent: a second pass changes nothing.
 		let mut again = encoded.request.input.clone();
 		hoist_interleaved_tool_batch_messages(&mut again);
 		assert_eq!(again, encoded.request.input);
+	}
+
+	#[test]
+	fn assistant_followup_after_tool_output_uses_output_text() {
+		let request = history_request(vec![
+			Message {
+				role:    Role::User,
+				content: Arc::from([ContentPart::Text { text: sf!("read it"), proof: None }]),
+				name:    None,
+			},
+			Message {
+				role:    Role::Assistant,
+				content: Arc::from([read_call("call_a", "a")]),
+				name:    None,
+			},
+			read_results(&[("call_a", "contents")]),
+			Message {
+				role:    Role::Assistant,
+				content: Arc::from([ContentPart::Text { text: sf!("done"), proof: None }]),
+				name:    None,
+			},
+		]);
+		let policy = policy::WirePolicy::baseline();
+		let encoded = encode_with_policy(&policy, |_, _| request);
+		assert_eq!(
+			serde_json::to_string(&encoded.request.input).expect("input serializes"),
+			r#"[{"role":"user","content":[{"type":"input_text","text":"read it"}]},{"type":"function_call","name":"read","call_id":"call_a","arguments":"{\"path\":\"a\"}"},{"type":"function_call_output","call_id":"call_a","output":"contents"},{"role":"assistant","content":[{"type":"output_text","text":"done"}]}]"#,
+		);
 	}
 
 	#[test]
@@ -5147,7 +5233,7 @@ mod tests {
 		let encoded = encode_with_policy(&policy, |_, _| request);
 		assert_eq!(
 			serde_json::to_string(&encoded.request.input).expect("input serializes"),
-			r#"[{"role":"assistant","content":[{"type":"input_text","text":"calling read on two files"}]},{"type":"function_call","name":"read","call_id":"call_a","arguments":"{\"path\":\"a\"}"},{"type":"function_call","name":"read","call_id":"call_b","arguments":"{\"path\":\"b\"}"},{"type":"function_call_output","call_id":"call_a","output":"out a"},{"type":"function_call_output","call_id":"call_b","output":"out b"}]"#,
+			r#"[{"role":"assistant","content":[{"type":"output_text","text":"calling read on two files"}]},{"type":"function_call","name":"read","call_id":"call_a","arguments":"{\"path\":\"a\"}"},{"type":"function_call","name":"read","call_id":"call_b","arguments":"{\"path\":\"b\"}"},{"type":"function_call_output","call_id":"call_a","output":"out a"},{"type":"function_call_output","call_id":"call_b","output":"out b"}]"#,
 		);
 	}
 	#[test]
