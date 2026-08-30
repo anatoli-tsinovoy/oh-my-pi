@@ -123,17 +123,6 @@ export class SessionObserverRegistry {
 		return count;
 	}
 
-	/** Accumulated direct spend reported by detached async subagents in this session tree. */
-	getAsyncSubagentCost(): number {
-		let total = 0;
-		for (const session of this.#sessions.values()) {
-			if (session.kind !== "subagent" || !session.detached) continue;
-			const cost = session.progress?.cost;
-			if (typeof cost === "number" && Number.isFinite(cost) && cost > 0) total += cost;
-		}
-		return total;
-	}
-
 	/** Clear all tracked sessions (e.g. on session switch). Keeps EventBus subscriptions and listeners. */
 	resetSessions(): void {
 		this.#sessions.clear();

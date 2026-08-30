@@ -61,6 +61,20 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
 }
 
 /**
+ * Sum detached async subagent spend from the same validated progress projection
+ * used by Agent Hub rows. Synchronous rows stay in the parent session cost.
+ */
+export function aggregateAsyncSubagentCost(sessions: readonly ObservableSession[]): number {
+	let total = 0;
+	for (const session of sessions) {
+		if (session.kind !== "subagent" || !session.detached) continue;
+		const metrics = progressMetrics(session);
+		if (metrics && metrics.cost > 0) total += metrics.cost;
+	}
+	return total;
+}
+
+/**
  * Read direct assistant usage from a live session. SessionStats also includes
  * usage embedded in completed `task` tool results, so using it for a parent
  * row would double-count child rows in the aggregate.

@@ -161,6 +161,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
+import { aggregateAsyncSubagentCost } from "./components/agent-hub-projection";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -1232,7 +1233,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 		this.syncRunningSubagentBadge();
-		this.statusLine.setAsyncSubagentCost(this.#observerRegistry.getAsyncSubagentCost());
+		this.statusLine.setAsyncSubagentCost(aggregateAsyncSubagentCost(this.#observerRegistry.getSessions()));
 		this.#observerRegistry.onChange(kind => {
 			this.#scheduleObserverUiSync(kind);
 		});
@@ -2533,7 +2534,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#flushObserverUiSync(): void {
 		this.syncRunningSubagentBadge({ requestRender: false });
-		this.statusLine.setAsyncSubagentCost(this.#observerRegistry.getAsyncSubagentCost());
+		this.statusLine.setAsyncSubagentCost(aggregateAsyncSubagentCost(this.#observerRegistry.getSessions()));
 		if (this.#observerUiSyncNeedsTodoReconcile) {
 			this.#observerUiSyncNeedsTodoReconcile = false;
 			this.#reconcileTodosWithSubagents();
@@ -5567,7 +5568,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	resetObserverRegistry(): void {
 		this.#observerRegistry.resetSessions();
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
-		this.statusLine.setAsyncSubagentCost(this.#observerRegistry.getAsyncSubagentCost());
+		this.statusLine.setAsyncSubagentCost(aggregateAsyncSubagentCost(this.#observerRegistry.getSessions()));
 	}
 
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void> {
