@@ -27,7 +27,8 @@ function finiteMetric(value: number | undefined): number {
 export function progressMetrics(observed: ObservableSession | undefined): AgentMetrics | undefined {
 	const progress = observed?.progress;
 	if (!progress) return undefined;
-	const { tokens, requests, toolCount: tools, cost, durationMs } = progress;
+	const { tokens, requests, toolCount: tools, durationMs } = progress;
+	const cost = progress.cost + (observed.priorTurnCost ?? 0);
 	if (
 		typeof tokens !== "number" ||
 		!Number.isFinite(tokens) ||
@@ -67,11 +68,19 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
  */
 export function aggregateAsyncSubagentCost(refs: readonly AgentRef[], sessions: readonly ObservableSession[]): number {
 	const observedById = new Map(sessions.map(session => [session.id, session]));
+	const refById = new Map(refs.map(ref => [ref.id, ref]));
+	const belongsToAsyncTree = (ref: AgentRef, observed: ObservableSession | undefined): boolean => {
+		if (!observed || observed.detached) return true;
+		for (let parentId = ref.parentId; parentId; parentId = refById.get(parentId)?.parentId) {
+			if (observedById.get(parentId)?.detached) return true;
+		}
+		return false;
+	};
 	let total = 0;
 	for (const ref of refs) {
 		if (ref.kind !== "sub") continue;
 		const observed = observedById.get(ref.id);
-		if (observed && !observed.detached) continue;
+		if (!belongsToAsyncTree(ref, observed)) continue;
 		const metrics = observed?.progress
 			? progressMetrics(observed)
 			: (ref.history?.metrics ?? (ref.session ? readSessionMetrics(ref.session) : undefined));

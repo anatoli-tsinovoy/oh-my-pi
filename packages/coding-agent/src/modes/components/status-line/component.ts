@@ -587,6 +587,7 @@ export class StatusLineComponent implements Component {
 		this.#runningSubagentIds = new Set(agentIds);
 	}
 
+	/** Set the observer-registry async cost aggregate; non-finite or non-positive values clear it. */
 	setAsyncSubagentCost(cost: number): void {
 		this.#asyncSubagentCost = Number.isFinite(cost) && cost > 0 ? cost : 0;
 	}
@@ -1835,7 +1836,8 @@ export class StatusLineComponent implements Component {
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
-			asyncSubagentCost: this.#resolveSettings().showAsyncSubagentCost ? this.#asyncSubagentCost : 0,
+			asyncSubagentCost:
+				this.#resolveSettings().showAsyncSubagentCost && !this.#focusedAgentId ? this.#asyncSubagentCost : 0,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled),

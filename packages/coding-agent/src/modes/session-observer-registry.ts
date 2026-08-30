@@ -22,6 +22,8 @@ export interface ObservableSession {
 	lastUpdate: number;
 	/** Latest progress snapshot from the subagent executor */
 	progress?: AgentProgress;
+	/** Spend finalized by earlier turns that reused this agent id. */
+	priorTurnCost?: number;
 }
 
 /** Coarse source of an observer change; callers use it to separate lifecycle work from high-frequency progress. */
@@ -176,6 +178,12 @@ export class SessionObserverRegistry {
 						this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
 						const existing = this.#sessions.get(payload.id);
 						if (existing) {
+							if (status === "active" && existing.status !== "active") {
+								const settledCost = existing.progress?.cost;
+								if (typeof settledCost === "number" && Number.isFinite(settledCost) && settledCost > 0) {
+									existing.priorTurnCost = (existing.priorTurnCost ?? 0) + settledCost;
+								}
+							}
 							existing.status = status;
 							existing.lastUpdate = Date.now();
 							existing.index = payload.index;

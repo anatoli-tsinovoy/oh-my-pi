@@ -165,10 +165,9 @@ describe("StatusLineComponent", () => {
 		expect(stripped).not.toContain("(adv)");
 	});
 
-	it("shows async subagent cost only when enabled", () => {
-		const statusLine = new StatusLineComponent(
-			makeSessionWithLastMessage(null, false, { cost: 2.67 }) as unknown as AgentSession,
-		);
+	it("shows async subagent cost only when enabled and the main session is focused", () => {
+		const session = makeSessionWithLastMessage(null, false, { cost: 2.67 }) as unknown as AgentSession;
+		const statusLine = new StatusLineComponent(session);
 		statusLine.setAsyncSubagentCost(0.41);
 		statusLine.updateSettings({
 			preset: "custom",
@@ -188,6 +187,11 @@ describe("StatusLineComponent", () => {
 		});
 		const visible = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
 		expect(visible).toContain("$2.67 + $0.41 (async)");
+
+		statusLine.setSession(session, "AsyncAgent");
+		const focused = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(focused).toContain("$2.67");
+		expect(focused).not.toContain("(async)");
 	});
 
 	it("renders Nerd Font symbols for subscription and advisor costs", async () => {
