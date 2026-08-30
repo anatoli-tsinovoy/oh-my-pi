@@ -61,14 +61,20 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
 }
 
 /**
- * Sum detached async subagent spend from the same validated progress projection
- * used by Agent Hub rows. Synchronous rows stay in the parent session cost.
+ * Sum async subagent spend from the same observer/history/session projection
+ * used by Agent Hub rows. Live synchronous rows are excluded; restored rows
+ * have no persisted execution-mode bit, so their Hub metrics are retained.
  */
-export function aggregateAsyncSubagentCost(sessions: readonly ObservableSession[]): number {
+export function aggregateAsyncSubagentCost(refs: readonly AgentRef[], sessions: readonly ObservableSession[]): number {
+	const observedById = new Map(sessions.map(session => [session.id, session]));
 	let total = 0;
-	for (const session of sessions) {
-		if (session.kind !== "subagent" || !session.detached) continue;
-		const metrics = progressMetrics(session);
+	for (const ref of refs) {
+		if (ref.kind !== "sub") continue;
+		const observed = observedById.get(ref.id);
+		if (observed && !observed.detached) continue;
+		const metrics = observed?.progress
+			? progressMetrics(observed)
+			: (ref.history?.metrics ?? (ref.session ? readSessionMetrics(ref.session) : undefined));
 		if (metrics && metrics.cost > 0) total += metrics.cost;
 	}
 	return total;
