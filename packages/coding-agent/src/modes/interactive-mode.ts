@@ -2221,7 +2221,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.statusLine.setRunningSubagents(agentIds);
 		this.statusLine.setAsyncSubagentCost(
-			aggregateAsyncSubagentCost(registry.list(), this.#observerRegistry.getSessions()),
+			aggregateAsyncSubagentCost(
+				registry.list(),
+				this.#observerRegistry.getSessions(),
+				this.sessionManager.getSessionFile(),
+			),
 		);
 		if (options.requestRender !== false) this.ui.requestRender();
 	}

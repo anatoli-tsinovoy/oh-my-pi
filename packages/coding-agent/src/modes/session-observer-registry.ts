@@ -173,6 +173,12 @@ export class SessionObserverRegistry {
 						const payload = data as SubagentLifecyclePayload;
 						const status = STATUS_MAP[payload.status];
 						if (!status) return;
+						const restoredCost =
+							typeof payload.restoredCost === "number" &&
+							Number.isFinite(payload.restoredCost) &&
+							payload.restoredCost > 0
+								? payload.restoredCost
+								: undefined;
 
 						const sortOrder = this.#ensureSortOrder(payload.id);
 						this.#ensureParentSortOrder(payload.parentToolCallId, sortOrder);
@@ -183,6 +189,12 @@ export class SessionObserverRegistry {
 								if (typeof settledCost === "number" && Number.isFinite(settledCost) && settledCost > 0) {
 									existing.priorTurnCost = (existing.priorTurnCost ?? 0) + settledCost;
 								}
+							}
+							// A cold follow-up starts with a fresh progress snapshot. Seed its
+							// persisted baseline only when this observer has not seen a prior
+							// snapshot; same-process turns retain the settled-cost path above.
+							if (status === "active" && existing.progress === undefined && restoredCost !== undefined) {
+								existing.priorTurnCost ??= restoredCost;
 							}
 							existing.status = status;
 							existing.lastUpdate = Date.now();
@@ -204,6 +216,7 @@ export class SessionObserverRegistry {
 								detached: payload.detached,
 								index: payload.index,
 								lastUpdate: Date.now(),
+								...(status === "active" && restoredCost !== undefined ? { priorTurnCost: restoredCost } : {}),
 							});
 						}
 						this.#notifyListeners("lifecycle");

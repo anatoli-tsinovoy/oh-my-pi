@@ -1,5 +1,6 @@
 import type { AgentMetricsSummary, AgentRef, AgentStatus } from "../../registry/agent-registry";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { sessionFileBelongsToRoot } from "../../registry/persisted-agents";
 import type { ObservableSession } from "../session-observer-registry";
 
 export type AgentMetrics = AgentMetricsSummary;
@@ -63,16 +64,26 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
 
 /**
  * Sum async subagent spend from the same observer/history/session projection
- * used by Agent Hub rows. Live synchronous rows are excluded; restored rows
- * have no persisted execution-mode bit, so their Hub metrics are retained.
+ * used by Agent Hub rows. A ref must belong to the active root session; rows
+ * without a session file are eligible only while currently observed. Detached
+ * mode comes from the observer when known, then persisted history. An explicit
+ * async ancestor also makes its descendants eligible.
  */
-export function aggregateAsyncSubagentCost(refs: readonly AgentRef[], sessions: readonly ObservableSession[]): number {
+export function aggregateAsyncSubagentCost(
+	refs: readonly AgentRef[],
+	sessions: readonly ObservableSession[],
+	rootSessionFile?: string,
+): number {
 	const observedById = new Map(sessions.map(session => [session.id, session]));
 	const refById = new Map(refs.map(ref => [ref.id, ref]));
+	const detachedMode = (ref: AgentRef | undefined, observed: ObservableSession | undefined): boolean | undefined =>
+		typeof observed?.detached === "boolean" ? observed.detached : ref?.history?.detached;
 	const belongsToAsyncTree = (ref: AgentRef, observed: ObservableSession | undefined): boolean => {
-		if (!observed || observed.detached) return true;
-		for (let parentId = ref.parentId; parentId; parentId = refById.get(parentId)?.parentId) {
-			if (observedById.get(parentId)?.detached) return true;
+		if (detachedMode(ref, observed) === true) return true;
+		const seen = new Set<string>();
+		for (let parentId = ref.parentId; parentId && !seen.has(parentId); parentId = refById.get(parentId)?.parentId) {
+			seen.add(parentId);
+			if (detachedMode(refById.get(parentId), observedById.get(parentId)) === true) return true;
 		}
 		return false;
 	};
@@ -80,6 +91,13 @@ export function aggregateAsyncSubagentCost(refs: readonly AgentRef[], sessions: 
 	for (const ref of refs) {
 		if (ref.kind !== "sub") continue;
 		const observed = observedById.get(ref.id);
+		if (
+			typeof ref.sessionFile === "string"
+				? !rootSessionFile || !sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile)
+				: !observed
+		) {
+			continue;
+		}
 		if (!belongsToAsyncTree(ref, observed)) continue;
 		const metrics = observed?.progress
 			? progressMetrics(observed)
