@@ -732,6 +732,7 @@ export class SelectorController {
 					compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 					showAsyncSubagentCost: settings.get("statusLine.showAsyncSubagentCost"),
 				};
+				this.ctx.syncRunningSubagentBadge();
 				this.ctx.statusLine.updateSettings(statusLineSettings);
 				this.ctx.ui.requestRender();
 				break;

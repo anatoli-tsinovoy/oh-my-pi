@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { aggregateAsyncSubagentCost } from "../../src/modes/components/agent-hub-projection";
 
 const SONNET = { provider: "anthropic", model: "claude-sonnet-5" };
 const SOL = { provider: "openai-codex", model: "gpt-5.6-sol" };
@@ -86,6 +87,7 @@ describe("persisted agent model attribution", () => {
 		expect(history?.modelRole).toBe("task");
 		// Every assistant turn still counts toward the row's telemetry.
 		expect(history?.metrics?.requests).toBe(3);
+		expect(aggregateAsyncSubagentCost(registry.list(), [])).toBe(1.5);
 	});
 
 	it("treats a stall aborted mid-tool-call as unserved despite its partial content", async () => {

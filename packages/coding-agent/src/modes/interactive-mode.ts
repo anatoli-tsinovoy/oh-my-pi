@@ -102,6 +102,7 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 	type: "text",
 };
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { registerPersistedSubagents } from "../registry/persisted-agents";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -836,6 +837,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#observerUiSyncNeedsTodoReconcile = false;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
+	#asyncCostHydrationSessionFile?: string;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
@@ -2192,9 +2194,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
+	/** Load persisted agent rows when their costs are requested outside the Agent Hub. */
+	#hydrateAsyncSubagentCosts(): void {
+		if (!settings.get("statusLine.showAsyncSubagentCost")) return;
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile || this.#asyncCostHydrationSessionFile === sessionFile) return;
+		this.#asyncCostHydrationSessionFile = sessionFile;
+		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		void registerPersistedSubagents(registry, sessionFile).catch(error => {
+			if (this.#asyncCostHydrationSessionFile === sessionFile) this.#asyncCostHydrationSessionFile = undefined;
+			logger.warn("Failed to load async subagent costs for status line", { error });
+		});
+	}
+
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		this.#hydrateAsyncSubagentCosts();
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
