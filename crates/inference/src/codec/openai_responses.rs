@@ -2703,6 +2703,10 @@ impl OpenAiResponsesCodec {
 					&& apply_patch == Some(ApplyPatchWireKind::Freeform);
 				let (kind, parameters, strict, format) = match &tool.input {
 					ToolInputConstraint::JsonSchema { parameters, strict } if !freeform_patch => {
+						// Eligibility must be decided before sanitization:
+						// adding `properties: {}` to a propertyless object
+						// would otherwise make an open map look closed.
+						let original_strict = openai_chat::strict_schema_supported(parameters.as_value());
 						let mut schema = sanitize_tool_schema(parameters.as_value());
 						if flatten_root_unions {
 							if let Some(flattened) =
@@ -2715,7 +2719,13 @@ impl OpenAiResponsesCodec {
 								return None;
 							}
 						}
-						let effective_strict = *strict && openai_chat::strict_schema_supported(&schema);
+						// Responses strict schemas only have an exact
+						// representation after oneOf was either proven
+						// disjoint and lowered by the sanitizer or absent.
+						let effective_strict = *strict
+							&& original_strict
+							&& openai_chat::strict_schema_supported(&schema)
+							&& !contains_one_of(&schema);
 						if effective_strict {
 							schema = openai_chat::strict_schema(&schema);
 						}
@@ -3235,6 +3245,10 @@ struct ResponsesDecoderAdapter {
 	wire_model: Option<Str>,
 	thinking_close_max_retries: Option<u32>,
 }
+/// Normalizes a schema for the Responses tool wire shape without changing its
+/// assertions. `oneOf` is lowered to `anyOf` only when the branches are
+/// provably disjoint and there is no sibling `anyOf` whose conjunction would
+/// otherwise be lost.
 fn sanitize_tool_schema(schema: &Value) -> Value {
 	let Value::Object(object) = schema else {
 		return schema.clone();
@@ -3242,9 +3256,15 @@ fn sanitize_tool_schema(schema: &Value) -> Value {
 	if object.is_empty() {
 		return Value::Bool(true);
 	}
+	let rewrite_one_of = object
+		.get("oneOf")
+		.and_then(Value::as_array)
+		.is_some_and(|branches| {
+			!object.contains_key("anyOf") && one_of_branches_are_disjoint(branches)
+		});
 	let mut output = serde_json::Map::with_capacity(object.len());
 	for (key, value) in object {
-		if key == "oneOf" && value.is_array() {
+		if key == "oneOf" && rewrite_one_of {
 			continue;
 		}
 		let normalized = match key.as_str() {
@@ -3261,7 +3281,7 @@ fn sanitize_tool_schema(schema: &Value) -> Value {
 					value.clone()
 				}
 			},
-			"anyOf" | "allOf" | "prefixItems" => {
+			"anyOf" | "allOf" | "oneOf" | "prefixItems" => {
 				if let Value::Array(entries) = value {
 					Value::Array(entries.iter().map(sanitize_tool_schema).collect())
 				} else {
@@ -3288,14 +3308,9 @@ fn sanitize_tool_schema(schema: &Value) -> Value {
 		};
 		output.insert(key.clone(), normalized);
 	}
-	if let Some(Value::Array(one_of)) = object.get("oneOf") {
-		let rewritten = one_of.iter().map(sanitize_tool_schema);
-		match output.get_mut("anyOf") {
-			Some(Value::Array(any_of)) => any_of.extend(rewritten),
-			_ => {
-				output.insert("anyOf".into(), Value::Array(rewritten.collect()));
-			},
-		}
+	if rewrite_one_of && let Some(Value::Array(one_of)) = object.get("oneOf") {
+		output
+			.insert("anyOf".into(), Value::Array(one_of.iter().map(sanitize_tool_schema).collect()));
 	}
 	let object_typed = match object.get("type") {
 		Some(Value::String(kind)) => kind == "object",
@@ -3306,6 +3321,91 @@ fn sanitize_tool_schema(schema: &Value) -> Value {
 		output.insert("properties".into(), Value::Object(serde_json::Map::new()));
 	}
 	Value::Object(output)
+}
+
+/// True when every pair of `oneOf` branches has a syntactic disjointness
+/// proof. The proof is deliberately conservative: unknown constraints never
+/// authorize an exclusive union to be represented as an inclusive one.
+fn one_of_branches_are_disjoint(branches: &[Value]) -> bool {
+	for (index, left) in branches.iter().enumerate() {
+		if branches
+			.iter()
+			.skip(index + 1)
+			.any(|right| !schemas_are_disjoint(left, right))
+		{
+			return false;
+		}
+	}
+	true
+}
+
+fn schemas_are_disjoint(left: &Value, right: &Value) -> bool {
+	if let (Some(left_values), Some(right_values)) =
+		(exact_schema_values(left), exact_schema_values(right))
+	{
+		return left_values.iter().all(|left| {
+			right_values
+				.iter()
+				.all(|right| !openai_chat::schema_value_equal(left, right))
+		});
+	}
+	if let (Some(left_types), Some(right_types)) = (schema_types(left), schema_types(right)) {
+		return left_types.iter().all(|left| {
+			right_types
+				.iter()
+				.all(|right| schema_types_are_disjoint(left, right))
+		});
+	}
+	false
+}
+
+fn schema_types_are_disjoint(left: &str, right: &str) -> bool {
+	left != right && !matches!((left, right), ("integer", "number") | ("number", "integer"))
+}
+
+fn exact_schema_values(schema: &Value) -> Option<Vec<&Value>> {
+	let object = schema.as_object()?;
+	match (object.get("const"), object.get("enum")) {
+		(Some(constant), Some(Value::Array(values))) => {
+			if values
+				.iter()
+				.any(|value| openai_chat::schema_value_equal(value, constant))
+			{
+				Some(vec![constant])
+			} else {
+				Some(Vec::new())
+			}
+		},
+		(Some(_), Some(_)) => None,
+		(Some(constant), None) => Some(vec![constant]),
+		(None, Some(Value::Array(values))) => Some(values.iter().collect()),
+		_ => None,
+	}
+}
+
+fn schema_types(schema: &Value) -> Option<Vec<&str>> {
+	let object = schema.as_object()?;
+	match object.get("type") {
+		Some(Value::String(kind)) => Some(vec![kind.as_str()]),
+		Some(Value::Array(kinds)) => {
+			let mut types = Vec::with_capacity(kinds.len());
+			for kind in kinds {
+				types.push(kind.as_str()?);
+			}
+			Some(types)
+		},
+		_ => None,
+	}
+}
+
+fn contains_one_of(schema: &Value) -> bool {
+	match schema {
+		Value::Array(entries) => entries.iter().any(contains_one_of),
+		Value::Object(object) => object
+			.iter()
+			.any(|(key, value)| key == "oneOf" || contains_one_of(value)),
+		_ => false,
+	}
 }
 
 impl ResponsesDecoderAdapter {
@@ -3342,7 +3442,7 @@ impl ResponsesDecoderAdapter {
 				}
 				let proof = ResponsesProviderProof {
 					item_id,
-					encrypted_reasoning: Some(Str::new(String::from_utf8_lossy(&signature).as_ref())),
+					encrypted_reasoning: Some(Str::from_utf8_lossy(&signature)),
 					..ResponsesProviderProof::default()
 				};
 				match encode_provider_proof(&proof) {
@@ -4533,6 +4633,17 @@ mod tests {
 	}
 
 	#[test]
+	fn json_schema_tool_encoding_keeps_declared_strict_root_maps_open() {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({"type": "object"})),
+				strict: true,
+			},
+			br#"[{"type":"function","name":"match_input","parameters":{"type":"object","properties":{}},"strict":false}]"#,
+		);
+	}
+
+	#[test]
 	fn json_schema_tool_encoding_rewrites_one_of_for_responses() {
 		assert_tool_json(
 			ToolInputConstraint::JsonSchema {
@@ -4551,6 +4662,86 @@ mod tests {
 				strict: true,
 			},
 			br#"[{"type":"function","name":"match_input","parameters":{"additionalProperties":false,"properties":{"action":{"anyOf":[{"enum":["launch"],"type":"string"},{"enum":["attach"],"type":"string"}]}},"required":["action"],"type":"object"},"strict":true}]"#,
+		);
+	}
+
+	#[test]
+	fn json_schema_tool_encoding_preserves_any_of_one_of_conjunction() {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {
+						"action": {
+							"anyOf": [{"type": "string"}],
+							"oneOf": [{"type": "number"}, {"type": "boolean"}]
+						}
+					},
+					"required": ["action"]
+				})),
+				strict: true,
+			},
+			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"action":{"anyOf":[{"type":"string"}],"oneOf":[{"type":"number"},{"type":"boolean"}]}},"required":["action"],"type":"object"},"strict":false}]"#,
+		);
+	}
+
+	#[test]
+	fn json_schema_tool_encoding_preserves_overlapping_one_of_and_downgrades_strict() {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {
+						"value": {
+							"oneOf": [
+								{"type": "number"},
+								{"type": "number", "minimum": 0}
+							]
+						}
+					},
+					"required": ["value"]
+				})),
+				strict: true,
+			},
+			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"value":{"oneOf":[{"type":"number"},{"minimum":0,"type":"number"}]}},"required":["value"],"type":"object"},"strict":false}]"#,
+		);
+	}
+
+	#[test]
+	fn json_schema_tool_encoding_preserves_nested_numeric_equivalent_one_of_constants() {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {
+						"value": {
+							"oneOf": [{"const": {"x": 1}}, {"const": {"x": 1.0}}]
+						}
+					},
+					"required": ["value"]
+				})),
+				strict: false,
+			},
+			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"value":{"oneOf":[{"const":{"x":1}},{"const":{"x":1.0}}]}},"required":["value"],"type":"object"},"strict":false}]"#,
+		);
+	}
+
+	#[test]
+	fn json_schema_tool_encoding_preserves_integer_number_one_of_overlap() {
+		assert_tool_json(
+			ToolInputConstraint::JsonSchema {
+				parameters: OpaqueJson::new(serde_json::json!({
+					"type": "object",
+					"properties": {
+						"value": {
+							"oneOf": [{"type": "integer"}, {"type": "number"}]
+						}
+					},
+					"required": ["value"]
+				})),
+				strict: false,
+			},
+			br#"[{"type":"function","name":"match_input","parameters":{"properties":{"value":{"oneOf":[{"type":"integer"},{"type":"number"}]}},"required":["value"],"type":"object"},"strict":false}]"#,
 		);
 	}
 
@@ -4994,6 +5185,36 @@ mod tests {
 				..ResponsesProviderProof::default()
 			}
 		);
+	}
+
+	#[test]
+	fn invalid_reasoning_signature_uses_lossy_shared_string() {
+		let adapter = ResponsesDecoderAdapter {
+			inner: OpenAiResponsesDecoder::default(),
+			request_id: RequestId::new("request"),
+			provider: ProviderId::from("openai-codex"),
+			route: RouteId::from("openai-codex/primary"),
+			wire_model: Some(sf!("gpt")),
+			thinking_close_max_retries: None,
+		};
+		let mut events = Vec::new();
+		adapter.emit_projection(
+			ResponsesProjection::ReasoningSignature {
+				index:     0,
+				item_id:   None,
+				signature: Bytes::from_static(b"enc_\xff"),
+			},
+			&mut |event| events.push(event),
+		);
+		let RawEvent::ProviderState(crate::codec::ProviderStateEvent::ReasoningSignature {
+			signature,
+			..
+		}) = &events[0]
+		else {
+			panic!("typed reasoning proof");
+		};
+		let proof = super::decode_provider_proof(signature).expect("proof decodes");
+		assert_eq!(proof.encrypted_reasoning.as_deref(), Some("enc_�"));
 	}
 
 	#[test]
