@@ -88,6 +88,10 @@ function formatAdvisorSpend(amount: number, usingSubscription: boolean, uiTheme:
 	return `${spend} (adv)`;
 }
 
+function formatAsyncSubagentSpend(amount: number, uiTheme: Theme): string {
+	return `${formatSpend(amount, false, uiTheme)} (async)`;
+}
+
 const SCRATCH_ROOTS: readonly string[] = (() => {
 	const roots = new Set<string>([os.tmpdir(), path.join(os.homedir(), "tmp")]);
 	if (process.platform === "win32") {
@@ -504,11 +508,12 @@ const costSegment: StatusLineSegment = {
 	render(ctx) {
 		const { cost, premiumRequests } = ctx.usageStats;
 		const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
+		const asyncSubagentCost = ctx.asyncSubagentCost ?? 0;
 		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 
-		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
+		if (!cost && !asyncSubagentCost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
 		}
 
@@ -521,6 +526,10 @@ const costSegment: StatusLineSegment = {
 			);
 		}
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
+		if (asyncSubagentCost) {
+			const prefix = billingParts.length ? "+ " : "";
+			billingParts.push(`${prefix}${formatAsyncSubagentSpend(asyncSubagentCost, theme)}`);
+		}
 		if (advisorCost) {
 			const prefix = billingParts.length ? "+ " : "";
 			// Resolve the advisor subscription flag lazily: with no active advisor

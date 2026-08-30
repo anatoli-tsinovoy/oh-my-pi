@@ -165,6 +165,31 @@ describe("StatusLineComponent", () => {
 		expect(stripped).not.toContain("(adv)");
 	});
 
+	it("shows async subagent cost only when enabled", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, { cost: 2.67 }) as unknown as AgentSession,
+		);
+		statusLine.setAsyncSubagentCost(0.41);
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["cost"],
+			rightSegments: [],
+			showAsyncSubagentCost: false,
+		});
+		const hidden = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(hidden).toContain("$2.67");
+		expect(hidden).not.toContain("(async)");
+
+		statusLine.updateSettings({
+			preset: "custom",
+			leftSegments: ["cost"],
+			rightSegments: [],
+			showAsyncSubagentCost: true,
+		});
+		const visible = Bun.stripANSI(statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content);
+		expect(visible).toContain("$2.67 + $0.41 (async)");
+	});
+
 	it("renders Nerd Font symbols for subscription and advisor costs", async () => {
 		const baseTheme = await getThemeByName("dark");
 		if (!baseTheme) throw new Error("theme unavailable");

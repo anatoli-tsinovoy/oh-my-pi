@@ -1232,6 +1232,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
 		this.syncRunningSubagentBadge();
+		this.statusLine.setAsyncSubagentCost(this.#observerRegistry.getAsyncSubagentCost());
 		this.#observerRegistry.onChange(kind => {
 			this.#scheduleObserverUiSync(kind);
 		});
@@ -2130,6 +2131,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			showAsyncSubagentCost: settings.get("statusLine.showAsyncSubagentCost"),
 			contextLine: settings.get("statusLine.contextLine"),
 		});
 	}
@@ -2531,6 +2533,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#flushObserverUiSync(): void {
 		this.syncRunningSubagentBadge({ requestRender: false });
+		this.statusLine.setAsyncSubagentCost(this.#observerRegistry.getAsyncSubagentCost());
 		if (this.#observerUiSyncNeedsTodoReconcile) {
 			this.#observerUiSyncNeedsTodoReconcile = false;
 			this.#reconcileTodosWithSubagents();
@@ -5564,6 +5567,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	resetObserverRegistry(): void {
 		this.#observerRegistry.resetSessions();
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
+		this.statusLine.setAsyncSubagentCost(this.#observerRegistry.getAsyncSubagentCost());
 	}
 
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void> {
