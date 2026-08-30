@@ -3,7 +3,8 @@ import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { aggregateAsyncSubagentCost } from "../../src/modes/components/agent-hub-projection";
+import { aggregateUnreportedSubagentCost } from "../../src/modes/components/agent-hub-projection";
+import type { SessionEntry } from "../../src/session/session-entries";
 
 const SONNET = { provider: "anthropic", model: "claude-sonnet-5" };
 const SOL = { provider: "openai-codex", model: "gpt-5.6-sol" };
@@ -85,6 +86,22 @@ async function historiesFor(
 	return { registry, rootSessionFile };
 }
 
+function rootTaskResult(details: unknown): SessionEntry {
+	return {
+		type: "message",
+		id: "root-task-result",
+		parentId: null,
+		timestamp: "2026-08-07T11:00:00.000Z",
+		message: {
+			role: "toolResult",
+			toolCallId: "task-call",
+			toolName: "task",
+			content: [{ type: "text", text: "done" }],
+			details,
+		},
+	} as unknown as SessionEntry;
+}
+
 describe("persisted agent model attribution", () => {
 	it("reports the model that produced output, not a fallback that never served", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-incident-");
@@ -105,10 +122,10 @@ describe("persisted agent model attribution", () => {
 		expect(history?.modelRole).toBe("task");
 		// Every assistant turn still counts toward the row's telemetry.
 		expect(history?.metrics?.requests).toBe(3);
-		expect(aggregateAsyncSubagentCost(registry.list(), [], rootSessionFile)).toBe(1.5);
+		expect(aggregateUnreportedSubagentCost(registry.list(), [], rootSessionFile)).toBe(1.5);
 	});
 
-	it("restores detached mode from session_init and uses it for async aggregation", async () => {
+	it("counts restored detached, blocking, and unknown legacy children unless root results represent them", async () => {
 		using tempDir = TempDir.createSync("@omp-attribution-detached-");
 		const { registry, rootSessionFile } = await historiesFor(tempDir.path(), [
 			{
@@ -137,7 +154,12 @@ describe("persisted agent model attribution", () => {
 		expect(registry.get("RestoredDetached")?.history?.detached).toBe(true);
 		expect(registry.get("StandaloneBlocking")?.history?.detached).toBe(false);
 		expect(registry.get("UnknownLegacy")?.history?.detached).toBeUndefined();
-		expect(aggregateAsyncSubagentCost(registry.list(), [], rootSessionFile)).toBeCloseTo(0.4, 8);
+		expect(aggregateUnreportedSubagentCost(registry.list(), [], rootSessionFile)).toBeCloseTo(0.7, 8);
+		expect(
+			aggregateUnreportedSubagentCost(registry.list(), [], rootSessionFile, [
+				rootTaskResult({ results: [{ id: "StandaloneBlocking" }] }),
+			]),
+		).toBeCloseTo(0.5, 8);
 	});
 
 	it("treats a stall aborted mid-tool-call as unserved despite its partial content", async () => {

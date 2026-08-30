@@ -162,7 +162,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
-import { aggregateAsyncSubagentCost } from "./components/agent-hub-projection";
+import { aggregateUnreportedSubagentCost } from "./components/agent-hub-projection";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -837,7 +837,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#observerUiSyncNeedsTodoReconcile = false;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentRegistry;
-	#asyncCostHydrationSessionFile?: string;
+	#unreportedSubagentCostHydrationSessionFile?: string;
 	#mcpStatusOrder: string[] = [];
 	#mcpPendingServers = new Set<string>();
 	#mcpConnectedServers = new Set<string>();
@@ -2133,7 +2133,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
-			showAsyncSubagentCost: settings.get("statusLine.showAsyncSubagentCost"),
+			showUnreportedSubagentCost: settings.get("statusLine.showUnreportedSubagentCost"),
 			contextLine: settings.get("statusLine.contextLine"),
 		});
 	}
@@ -2195,22 +2195,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Load persisted agent rows when their costs are requested outside the Agent Hub. */
-	#hydrateAsyncSubagentCosts(): void {
-		if (!settings.get("statusLine.showAsyncSubagentCost")) return;
+	#hydrateUnreportedSubagentCosts(): void {
+		if (!settings.get("statusLine.showUnreportedSubagentCost")) return;
 		const sessionFile = this.sessionManager.getSessionFile();
-		if (!sessionFile || this.#asyncCostHydrationSessionFile === sessionFile) return;
-		this.#asyncCostHydrationSessionFile = sessionFile;
+		if (!sessionFile || this.#unreportedSubagentCostHydrationSessionFile === sessionFile) return;
+		this.#unreportedSubagentCostHydrationSessionFile = sessionFile;
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
 		void registerPersistedSubagents(registry, sessionFile).catch(error => {
-			if (this.#asyncCostHydrationSessionFile === sessionFile) this.#asyncCostHydrationSessionFile = undefined;
-			logger.warn("Failed to load async subagent costs for status line", { error });
+			if (this.#unreportedSubagentCostHydrationSessionFile === sessionFile) {
+				this.#unreportedSubagentCostHydrationSessionFile = undefined;
+			}
+			logger.warn("Failed to load unreported subagent costs for status line", { error });
 		});
 	}
 
 	/** Refresh the running-subagents status badge from the active local or collab registry. */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
 		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
-		this.#hydrateAsyncSubagentCosts();
+		this.#hydrateUnreportedSubagentCosts();
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
@@ -2220,11 +2222,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const agentIds = getRunningSubagentBadgeAgentIds(registry);
 		this.statusLine.setRunningSubagents(agentIds);
-		this.statusLine.setAsyncSubagentCost(
-			aggregateAsyncSubagentCost(
+		this.statusLine.setUnreportedSubagentCost(
+			aggregateUnreportedSubagentCost(
 				registry.list(),
 				this.#observerRegistry.getSessions(),
 				this.sessionManager.getSessionFile(),
+				this.sessionManager.getBranch(),
 			),
 		);
 		if (options.requestRender !== false) this.ui.requestRender();

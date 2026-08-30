@@ -435,7 +435,7 @@ export class StatusLineComponent implements Component {
 	 * dependency graph; interactive-mode wires it to VibeSessionRegistry.
 	 */
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
-	#asyncSubagentCost = 0;
+	#unreportedSubagentCost = 0;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
@@ -506,7 +506,7 @@ export class StatusLineComponent implements Component {
 			transparent: settings.get("statusLine.transparent"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
 			contextLine: settings.get("statusLine.contextLine"),
-			showAsyncSubagentCost: settings.get("statusLine.showAsyncSubagentCost"),
+			showUnreportedSubagentCost: settings.get("statusLine.showUnreportedSubagentCost"),
 		};
 	}
 
@@ -587,9 +587,9 @@ export class StatusLineComponent implements Component {
 		this.#runningSubagentIds = new Set(agentIds);
 	}
 
-	/** Set the observer-registry async cost aggregate; non-finite or non-positive values clear it. */
-	setAsyncSubagentCost(cost: number): void {
-		this.#asyncSubagentCost = Number.isFinite(cost) && cost > 0 ? cost : 0;
+	/** Set the observer-registry child-agent cost aggregate; non-finite or non-positive values clear it. */
+	setUnreportedSubagentCost(cost: number): void {
+		this.#unreportedSubagentCost = Number.isFinite(cost) && cost > 0 ? cost : 0;
 	}
 
 	/**
@@ -1836,8 +1836,10 @@ export class StatusLineComponent implements Component {
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
-			asyncSubagentCost:
-				this.#resolveSettings().showAsyncSubagentCost && !this.#focusedAgentId ? this.#asyncSubagentCost : 0,
+			unreportedSubagentCost:
+				this.#resolveSettings().showUnreportedSubagentCost && !this.#focusedAgentId
+					? this.#unreportedSubagentCost
+					: 0,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			brandFgAnsi: this.#brandFgAnsi(turnElapsedMs !== null, sessionAccentEnabled),

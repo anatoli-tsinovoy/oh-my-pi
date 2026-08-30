@@ -1,6 +1,7 @@
 import type { AgentMetricsSummary, AgentRef, AgentStatus } from "../../registry/agent-registry";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { sessionFileBelongsToRoot } from "../../registry/persisted-agents";
+import type { SessionEntry } from "../../session/session-entries";
 import type { ObservableSession } from "../session-observer-registry";
 
 export type AgentMetrics = AgentMetricsSummary;
@@ -63,45 +64,72 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
 }
 
 /**
- * Sum async subagent spend from the same observer/history/session projection
- * used by Agent Hub rows. A ref must belong to the active root session; rows
- * without a session file are eligible only while currently observed. Detached
- * mode comes from the observer when known, then persisted history. An explicit
- * async ancestor also makes its descendants eligible.
+ * Read direct child ids from completed root `task` results. The root branch is
+ * the only durable source that can prove a direct synchronous child was already
+ * represented in the root session's aggregate usage. Keep this parser tolerant
+ * of old and malformed entries: a bad result contributes no ids.
  */
-export function aggregateAsyncSubagentCost(
+function completedRootTaskChildIds(activeRootBranch: readonly SessionEntry[] | undefined): Set<string> {
+	const ids = new Set<string>();
+	if (!activeRootBranch) return ids;
+	for (const entry of activeRootBranch) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "task") {
+			continue;
+		}
+		const details = entry.message.details;
+		if (
+			!details ||
+			typeof details !== "object" ||
+			Array.isArray(details) ||
+			!("results" in details) ||
+			!Array.isArray(details.results)
+		) {
+			continue;
+		}
+		const results = details.results;
+		if (!Array.isArray(results)) continue;
+		for (const result of results) {
+			if (!result || typeof result !== "object" || Array.isArray(result) || !("id" in result)) continue;
+			const id = result.id;
+			if (typeof id === "string" && id.length > 0) ids.add(id);
+		}
+	}
+	return ids;
+}
+
+/**
+ * Sum subagent spend omitted from the root session's own status-line usage.
+ * Every root-owned subagent contributes its direct metrics exactly once, while
+ * direct children already represented by a completed root `task` result are
+ * excluded because that spend is already inside root SessionStats. Detached,
+ * eval, legacy, and nested rows are otherwise all eligible.
+ */
+export function aggregateUnreportedSubagentCost(
 	refs: readonly AgentRef[],
 	sessions: readonly ObservableSession[],
 	rootSessionFile?: string,
+	activeRootBranch?: readonly SessionEntry[],
 ): number {
 	const observedById = new Map(sessions.map(session => [session.id, session]));
-	const refById = new Map(refs.map(ref => [ref.id, ref]));
-	const detachedMode = (ref: AgentRef | undefined, observed: ObservableSession | undefined): boolean | undefined =>
-		typeof observed?.detached === "boolean" ? observed.detached : ref?.history?.detached;
-	const belongsToAsyncTree = (ref: AgentRef, observed: ObservableSession | undefined): boolean => {
-		if (detachedMode(ref, observed) === true) return true;
-		const seen = new Set<string>();
-		for (let parentId = ref.parentId; parentId && !seen.has(parentId); parentId = refById.get(parentId)?.parentId) {
-			seen.add(parentId);
-			if (detachedMode(refById.get(parentId), observedById.get(parentId)) === true) return true;
-		}
-		return false;
-	};
+	const representedRootChildIds = completedRootTaskChildIds(activeRootBranch);
 	let total = 0;
 	for (const ref of refs) {
 		if (ref.kind !== "sub") continue;
 		const observed = observedById.get(ref.id);
+		const sessionFile = typeof ref.sessionFile === "string" ? ref.sessionFile : observed?.sessionFile;
 		if (
-			typeof ref.sessionFile === "string"
-				? !rootSessionFile || !sessionFileBelongsToRoot(ref.sessionFile, rootSessionFile)
+			typeof sessionFile === "string"
+				? !rootSessionFile || !sessionFileBelongsToRoot(sessionFile, rootSessionFile)
 				: !observed
 		) {
 			continue;
 		}
-		if (!belongsToAsyncTree(ref, observed)) continue;
-		const metrics = observed?.progress
-			? progressMetrics(observed)
-			: (ref.history?.metrics ?? (ref.session ? readSessionMetrics(ref.session) : undefined));
+		const directRoot = ref.parentId === undefined || ref.parentId === null || ref.parentId === MAIN_AGENT_ID;
+		if (directRoot && representedRootChildIds.has(ref.id)) continue;
+		const metrics =
+			progressMetrics(observed) ??
+			ref.history?.metrics ??
+			(ref.session ? readSessionMetrics(ref.session) : undefined);
 		if (metrics && metrics.cost > 0) total += metrics.cost;
 	}
 	return total;
@@ -110,23 +138,21 @@ export function aggregateAsyncSubagentCost(
 /**
  * Read direct assistant usage from a live session. SessionStats also includes
  * usage embedded in completed `task` tool results, so using it for a parent
- * row would double-count child rows in the aggregate.
+ * row would double-count child rows in the aggregate. Only the assistant
+ * messages themselves are therefore used as the fallback metric.
  */
 function readSessionMetrics(session: NonNullable<AgentRef["session"]>): AgentMetrics | undefined {
 	try {
-		const stats = session.getSessionStats();
 		const messages = session.agent?.state?.messages;
-		if (!Array.isArray(messages)) {
-			return {
-				tokens: stats.tokens.input + stats.tokens.output + stats.tokens.cacheWrite,
-				requests: stats.assistantMessages,
-				tools: stats.toolCalls,
-				cost: stats.cost,
-				durationMs: 0,
-				durationKind: "unknown",
-				contextTokens: stats.contextUsage?.tokens,
-				contextWindow: stats.contextUsage?.contextWindow,
-			};
+		if (!Array.isArray(messages)) return undefined;
+		let contextTokens: number | undefined;
+		let contextWindow: number | undefined;
+		try {
+			const stats = session.getSessionStats();
+			contextTokens = stats.contextUsage?.tokens;
+			contextWindow = stats.contextUsage?.contextWindow;
+		} catch {
+			// Direct assistant usage below remains usable when stats are tearing down.
 		}
 
 		let tokens = 0;
@@ -147,8 +173,8 @@ function readSessionMetrics(session: NonNullable<AgentRef["session"]>): AgentMet
 			cost,
 			durationMs: 0,
 			durationKind: "unknown",
-			contextTokens: stats.contextUsage?.tokens,
-			contextWindow: stats.contextUsage?.contextWindow,
+			contextTokens,
+			contextWindow,
 		};
 	} catch {
 		// Render-only doubles and sessions being torn down may not expose a
