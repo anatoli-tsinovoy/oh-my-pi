@@ -53,7 +53,7 @@ describe("image url parts", () => {
 		if (!Array.isArray(message.content)) {
 			throw new Error("expected array content");
 		}
-		const converted = convertResponsesInputContent(message.content, true, true);
+		const converted = convertResponsesInputContent(message.content, true, true, true);
 
 		expect(converted?.find(part => part.type === "input_image")).toEqual({
 			type: "input_image",
@@ -106,6 +106,7 @@ describe("image url parts", () => {
 	it("responses input uses the url as image_url and a data URI otherwise", () => {
 		const converted = convertResponsesInputContent(
 			userMessage.content as Exclude<typeof userMessage.content, string>,
+			true,
 			true,
 			true,
 		);

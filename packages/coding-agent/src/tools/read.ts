@@ -10,9 +10,6 @@ import type {
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
-import { type SummaryResult, summarizeCode } from "@oh-my-pi/pi-natives";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
 import {
 	BINARY_SNIFF_BYTES,
 	type ImageMetadata,

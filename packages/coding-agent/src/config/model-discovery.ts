@@ -21,7 +21,7 @@ import {
 	OPENAI_COMPAT_DISCOVERY_DEFAULT_MAX_TOKENS,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import type { InputModality, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -185,7 +185,7 @@ type LlamaCppDiscoveredServerMetadata = {
 type DiscoveredModelRuntimeMetadata = {
 	contextWindow?: number;
 	maxTokens?: number;
-	input?: ("text" | "image")[];
+	input?: InputModality[];
 };
 
 type LlamaCppModelListEntry = {
@@ -789,7 +789,7 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	input?: unknown;
 	input_modalities?: unknown;
 	architecture?: unknown;
-}): ("text" | "image")[] | undefined {
+}): InputModality[] | undefined {
 	const modalities = new Set<string>();
 	const collect = (value: unknown): void => {
 		if (!Array.isArray(value)) return;
@@ -801,7 +801,7 @@ function extractOpenAIModelsListInputCapabilities(item: {
 	collect(item.input_modalities);
 	if (isRecord(item.architecture)) collect(item.architecture.input_modalities);
 	if (modalities.size === 0) return undefined;
-	return modalities.has("image") ? ["text", "image"] : ["text"];
+	return (["text", "image", "audio", "video"] as const).filter(modality => modalities.has(modality));
 }
 
 export async function discoverOpenAIModelsList(

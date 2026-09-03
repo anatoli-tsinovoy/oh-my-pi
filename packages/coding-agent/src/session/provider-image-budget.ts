@@ -185,10 +185,10 @@ function inlineImageFromDataUri(imageUrl: unknown): ImageContent | undefined {
 
 /** `undefined` when every image decodes, so callers can keep the original array. */
 async function replaceUnreadableContent(
-	content: readonly (TextContent | ImageContent)[],
+	content: readonly (TextContent | MediaContent)[],
 	model: Model,
-): Promise<(TextContent | ImageContent)[] | undefined> {
-	let replaced: (TextContent | ImageContent)[] | undefined;
+): Promise<(TextContent | MediaContent)[] | undefined> {
+	let replaced: (TextContent | MediaContent)[] | undefined;
 	for (let index = 0; index < content.length; index++) {
 		const part = content[index];
 		if (part.type !== "image" || !sendsInlineImageBytes(part, model)) continue;

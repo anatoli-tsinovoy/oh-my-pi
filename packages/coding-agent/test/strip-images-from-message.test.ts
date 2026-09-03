@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, TextContent } from "@oh-my-pi/pi-ai";
 import { stripImagesFromMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 const png = (data: string = "iVBORw0KGgo"): ImageContent => ({ type: "image", data, mimeType: "image/png" });
@@ -76,12 +76,16 @@ describe("stripImagesFromMessage", () => {
 		expect(details.imageCount).toBe(2); // unrelated detail fields stay intact
 	});
 
-	it("clears fileMention image attachments without dropping other file fields", () => {
+	it("clears fileMention images without dropping audio or video attachments", () => {
+		const audio: MediaContent = { type: "audio", data: "audio", mimeType: "audio/mpeg" };
+		const video: MediaContent = { type: "video", data: "video", mimeType: "video/mp4" };
 		const message: AgentMessage = {
 			role: "fileMention",
 			files: [
 				{ path: "a.txt", content: "alpha\nbeta\n", lineCount: 2 },
 				{ path: "b.png", content: "", image: png("attached"), byteSize: 1024 },
+				{ path: "c.mp3", content: "", image: audio },
+				{ path: "d.mp4", content: "", image: video },
 			],
 			timestamp: Date.now(),
 		};
@@ -91,6 +95,8 @@ describe("stripImagesFromMessage", () => {
 		expect(removed).toBe(1);
 		expect(message.files[0]).toEqual({ path: "a.txt", content: "alpha\nbeta\n", lineCount: 2 });
 		expect(message.files[1]).toEqual({ path: "b.png", content: "", image: undefined, byteSize: 1024 });
+		expect(message.files[2]?.image).toEqual(audio);
+		expect(message.files[3]?.image).toEqual(video);
 	});
 
 	it("returns 0 for assistant messages (they never carry ImageContent)", () => {

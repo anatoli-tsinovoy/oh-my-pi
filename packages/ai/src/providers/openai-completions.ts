@@ -327,7 +327,7 @@ function serializeToolArguments(value: unknown): string {
 			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 				return JSON.stringify(parsed);
 			}
-		} catch { }
+		} catch {}
 		return "{}";
 	}
 
@@ -707,7 +707,7 @@ const streamOpenAICompletionsOnce = (
 							event.event = resolvedEvent;
 							event.raw = [`event: ${resolvedEvent}`, ...event.raw];
 						}
-					} catch { }
+					} catch {}
 				}
 				onSseEvent(event, model);
 			}
@@ -715,7 +715,7 @@ const streamOpenAICompletionsOnce = (
 		// Assigned once the block helpers exist (they are scoped to the `try`);
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
-		let finishOpenBlocksOnError: () => void = () => { };
+		let finishOpenBlocksOnError: () => void = () => {};
 
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
@@ -820,8 +820,8 @@ const streamOpenAICompletionsOnce = (
 				const reasoningEffortFallback =
 					activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
 						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
-							explicitDisable: options?.disableReasoning === true && options.reasoning === undefined,
-						})
+								explicitDisable: options?.disableReasoning === true && options.reasoning === undefined,
+							})
 						: undefined;
 				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
 					const retryMarker = `${activeReasoningEffortFallbackKey}:${String(reasoningEffortFallback)}`;
@@ -1331,8 +1331,8 @@ const streamOpenAICompletionsOnce = (
 								// concat-safe delta in `finishToolCallBlock` before `toolcall_end` instead.
 								const prev =
 									block.partialArgs !== null &&
-										typeof block.partialArgs === "object" &&
-										!Array.isArray(block.partialArgs)
+									typeof block.partialArgs === "object" &&
+									!Array.isArray(block.partialArgs)
 										? (block.partialArgs as Record<string, unknown>)
 										: undefined;
 								const merged = mergeStreamingArgumentObjects(prev, rawArgs);
@@ -1463,7 +1463,7 @@ const streamOpenAICompletionsOnce = (
 			// throw here must not prevent the terminal error event below.
 			try {
 				finishOpenBlocksOnError();
-			} catch { }
+			} catch {}
 			const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 			const result = await AIError.finalize(error, {
 				api: model.api,
@@ -2140,7 +2140,7 @@ export function convertMessages(
 					const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
 					const wireField =
 						compat.allowsSyntheticReasoningContentForToolCalls &&
-							(signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text")
+						(signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text")
 							? signature
 							: signature === "reasoning_content" || signature === "reasoning" || signature === "reasoning_text"
 								? (compat.reasoningContentField ?? "reasoning_content")
@@ -2189,9 +2189,9 @@ export function convertMessages(
 				const streamedReasoningField = nonEmptyThinkingBlocks[0]?.thinkingSignature;
 				const reasoningField =
 					compat.allowsSyntheticReasoningContentForToolCalls &&
-						(streamedReasoningField === "reasoning_content" ||
-							streamedReasoningField === "reasoning" ||
-							streamedReasoningField === "reasoning_text")
+					(streamedReasoningField === "reasoning_content" ||
+						streamedReasoningField === "reasoning" ||
+						streamedReasoningField === "reasoning_text")
 						? streamedReasoningField
 						: (compat.reasoningContentField ?? "reasoning_content");
 				const reasoningContent = assistantMsg[reasoningField];

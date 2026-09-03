@@ -25,7 +25,17 @@ import { getBundledModelReferenceIndex } from "../identity/bundled";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions, ModelsDevFallback } from "../model-manager";
 import { type GeneratedProvider, getBundledModels } from "../models";
-import type { Api, FetchImpl, InputModality, Model, ModelSpec, OpenAICompat, Provider, ThinkingConfig, TokenCost } from "../types";
+import type {
+	Api,
+	FetchImpl,
+	InputModality,
+	Model,
+	ModelSpec,
+	OpenAICompat,
+	Provider,
+	ThinkingConfig,
+	TokenCost,
+} from "../types";
 import { discoveryFetch, isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { ALIBABA_TOKEN_PLAN_BASE_URL, parseAlibabaTokenPlanCredential } from "../wire/alibaba-token-plan";
 import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "../wire/cline-pass";

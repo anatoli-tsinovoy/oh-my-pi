@@ -4,7 +4,7 @@ import { compareRevision, parseRevision } from "../compat/revision";
 import { classifyModel } from "../compat/taxonomy";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
-import type { Model, ModelSpec } from "../types";
+import type { InputModality, Model, ModelSpec } from "../types";
 import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./cursor-proto";
 import { create, fromBinary, toBinary } from "./protobuf";
 
@@ -401,7 +401,7 @@ function pickModelDisplayName(model: CursorModelDetailsValue, fallbackId: string
  * Without a reference, families whose native catalogs are multimodal
  * (anthropic, gemini, openai) fall back to id classification.
  */
-export function resolveCursorInput(id: string, referenceInput?: ("text" | "image")[]): ("text" | "image")[] {
+export function resolveCursorInput(id: string, referenceInput?: InputModality[]): InputModality[] {
 	if (referenceInput) {
 		return referenceInput;
 	}

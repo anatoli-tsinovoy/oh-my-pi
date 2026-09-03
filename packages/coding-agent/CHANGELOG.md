@@ -4,6 +4,7 @@
 
 ### Added
 
+- Audio and video files can now be attached from startup arguments or interactive `@file` mentions
 - Added `report` field to scout agent definitions for detailed, non-summarized findings
 - Subagents now automatically relay turn results to the originating agent, enabling read-only agents to return data
 

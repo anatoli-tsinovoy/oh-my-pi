@@ -118,7 +118,7 @@ function renderExportedSession(entries: unknown[], leafId: string) {
 		configurable: true,
 	});
 	Object.defineProperty(window, "matchMedia", {
-		value: () => ({ matches: false, addEventListener() { }, removeEventListener() { } }),
+		value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 		configurable: true,
 	});
 	const context = vm.createContext({
@@ -136,9 +136,9 @@ function renderExportedSession(entries: unknown[], leafId: string) {
 		Uint8Array,
 		atob,
 		navigator: { clipboard: null },
-		localStorage: { getItem: () => null, setItem() { } },
+		localStorage: { getItem: () => null, setItem() {} },
 		setTimeout: () => 0,
-		clearTimeout() { },
+		clearTimeout() {},
 	});
 	vm.runInContext(templateJs, context);
 	return document;
@@ -291,12 +291,7 @@ describe("HTML export template", () => {
 				timestamp: "2026-01-01T00:00:03.000Z",
 				message: {
 					role: "assistant",
-					content: [
-						{ type: "text", text: "before media" },
-						audio,
-						video,
-						{ type: "text", text: "after media" },
-					],
+					content: [{ type: "text", text: "before media" }, audio, video, { type: "text", text: "after media" }],
 					stopReason: "stop",
 					timestamp: 3,
 				},

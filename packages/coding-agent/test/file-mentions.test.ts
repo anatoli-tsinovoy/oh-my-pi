@@ -99,6 +99,42 @@ describe("generateFileMentionMessages path resolution", () => {
 		expect(message.files[0]?.path).toBe("My Folder/my file.png");
 	});
 
+	test("attaches supported audio and video mentions without binary-skipping them", async () => {
+		const cwd = await createTempDir();
+		const videoBytes = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+		const wavBytes = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+		const mp3Bytes = Buffer.from([0xff, 0xfb, 0x90, 0x64]);
+		await Bun.write(path.join(cwd, "notes.txt"), "keep text");
+		await Bun.write(path.join(cwd, "clip.MP4"), videoBytes);
+		await Bun.write(path.join(cwd, "voice.WAV"), wavBytes);
+		await Bun.write(path.join(cwd, "song.mp3"), mp3Bytes);
+
+		const messages = await generateFileMentionMessages(["notes.txt", "clip.MP4", "voice.WAV", "song.mp3"], cwd);
+		expect(messages).toHaveLength(1);
+		const message = messages[0];
+		if (message?.role !== "fileMention") {
+			throw new Error("expected file mention message");
+		}
+
+		expect(message.files.map(file => file.path)).toEqual(["notes.txt", "clip.MP4", "voice.WAV", "song.mp3"]);
+		expect(message.files[0]?.content).toContain("keep text");
+		expect(message.files[1]?.image).toEqual({
+			type: "video",
+			mimeType: "video/mp4",
+			data: videoBytes.toString("base64"),
+		});
+		expect(message.files[2]?.image).toEqual({
+			type: "audio",
+			mimeType: "audio/wav",
+			data: wavBytes.toString("base64"),
+		});
+		expect(message.files[3]?.image).toEqual({
+			type: "audio",
+			mimeType: "audio/mpeg",
+			data: mp3Bytes.toString("base64"),
+		});
+	});
+
 	test("skips auto-reading a binary file instead of injecting raw bytes", async () => {
 		const cwd = await createTempDir();
 		// TTF header begins with a NUL run; auto-reading it as text would leak

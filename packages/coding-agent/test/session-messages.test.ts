@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type AgentMessage, filterProviderReplayMessages } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MediaContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
 	convertToLlm,
@@ -179,20 +179,18 @@ describe("convertToLlm custom message mapping", () => {
 		expect(text).toContain("export const config = {};");
 	});
 
-	it("splits mixed text + image file mentions into developer + user messages (#3443)", () => {
-		// `developer` (and `system`) Responses messages reject `input_image` with
-		// `Invalid value: 'input_image'. Supported values are: 'input_text'.`
-		// `generateFileMentionMessages` packs every `@…` into one `fileMention`,
-		// so a `@notes.md @diagram.png` turn would have demoted the text payload
-		// to `user` (losing the instruction-priority intent) before #3443; now the
-		// text-only file stays on `developer` and only the image file rides as `user`.
-		const image: ImageContent = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+	it("splits mixed text and media file mentions into developer and user messages (#3443)", () => {
+		const video: MediaContent = { type: "video", data: "dmlkZW8=", mimeType: "video/mp4" };
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		const audio: MediaContent = { type: "audio", data: "YXVkaW8=", mimeType: "audio/mpeg" };
 		const messages: AgentMessage[] = [
 			{
 				role: "fileMention",
 				files: [
 					{ path: "notes/log.txt", content: "alpha\n", lineCount: 1 },
+					{ path: "clip.mp4", content: "", image: video },
 					{ path: "diagram.png", content: "", image },
+					{ path: "voice.mp3", content: "", image: audio },
 				],
 				timestamp: Date.now(),
 			},
@@ -201,7 +199,6 @@ describe("convertToLlm custom message mapping", () => {
 		const converted = convertToLlm(messages);
 
 		expect(converted).toHaveLength(2);
-
 		const dev = converted[0];
 		expect(dev?.role).toBe("developer");
 		expectAttribution(dev, "user");
@@ -210,20 +207,20 @@ describe("convertToLlm custom message mapping", () => {
 		}
 		const devText = dev.content.find(content => content.type === "text")?.text ?? "";
 		expect(devText).toContain('<file path="notes/log.txt">');
-		expect(devText).toContain("alpha");
-		expect(devText).not.toContain('<file path="diagram.png">');
-		expect(dev.content.some(content => content.type === "image")).toBe(false);
+		expect(devText).not.toContain('<file path="clip.mp4">');
 
 		const user = converted[1];
 		expect(user?.role).toBe("user");
 		expectAttribution(user, "user");
 		if (user?.role !== "user" || !Array.isArray(user.content)) {
-			throw new Error("Expected user array content for image mention");
+			throw new Error("Expected user array content for media mentions");
 		}
 		const userText = user.content.find(content => content.type === "text")?.text ?? "";
+		expect(userText).toContain('<file path="clip.mp4">');
 		expect(userText).toContain('<file path="diagram.png">');
+		expect(userText).toContain('<file path="voice.mp3">');
 		expect(userText).not.toContain('<file path="notes/log.txt">');
-		expect(user.content.filter(content => content.type === "image")).toEqual([image]);
+		expect(user.content.filter(content => content.type !== "text")).toEqual([video, image, audio]);
 	});
 
 	it("emits a user-only message when every mention is an image (#3443)", () => {

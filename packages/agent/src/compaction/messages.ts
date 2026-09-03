@@ -237,15 +237,15 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 						message.blocks !== undefined
 							? [{ type: "text" as const, text: message.summary }, ...message.blocks]
 							: [
-								{
-									type: "text" as const,
-									text:
-										message.method === "handoff"
-											? renderHandoffSummaryContext(message.summary)
-											: renderCompactionSummaryContext(message.summary),
-								},
-								...(message.images ?? []),
-							],
+									{
+										type: "text" as const,
+										text:
+											message.method === "handoff"
+												? renderHandoffSummaryContext(message.summary)
+												: renderCompactionSummaryContext(message.summary),
+									},
+									...(message.images ?? []),
+								],
 					attribution: "agent",
 					historyRewriteAt: message.timestamp,
 					providerPayload: message.providerPayload,

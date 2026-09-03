@@ -75,6 +75,37 @@ describe("session image persistence", () => {
 		expect(resolvedDetails.images[1]?.data).toBe(typedDetailImageData);
 	});
 
+	it("externalizes and resolves file mention media", async () => {
+		using tempDir = TempDir.createSync("@session-file-mention-media-");
+		const blobStore = new BlobStore(tempDir.path());
+		const data = Buffer.alloc(1500, 7).toString("base64");
+		const original: SessionMessageEntry = {
+			type: "message",
+			id: "entry-file-mention-media",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "fileMention",
+				files: [{ path: "voice.wav", content: "", image: { type: "audio", mimeType: "audio/wav", data } }],
+				timestamp: Date.now(),
+			},
+		};
+
+		const persisted = prepareEntryForPersistence(original, blobStore);
+		if (persisted.type !== "message" || persisted.message.role !== "fileMention") {
+			throw new Error("expected persisted file mention");
+		}
+		expect(isBlobRef(persisted.message.files[0]?.image?.data ?? "")).toBe(true);
+
+		const loaded: FileEntry[] = [structuredClone(persisted)];
+		await resolveBlobRefsInEntries(loaded, blobStore);
+		const resolved = loaded[0];
+		if (resolved?.type !== "message" || resolved.message.role !== "fileMention") {
+			throw new Error("expected resolved file mention");
+		}
+		expect(resolved.message.files[0]?.image).toEqual({ type: "audio", mimeType: "audio/wav", data });
+	});
+
 	it("externalizes and restores native Responses images in assistant content and provider history", async () => {
 		using tempDir = TempDir.createSync("@session-native-image-persistence-");
 		const blobStore = new BlobStore(tempDir.path());

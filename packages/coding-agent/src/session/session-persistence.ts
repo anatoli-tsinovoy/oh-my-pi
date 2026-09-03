@@ -87,17 +87,23 @@ export function isMediaDataPayload(value: unknown): value is { data: string; mim
 /**
  * True when a media payload sits in a persistence position whose base64 is
  * externalized to the blob store instead of truncated as a generic string: a
- * `content` media block, an `images[]` entry, or a snapcompact frame under
- * `frames[]`. Shared by the persist path ({@link shouldExternalizeMediaPayload})
- * and the load path (`resolvePersistedBlobRefs`) so the two never drift and
- * strand a payload externalized on write but not resolved on read.
+ * `content` media block, an `images[]` entry, a file mention's legacy `image`
+ * field, or a snapcompact frame under `frames[]`. Shared by the persist path
+ * ({@link shouldExternalizeMediaPayload}) and the load path
+ * (`resolvePersistedBlobRefs`) so the two never drift and strand a payload
+ * externalized on write but not resolved on read.
  */
 export function isExternalizableMediaPosition(
 	value: unknown,
 	key: string | undefined,
 ): value is { data: string; mimeType?: string } {
 	if (!isMediaDataPayload(value)) return false;
-	return (key === TEXT_CONTENT_KEY && isMediaBlock(value)) || key === "images" || key === SNAPCOMPACT_FRAMES_KEY;
+	return (
+		(key === TEXT_CONTENT_KEY && isMediaBlock(value)) ||
+		key === "image" ||
+		key === "images" ||
+		key === SNAPCOMPACT_FRAMES_KEY
+	);
 }
 
 /** Compatibility alias for callers that predate audio/video media support. */

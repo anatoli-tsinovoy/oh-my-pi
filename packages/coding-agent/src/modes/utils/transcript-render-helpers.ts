@@ -163,7 +163,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 			suffix = file.skippedReason === "binary" ? `(skipped: binary, ${size})` : `(skipped: ${size})`;
 		} else {
 			suffix = file.image
-				? "(image)"
+				? `(${file.image.type})`
 				: file.lineCount === undefined
 					? "(unknown lines)"
 					: `(${file.lineCount} lines)`;

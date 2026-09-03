@@ -11,6 +11,7 @@ import type {
 	Context,
 	ImageContent,
 	Message,
+	MediaContent,
 	Model,
 	ProviderPayload,
 	TextContent,
@@ -118,7 +119,7 @@ function nativeTextOf(part: unknown): string {
 	return part.text;
 }
 
-function textOf(part: TextContent | ImageContent | undefined): string {
+function textOf(part: TextContent | MediaContent | undefined): string {
 	if (part?.type !== "text") throw new Error(`expected a text block, got ${part?.type}`);
 	return part.text;
 }

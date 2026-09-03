@@ -229,7 +229,10 @@ function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessa
 			for (const file of fileMsg.files) {
 				lines.push(`<file path="${file.path}">`);
 				if (file.content) lines.push(file.content);
-				if (file.image) lines.push("[Image attached]");
+				if (file.image) {
+					const label = file.image.type === "image" ? "Image" : file.image.type === "audio" ? "Audio" : "Video";
+					lines.push(`[${label} attached]`);
+				}
 				lines.push("</file>\n");
 			}
 			lines.push("\n");

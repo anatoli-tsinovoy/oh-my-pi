@@ -1,6 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
-	ImageContent,
 	MediaContent,
 	MessageAttribution,
 	ServiceTierByFamily,

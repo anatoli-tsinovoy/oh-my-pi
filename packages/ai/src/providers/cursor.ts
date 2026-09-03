@@ -456,9 +456,9 @@ export function mapH2TransportError(error: unknown, baseUrl: string): unknown {
 	if (code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) {
 		return new AIError.ProviderResponseError(
 			`Cursor run transport could not negotiate HTTP/2 with ${baseUrl}: "h2 is not supported". ` +
-			"This host serves the run RPC over HTTP/2 only, and the TLS handshake did not negotiate " +
-			"h2 via ALPN — typically an ALPN-stripping TLS-intercepting proxy (e.g. Zscaler). " +
-			"Front the provider with a local HTTP/2 bridge and set providers.cursor.baseUrl to it.",
+				"This host serves the run RPC over HTTP/2 only, and the TLS handshake did not negotiate " +
+				"h2 via ALPN — typically an ALPN-stripping TLS-intercepting proxy (e.g. Zscaler). " +
+				"Front the provider with a local HTTP/2 bridge and set providers.cursor.baseUrl to it.",
 			{ provider: "cursor", kind: "runtime", cause: error },
 		);
 	}
@@ -472,7 +472,7 @@ function debugBytes(bytes: Uint8Array, asHex: boolean): string {
 	try {
 		const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 		if (/^[\x20-\x7E\s]*$/.test(text)) return text;
-	} catch { }
+	} catch {}
 	return Buffer.from(bytes).toString("hex");
 }
 
@@ -743,12 +743,12 @@ function streamCursorWithWireMode(
 			};
 			const debugSession = isRequestDebugEnabled()
 				? await createRequestDebugSession({
-					protocol: "http2",
-					method: "POST",
-					url: new URL(requestPath, baseUrl).toString(),
-					headers: requestHeaders,
-					bodyBase64: Buffer.from(requestBytes).toString("base64"),
-				})
+						protocol: "http2",
+						method: "POST",
+						url: new URL(requestPath, baseUrl).toString(),
+						headers: requestHeaders,
+						bodyBase64: Buffer.from(requestBytes).toString("base64"),
+					})
 				: undefined;
 
 			const proxyUrl = getProxyForUrl(model.provider, new URL(baseUrl));
@@ -971,10 +971,10 @@ function streamCursorWithWireMode(
 		} catch (error) {
 			const fallbackWireModelId =
 				wireMode === "normalized" &&
-					!sawProgressOrSideEffect &&
-					!options?.signal?.aborted &&
-					error instanceof Error &&
-					CURSOR_MODEL_NOT_FOUND_PATTERN.test(error.message)
+				!sawProgressOrSideEffect &&
+				!options?.signal?.aborted &&
+				error instanceof Error &&
+				CURSOR_MODEL_NOT_FOUND_PATTERN.test(error.message)
 					? serializedFallbackWireModelId
 					: undefined;
 			if (fallbackWireModelId !== undefined) {
@@ -1758,9 +1758,9 @@ async function handleExecServerMessage(
 			const write = execHandlers?.write?.bind(execHandlers);
 			const writeHandler = write
 				? async (writeArgs: typeof args) => {
-					const result = await write(writeArgs);
-					return editOwned ? remapExecHandlerToolName(result, "edit") : result;
-				}
+						const result = await write(writeArgs);
+						return editOwned ? remapExecHandlerToolName(result, "edit") : result;
+					}
 				: undefined;
 			const { execResult } = await resolveExecHandler(
 				args,
@@ -1924,11 +1924,11 @@ async function handleExecServerMessage(
 						result: approved
 							? { case: "approved", value: create(McpApprovedSchema, {}) }
 							: {
-								case: "rejected",
-								value: create(McpRejectedSchema, {
-									reason: `Tool "${mcpCall.toolName || mcpCall.name}" is not approved to run without asking.`,
-								}),
-							},
+									case: "rejected",
+									value: create(McpRejectedSchema, {
+										reason: `Tool "${mcpCall.toolName || mcpCall.name}" is not approved to run without asking.`,
+									}),
+								},
 					}),
 				);
 				return;
@@ -2059,32 +2059,32 @@ async function handleExecServerMessage(
 				});
 				execResult = content
 					? create(ReadMcpResourceExecResultSchema, {
-						result: {
-							case: "success",
-							value: create(ReadMcpResourceSuccessSchema, {
-								uri: content.uri,
-								name: content.name,
-								description: content.description,
-								mimeType: content.mimeType,
-								downloadPath: content.downloadPath,
-								// A download returns no content to the model: the file is
-								// on disk and the path is the answer. Otherwise the wire's
-								// content oneof carries one of the two, text winning when
-								// a host supplies both.
-								content:
-									content.downloadPath !== undefined
-										? { case: undefined }
-										: content.text !== undefined
-											? { case: "text", value: content.text }
-											: content.blob !== undefined
-												? { case: "blob", value: content.blob }
-												: { case: undefined },
-							}),
-						},
-					})
+							result: {
+								case: "success",
+								value: create(ReadMcpResourceSuccessSchema, {
+									uri: content.uri,
+									name: content.name,
+									description: content.description,
+									mimeType: content.mimeType,
+									downloadPath: content.downloadPath,
+									// A download returns no content to the model: the file is
+									// on disk and the path is the answer. Otherwise the wire's
+									// content oneof carries one of the two, text winning when
+									// a host supplies both.
+									content:
+										content.downloadPath !== undefined
+											? { case: undefined }
+											: content.text !== undefined
+												? { case: "text", value: content.text }
+												: content.blob !== undefined
+													? { case: "blob", value: content.blob }
+													: { case: undefined },
+								}),
+							},
+						})
 					: create(ReadMcpResourceExecResultSchema, {
-						result: { case: "notFound", value: create(ReadMcpResourceNotFoundSchema, { uri: args.uri }) },
-					});
+							result: { case: "notFound", value: create(ReadMcpResourceNotFoundSchema, { uri: args.uri }) },
+						});
 			} catch (error) {
 				execResult = create(ReadMcpResourceExecResultSchema, {
 					result: {
@@ -3309,7 +3309,7 @@ function decodeMcpArgValue(value: Uint8Array): unknown {
 			return first === "{" || first === "[" || first === '"' ? parseToolArgsJson(jsonValue) : jsonValue;
 		}
 		return jsonValue;
-	} catch { }
+	} catch {}
 	const text = new TextDecoder().decode(value);
 	return parseToolArgsJson(text);
 }
@@ -4767,11 +4767,11 @@ function cursorUserContentKey(content: string | (TextContent | MediaContent)[]):
 type CursorRootPromptAssistantContentPart =
 	| { type: "text"; text: string }
 	| {
-		type: "reasoning";
-		text: string;
-		providerOptions: { cursor: { modelName: string } };
-		signature?: string;
-	}
+			type: "reasoning";
+			text: string;
+			providerOptions: { cursor: { modelName: string } };
+			signature?: string;
+	  }
 	| { type: "tool-call"; toolCallId: string; toolName: string; args: Record<string, unknown> };
 
 function canReplayCursorThinking(msg: AssistantMessage, targetModelId: string | undefined): boolean {
@@ -5038,17 +5038,17 @@ function createCursorMcpResult(result: ToolResultMessage) {
 				content: result.content.map(item =>
 					item.type === "text"
 						? create(McpToolResultContentItemSchema, {
-							content: { case: "text", value: create(McpTextContentSchema, { text: item.text }) },
-						})
+								content: { case: "text", value: create(McpTextContentSchema, { text: item.text }) },
+							})
 						: create(McpToolResultContentItemSchema, {
-							content: {
-								case: "image",
-								value: create(McpImageContentSchema, {
-									data: Uint8Array.from(Buffer.from(item.data, "base64")),
-									mimeType: item.mimeType,
-								}),
-							},
-						}),
+								content: {
+									case: "image",
+									value: create(McpImageContentSchema, {
+										data: Uint8Array.from(Buffer.from(item.data, "base64")),
+										mimeType: item.mimeType,
+									}),
+								},
+							}),
 				),
 			}),
 		},
@@ -5226,10 +5226,10 @@ function createCursorUserMessage(
 		messageId,
 		...(images.length > 0
 			? {
-				selectedContext: create(SelectedContextSchema, {
-					selectedImages: images,
-				}),
-			}
+					selectedContext: create(SelectedContextSchema, {
+						selectedImages: images,
+					}),
+				}
 			: {}),
 	});
 }
@@ -5346,15 +5346,15 @@ async function buildGrpcRequestForWireMode(
 		action:
 			userContent && (userText.trim().length > 0 || hasUserImages)
 				? {
-					case: "userMessageAction",
-					value: create(UserMessageActionSchema, {
-						userMessage: createCursorUserMessage(userContent, userText),
-					}),
-				}
+						case: "userMessageAction",
+						value: create(UserMessageActionSchema, {
+							userMessage: createCursorUserMessage(userContent, userText),
+						}),
+					}
 				: {
-					case: "resumeAction",
-					value: create(ResumeActionSchema, {}),
-				},
+						case: "resumeAction",
+						value: create(ResumeActionSchema, {}),
+					},
 	});
 
 	// Build conversation turns from prior messages, excluding only the active user message
@@ -5388,19 +5388,19 @@ async function buildGrpcRequestForWireMode(
 		state.conversationState && hasMatchingPrompt
 			? state.conversationState
 			: create(ConversationStateStructureSchema, {
-				rootPromptMessagesJson: systemPromptIds,
-				turns: [],
-				todos: [],
-				pendingToolCalls: [],
-				previousWorkspaceUris: [],
-				fileStates: {},
-				fileStatesV2: {},
-				summaryArchives: [],
-				turnTimings: [],
-				subagentStates: {},
-				selfSummaryCount: 0,
-				readPaths: [],
-			});
+					rootPromptMessagesJson: systemPromptIds,
+					turns: [],
+					todos: [],
+					pendingToolCalls: [],
+					previousWorkspaceUris: [],
+					fileStates: {},
+					fileStatesV2: {},
+					summaryArchives: [],
+					turnTimings: [],
+					subagentStates: {},
+					selfSummaryCount: 0,
+					readPaths: [],
+				});
 
 	// Always override `rootPromptMessagesJson` and `turns` with content freshly built from
 	// `context.messages`. The server-echoed checkpoint replaces historical user entries

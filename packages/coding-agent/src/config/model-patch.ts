@@ -201,7 +201,7 @@ export interface ModelPatch {
 	name?: string;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
-	input?: ("text" | "image")[];
+	input?: Model<Api>["input"];
 	imageInputDecoder?: Model<Api>["imageInputDecoder"];
 	tokenizer?: Model<Api>["tokenizer"];
 	supportsTools?: boolean;

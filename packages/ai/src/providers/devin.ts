@@ -229,7 +229,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			const reader = body.getReader();
 			let pending = Buffer.alloc(0);
 
-			for (; ;) {
+			for (;;) {
 				const { done, value } = await reader.read();
 				if (value && value.length > 0) {
 					// Steady state drains fully per chunk; view the fresh reader chunk

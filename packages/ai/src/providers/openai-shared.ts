@@ -777,7 +777,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 		reasoning_effort?: string;
 	};
 	reasoning?: { effort?: string; enabled?: boolean; max_tokens?: number };
-	venice_parameters?: { disable_thinking?: boolean;[key: string]: unknown };
+	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
@@ -1938,21 +1938,21 @@ export function escapeReplayedControlTokens(items: ResponseInput): ResponseInput
 			return typeof item.output === "string"
 				? { ...item, output: escapeHarmonyControlTokens(item.output) }
 				: {
-					...item,
-					output: item.output.map(part =>
-						part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-					),
-				};
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
 		}
 		if (item.type === "custom_tool_call_output") {
 			return typeof item.output === "string"
 				? { ...item, output: escapeHarmonyControlTokens(item.output) }
 				: {
-					...item,
-					output: item.output.map(part =>
-						part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
-					),
-				};
+						...item,
+						output: item.output.map(part =>
+							part.type === "input_text" ? { ...part, text: escapeHarmonyControlTokens(part.text) } : part,
+						),
+					};
 		}
 		if (item.type === "function_call") {
 			return typeof item.arguments === "string"
@@ -2084,10 +2084,10 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			const providerPayload =
 				assistantMsg.api === options.model.api && assistantMsg.model === options.model.id
 					? getOpenAIResponsesHistoryPayload(
-						assistantMsg.providerPayload,
-						options.model.provider,
-						assistantMsg.provider,
-					)
+							assistantMsg.providerPayload,
+							options.model.provider,
+							assistantMsg.provider,
+						)
 					: undefined;
 			const nativeReplayEnabled = options.nativeHistory?.replay === true;
 			const historyItems = providerPayload?.items;
@@ -2102,11 +2102,11 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				);
 				const sanitizedHistoryItems = rawSanitizedHistoryItems
 					? adaptResponsesReplayItemsForModel(
-						rawSanitizedHistoryItems,
-						supportsCustomToolCalls,
-						customToolWireNameMap,
-						options.model.supportsComputerUse === true,
-					)
+							rawSanitizedHistoryItems,
+							supportsCustomToolCalls,
+							customToolWireNameMap,
+							options.model.supportsComputerUse === true,
+						)
 					: undefined;
 				if (nativeReplayEnabled && sanitizedHistoryItems) {
 					// Model-owned replay items can carry reserved control-token
@@ -2446,16 +2446,15 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	const output: string | ResponseFunctionCallOutputItemList =
 		hasImages && supportsImages
 			? ((convertResponsesInputContent(
-				toolResult.content,
-				supportsImages,
-				false,
-				supportsImageDetailOriginal,
-				escapeControlTokens,
-			) ?? []) as ResponseFunctionCallOutputItemList)
+					toolResult.content,
+					supportsImages,
+					false,
+					supportsImageDetailOriginal,
+					escapeControlTokens,
+				) ?? []) as ResponseFunctionCallOutputItemList)
 			: outputText;
 	return { output, outputText };
 }
-
 
 /** Appends one Responses tool result. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
@@ -2549,7 +2548,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  * Codex uses the open item's recorded index) so the emitted stream events match
  * each decoder's existing behavior byte-for-byte.
  */
-type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string;[kStreamingLastParseLen]?: number };
+type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
 
 function ensureReasoningSummaryPart(
 	item: ResponseReasoningItem,
@@ -2914,11 +2913,11 @@ export async function processResponsesStream<TApi extends Api>(
 	};
 	interface StreamingItem {
 		item:
-		| ResponseReasoningItem
-		| ResponseOutputMessage
-		| ResponseFunctionToolCall
-		| ResponseCustomToolCall
-		| ResponseComputerToolCall;
+			| ResponseReasoningItem
+			| ResponseOutputMessage
+			| ResponseFunctionToolCall
+			| ResponseCustomToolCall
+			| ResponseComputerToolCall;
 		block: ThinkingContent | TextContent | StreamingToolCallBlock;
 	}
 
@@ -3322,8 +3321,8 @@ export async function processResponsesStream<TApi extends Api>(
 					entry?.block.type === "thinking"
 						? entry.block
 						: (output.content.find(b => b.type === "thinking" && (b as ThinkingContent).itemId === item.id) as
-							| ThinkingContent
-							| undefined);
+								| ThinkingContent
+								| undefined);
 				if (reasoningBlock) {
 					reasoningBlock.thinking = finalizeReasoningThinking(item, reasoningBlock.thinking);
 					reasoningBlock.thinkingSignature = JSON.stringify(item);
@@ -3819,22 +3818,22 @@ export function populateResponsesUsageFromResponse(
 	output: AssistantMessage,
 	usage:
 		| {
-			input_tokens?: number | null;
-			output_tokens?: number | null;
-			total_tokens?: number | null;
-			prompt_cache_hit_tokens?: number | null;
-			prompt_cache_miss_tokens?: number | null;
-			input_tokens_details?: {
-				cached_tokens?: number | null;
-				cache_write_tokens?: number | null;
-				orchestration_input_tokens?: number | null;
-				orchestration_input_cached_tokens?: number | null;
-			} | null;
-			output_tokens_details?: {
-				reasoning_tokens?: number | null;
-				orchestration_output_tokens?: number | null;
-			} | null;
-		}
+				input_tokens?: number | null;
+				output_tokens?: number | null;
+				total_tokens?: number | null;
+				prompt_cache_hit_tokens?: number | null;
+				prompt_cache_miss_tokens?: number | null;
+				input_tokens_details?: {
+					cached_tokens?: number | null;
+					cache_write_tokens?: number | null;
+					orchestration_input_tokens?: number | null;
+					orchestration_input_cached_tokens?: number | null;
+				} | null;
+				output_tokens_details?: {
+					reasoning_tokens?: number | null;
+					orchestration_output_tokens?: number | null;
+				} | null;
+		  }
 		| null
 		| undefined,
 ): void {
@@ -3855,7 +3854,7 @@ export function populateResponsesUsageFromResponse(
 		reportedTotalTokens !== undefined &&
 		orchestrationInputTokens + orchestrationOutputTokens > 0 &&
 		Math.abs(reportedTotalTokens - reportedPrimaryTokens) <=
-		Math.abs(reportedTotalTokens - reportedWithSeparateOrchestration);
+			Math.abs(reportedTotalTokens - reportedWithSeparateOrchestration);
 	const orchestrationInputCached = Math.min(orchestrationInputTokens, orchestrationInputCachedTokens);
 	const orchestrationInput = Math.max(0, orchestrationInputTokens - orchestrationInputCached);
 	const accounting = calculateOpenAIUsageAccounting({
