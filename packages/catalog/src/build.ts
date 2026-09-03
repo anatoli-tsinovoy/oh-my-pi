@@ -11,7 +11,7 @@ import { resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { resolveEffectiveMediaCapabilities } from "./media-capabilities";
-import type { Api, Model, ModelSpec } from "./types";
+import type { Api, InputModality, Model, ModelSpec } from "./types";
 import { cleanModelName } from "./utils";
 
 function numberField(source: object, key: string): number | undefined {
@@ -25,8 +25,11 @@ function objectPayload(value: unknown): object | undefined {
 }
 
 /** Narrow a compiled `input-modalities` axis value to the model input union. */
-function isInputModalities(value: unknown): value is ("text" | "image")[] {
-	return Array.isArray(value) && value.every(entry => entry === "text" || entry === "image");
+function isInputModalities(value: unknown): value is InputModality[] {
+	return (
+		Array.isArray(value) &&
+		value.every(entry => entry === "text" || entry === "image" || entry === "audio" || entry === "video")
+	);
 }
 
 /**
@@ -203,7 +206,8 @@ function supportsOpenAIGAComputerUse(
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const policy = resolveModelPolicy(spec);
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
-	const vendorInput = [...(spec.vendorInput ?? spec.input)];
+	const policyInput = policy.catalog.inputModalities;
+	const vendorInput = [...(isInputModalities(policyInput) ? policyInput : (spec.vendorInput ?? spec.input))];
 	const effective = resolveEffectiveMediaCapabilities(spec.api, vendorInput);
 	const model: Model<TApi> = {
 		...spec,
@@ -222,5 +226,6 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	model.input = [...effective.input];
 	return model;
 }

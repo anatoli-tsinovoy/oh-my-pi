@@ -21,6 +21,15 @@ class "gemini" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
 	}
+	// Gemini 3.8 Flash accepts native image, audio, and video input. Upstream
+	// catalog metadata currently reports only text/image, so keep the model-lineage
+	// capability here; API transport policy still intersects unsupported hosts.
+	// https://ai.google.dev/gemini-api/docs/video-understanding
+	family "flash" {
+		revision ">=3.8 <3.9" {
+			input-modalities "text" "image" "audio" "video"
+		}
+	}
 	family "lite" {
 		revision ">=0" {
 			thinking-efforts "minimal" "low" "medium" "high"

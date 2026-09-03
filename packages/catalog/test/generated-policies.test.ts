@@ -429,6 +429,19 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("restores Gemini 3.8 Flash native audio and video input", () => {
+		const model = buildGenerated(
+			createSpec({
+				id: "gemini-3.8-flash",
+				api: "google-generative-ai",
+				provider: "google",
+			}),
+		);
+
+		expect(model.vendorInput).toEqual(["text", "image", "audio", "video"]);
+		expect(model.input).toEqual(["text", "image", "audio", "video"]);
+	});
+
 	it("pins MiniMax-M3 long-context providers to 1M context", () => {
 		const models = [
 			createSpec({
