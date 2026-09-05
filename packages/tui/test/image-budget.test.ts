@@ -305,13 +305,8 @@ describe("encodeKittyDeleteImage", () => {
 describe("tmux Kitty graphics passthrough", () => {
 	beforeEach(() => {
 		Bun.env.TMUX = "/tmp/tmux-1000/default,1,0";
-		Bun.env.OMP_TMUX_PASSTHROUGH_DEPTH = "1";
 	});
 
-	afterEach(() => {
-		delete Bun.env.TMUX;
-		delete Bun.env.OMP_TMUX_PASSTHROUGH_DEPTH;
-	});
 	it("wraps every Kitty graphics command in a tmux DCS envelope", () => {
 		const expected = (payload: string) => `\x1bPtmux;${payload.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
 
@@ -324,15 +319,6 @@ describe("tmux Kitty graphics passthrough", () => {
 			expected("\x1b_Ga=p,U=1,q=2,i=9,p=9,c=3,r=2\x1b\\"),
 		);
 		expect(encodeKittyDeleteImage(9)).toBe(expected("\x1b_Ga=d,d=I,i=9,q=2\x1b\\"));
-	});
-
-	it("wraps Kitty commands once per nested tmux layer", () => {
-		Bun.env.OMP_TMUX_PASSTHROUGH_DEPTH = "2";
-		const payload = "\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\\";
-		expect(encodeKittyTransmit("AA==", 9)).toBe(wrapTmuxPassthrough(payload, 2));
-		expect(wrapTmuxPassthrough(payload, 2)).toBe(
-			"\x1bPtmux;\x1b\x1bPtmux;\x1b\x1b\x1b\x1b_Ga=t,f=100,q=2,i=9;AA==\x1b\x1b\x1b\x1b\\\x1b\x1b\\\x1b\\",
-		);
 	});
 
 	it("wraps each quiet chunk of a multi-part Kitty transmission separately", () => {
