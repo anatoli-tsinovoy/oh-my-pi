@@ -1,6 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
+import { resolveMemoryProjectRoot } from "../memory-backend/project-scope";
 import type { Settings } from "../config/settings";
 import { runSharpshooterConsolidation } from "./consolidate";
 import { readSharpshooterState, sharpshooterBankDir } from "./paths";
@@ -23,7 +24,12 @@ export function startSharpshooterScheduler(options: {
 	modelRegistry: ModelRegistry;
 	sessionId: string;
 }): () => void {
-	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
+	const storageCwd = resolveMemoryProjectRoot(
+		options.cwd,
+		options.settings.get("sharpshooter.shareAcrossWorktrees") === true,
+	);
+	const scopedOptions = { ...options, storageCwd };
+	const bankDir = sharpshooterBankDir(options.agentDir, storageCwd);
 	const existing = schedulers.get(bankDir);
 	if (existing) {
 		existing.refCount += 1;
@@ -33,13 +39,13 @@ export function startSharpshooterScheduler(options: {
 	const tick = async (): Promise<void> => {
 		try {
 			const [depth, state] = await Promise.all([
-				sharpshooterQueueDepth(options.agentDir, options.cwd),
-				readSharpshooterState(options.agentDir, options.cwd),
+				sharpshooterQueueDepth(options.agentDir, storageCwd),
+				readSharpshooterState(options.agentDir, storageCwd),
 			]);
 			const intervalMinutes = options.settings.get("sharpshooter.intervalMinutes") ?? DEFAULT_INTERVAL_MINUTES;
 			const due = Date.now() - state.lastConsolidatedAt >= intervalMinutes * 60_000;
 			if (depth === 0 && !due) return;
-			await runSharpshooterConsolidation(options);
+			await runSharpshooterConsolidation(scopedOptions);
 		} catch (error) {
 			logger.debug("sharpshooter scheduler tick failed", {
 				error: error instanceof Error ? error.message : String(error),

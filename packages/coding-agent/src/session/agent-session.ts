@@ -579,6 +579,7 @@ export class AgentSession {
 	#unsubscribeExtendedContext?: () => void;
 	#unsubscribeCodeMode?: () => void;
 	#unsubscribeEvalPreludeSettings?: () => void;
+	#unsubscribeMemoryScopeSettings?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -1835,6 +1836,20 @@ export class AgentSession {
 				});
 			});
 		});
+		if (config.memoryAgentDir && (config.memoryTaskDepth ?? 0) === 0) {
+			this.#unsubscribeMemoryScopeSettings = this.settings.onEffectiveChange(path => {
+				const backend = this.settings.get("memory.backend");
+				if (
+					!(backend === "mnemopi" && path === "mnemopi.shareAcrossWorktrees") &&
+					!(backend === "sharpshooter" && path === "sharpshooter.shareAcrossWorktrees")
+				) {
+					return;
+				}
+				void this.applyMemoryBackend().catch(error => {
+					logger.warn("Failed to apply memory worktree scope", { path, error: String(error) });
+				});
+			});
+		}
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
 				logger.warn("Code Mode reconcile after setting change failed", { error: String(error) });
@@ -4575,6 +4590,10 @@ export class AgentSession {
 		if (this.#unsubscribeEvalPreludeSettings) {
 			this.#unsubscribeEvalPreludeSettings();
 			this.#unsubscribeEvalPreludeSettings = undefined;
+		}
+		if (this.#unsubscribeMemoryScopeSettings) {
+			this.#unsubscribeMemoryScopeSettings();
+			this.#unsubscribeMemoryScopeSettings = undefined;
 		}
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();

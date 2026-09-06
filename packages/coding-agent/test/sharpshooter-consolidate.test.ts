@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as ai from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -30,7 +31,42 @@ interface Harness {
 	sessionId: string;
 }
 
-function createHarness(root: string): Harness {
+function runGit(cwd: string, args: string[]): string {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_AUTHOR_NAME: "Sharpshooter Test",
+			GIT_AUTHOR_EMAIL: "sharpshooter@example.invalid",
+			GIT_COMMITTER_NAME: "Sharpshooter Test",
+			GIT_COMMITTER_EMAIL: "sharpshooter@example.invalid",
+		},
+	});
+	if (result.exitCode !== 0) {
+		const stderr = new TextDecoder().decode(result.stderr).trim();
+		throw new Error(`git ${args.join(" ")} failed: ${stderr || `exit ${result.exitCode}`}`);
+	}
+	return new TextDecoder().decode(result.stdout).trim();
+}
+async function createLinkedWorktree(root: string): Promise<{ primary: string; worktree: string }> {
+	const primary = path.join(root, "primary");
+	const worktree = path.join(root, "linked");
+	await fs.mkdir(primary, { recursive: true });
+	await Bun.write(path.join(primary, ".gitkeep"), "");
+	runGit(primary, ["init", "--initial-branch=main"]);
+	runGit(primary, ["config", "user.email", "sharpshooter@example.invalid"]);
+	runGit(primary, ["config", "user.name", "Sharpshooter Test"]);
+	runGit(primary, ["add", "-A"]);
+	runGit(primary, ["commit", "-m", "fixture"]);
+	runGit(primary, ["worktree", "add", worktree, "-b", "linked"]);
+	return { primary, worktree };
+}
+function createHarness(root: string, shareAcrossWorktrees = false): Harness {
 	const agentDir = path.join(root, "agent");
 	const cwd = path.join(root, "project");
 	const authStorage = createInMemoryAuthStorage();
@@ -45,6 +81,7 @@ function createHarness(root: string): Harness {
 		settings: Settings.isolated({
 			"sharpshooter.model": "anthropic/claude-haiku-4-5",
 			"sharpshooter.intervalMinutes": 5,
+			"sharpshooter.shareAcrossWorktrees": shareAcrossWorktrees,
 		}),
 		modelRegistry,
 		sessionId: "01900000-0000-7000-8000-000000000001",
@@ -125,6 +162,25 @@ describe("runSharpshooterConsolidation", () => {
 		const forced = await runSharpshooterConsolidation({ ...harness, force: true });
 		expect(forced).toEqual({ ran: true, sessions: 1, deltas: 1 });
 		expect(completeSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("consolidates a linked-worktree queue into the shared primary bank while reading local docs", async () => {
+		using temp = TempDir.createSync("@pi-sharpshooter-shared-worktree-");
+		const { primary, worktree } = await createLinkedWorktree(temp.path());
+		const harness = { ...createHarness(temp.path(), true), cwd: worktree };
+		await Bun.write(path.join(worktree, "AGENTS.md"), "Use the linked worktree documentation.");
+		await appendSharpshooterDelta(harness.agentDir, primary, delta(harness.sessionId, 1, "Share this decision."));
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(completion(completeFiles));
+
+		const result = await runSharpshooterConsolidation({ ...harness, force: true });
+
+		expect(result).toEqual({ ran: true, sessions: 1, deltas: 1 });
+		expect(await Bun.file(sharpshooterMemoryFilePath(harness.agentDir, primary, "architecture.md")).text()).toBe(
+			completeFiles[0]?.content,
+		);
+		expect(await listSharpshooterDeltas(harness.agentDir, primary)).toEqual([]);
+		expect(await listSharpshooterDeltas(harness.agentDir, worktree)).toEqual([]);
+		expect(JSON.stringify(completeSpy.mock.calls[0]?.[1])).toContain("linked worktree documentation");
 	});
 
 	it("stamps an empty queue without calling the model", async () => {

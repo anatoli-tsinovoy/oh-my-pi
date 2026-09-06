@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { mkdirSync } from "node:fs";
+import * as syncFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { computeMnemopiBankScope, extendRecallWithLegacyBanks } from "@oh-my-pi/pi-coding-agent/mnemopi/config";
@@ -32,7 +32,7 @@ afterAll(async () => {
 function createBankFixture(bank: string, metadataRows: readonly Record<string, unknown>[]): void {
 	const bankDir = path.join(banksDir, bank);
 	const dbPath = path.join(bankDir, "mnemopi.db");
-	mkdirSync(bankDir, { recursive: true });
+	syncFs.mkdirSync(bankDir, { recursive: true });
 	const db = new Database(dbPath, { create: true });
 	try {
 		db.exec(`

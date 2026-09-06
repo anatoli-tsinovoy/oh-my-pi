@@ -11,6 +11,7 @@ import extractSystemTemplate from "../prompts/memories/sharpshooter-extract-syst
 import type { AgentSession } from "../session/agent-session";
 import { customMessageContentText } from "../session/checkpoint-entries";
 import { appendSharpshooterDelta } from "./queue";
+import { resolveMemoryProjectRoot } from "../memory-backend/project-scope";
 import type { SharpshooterDelta, SharpshooterDeltaKind, SharpshooterDeltaSource, SharpshooterFriction } from "./types";
 
 const SHARPSHOOTER_DELTA_KINDS = {
@@ -178,14 +179,19 @@ export function maybeStartSharpshooterExtraction(options: {
 	message?: AgentMessage;
 }): void {
 	try {
-		const { session } = options;
+		const { session, settings } = options;
 		if (session.isDisposed || (session as ExtractionHost)[kExtractionInFlight]) return;
 		const envelope = buildSharpshooterEnvelope(session.messages, options.message);
 		if (!envelope) return;
 		const trimmedPrompt = envelope.prompt.trim();
 		if (trimmedPrompt.startsWith("/") || trimmedPrompt.length < 16) return;
 
-		const run = runSharpshooterExtraction(options, envelope)
+		const invokingCwd = session.sessionManager.getCwd();
+		const storageCwd = resolveMemoryProjectRoot(
+			invokingCwd,
+			settings.get("sharpshooter.shareAcrossWorktrees") === true,
+		);
+		const run = runSharpshooterExtraction({ ...options, storageCwd }, envelope)
 			.catch(error => {
 				logger.debug("Sharpshooter extraction failed", { error: String(error), sessionId: session.sessionId });
 			})
@@ -204,10 +210,11 @@ async function runSharpshooterExtraction(
 		settings: Settings;
 		modelRegistry: ModelRegistry;
 		agentDir: string;
+		storageCwd: string;
 	},
 	envelope: SharpshooterEnvelope,
 ): Promise<void> {
-	const { session, settings, modelRegistry, agentDir } = options;
+	const { session, settings, modelRegistry, agentDir, storageCwd } = options;
 	const model = await resolveSharpshooterModel(settings, modelRegistry);
 	if (!model || session.isDisposed) return;
 
@@ -244,7 +251,7 @@ async function runSharpshooterExtraction(
 			const delta = admitDelta(candidate, envelope.prompt, session.sessionId);
 			if (!delta) continue;
 			if (session.isDisposed) return;
-			await appendSharpshooterDelta(agentDir, session.sessionManager.getCwd(), delta);
+			await appendSharpshooterDelta(agentDir, storageCwd, delta);
 		}
 	}
 }

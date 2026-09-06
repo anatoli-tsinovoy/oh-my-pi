@@ -17,6 +17,29 @@ memory:
   backend: local
 ```
 
+## Sharing memory across worktrees
+
+Mnemopi and Sharpshooter isolate memory by absolute working-directory path by default. To share project memory between a repository's primary checkout, linked worktrees, and subdirectories, enable the setting for your selected backend:
+
+```yaml
+memory:
+  backend: sharpshooter
+sharpshooter:
+  shareAcrossWorktrees: true
+```
+
+For Mnemopi, use `memory.backend: mnemopi` and `mnemopi.shareAcrossWorktrees: true`. This applies to its `per-project` and `per-project-tagged` modes; `global` is unchanged.
+
+Both settings default to `false` and are available in `/settings` under Memory. Changing the active backend's setting reapplies its memory scope in the current session. Enable it consistently in the sessions that should share memory, using the same agent directory and, for Mnemopi, database path and bank base.
+
+Shared scope uses the repository's primary checkout path (the common repository directory for worktrees of a bare repository). Outside a repository, memory remains scoped to the working directory. Separate clones remain separate even when their directory names match.
+
+Existing memory for the primary checkout is reused. Old worktree-local memory is not moved or merged; switching sharing off returns to the directory-local scope. `/memory clear` with sharing enabled clears the shared project memory, so the change is visible to the other worktrees too.
+
+Sharpshooter files remain under the agent directory's `memories/sharpshooter/<bank>/`, not in the repository. The shared scope covers its decision files, pending queue, and consolidation state; extraction already in flight when the setting changes keeps its original scope.
+
+Hindsight already shares project identity across worktrees. The local summary backend remains directory-scoped.
+
 ## Usage
 
 ### What gets injected

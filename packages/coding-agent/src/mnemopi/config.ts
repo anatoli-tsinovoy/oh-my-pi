@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+import { resolveMemoryProjectRoot } from "../memory-backend/project-scope";
 import type { Settings } from "../config/settings";
 
 export type MnemopiLlmMode = "none" | "smol" | "remote";
@@ -44,12 +45,15 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const configuredDbPath = settings.get("mnemopi.dbPath");
 	const cwd = settings.getCwd();
 	const scoping = settings.get("mnemopi.scoping");
+	const shareAcrossWorktrees = settings.get("mnemopi.shareAcrossWorktrees");
 	const dbPath = configuredDbPath?.trim()
 		? configuredDbPath
 		: path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
-	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping);
+	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping, shareAcrossWorktrees);
 	const recallBanks =
-		scoping === "global" ? scope.recallBanks : extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);
+		scoping === "global" || shareAcrossWorktrees
+			? scope.recallBanks
+			: extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);
 	const llmMode = settings.get("mnemopi.llmMode");
 	const embeddingOverride = settings.get("mnemopi.embeddingModel");
 	const embeddingVariant = settings.get("mnemopi.embeddingVariant");
@@ -122,25 +126,27 @@ export interface MnemopiBankScope {
  *
  * Mnemopi has no tag-filtered recall, so `per-project-tagged` maps to a
  * project-local write bank plus a shared recall-visible bank. The project
- * bank is derived purely from {@link cwd} — see {@link projectBank} for the
- * stability contract.
+ * bank is derived from {@link cwd}, or from the repository's primary root
+ * when worktree sharing is enabled.
  */
 export function computeMnemopiBankScope(
 	configured: string | undefined,
 	cwd: string,
 	scoping: MnemopiScoping,
+	shareAcrossWorktrees = false,
 ): MnemopiBankScope {
-	const project = projectBank(configured, cwd);
 	const globalBank = sharedBank(configured);
+	if (scoping === "global") {
+		return {
+			baseBank: globalBank,
+			bank: globalBank,
+			globalBank,
+			retainBank: globalBank,
+			recallBanks: [globalBank],
+		};
+	}
+	const project = projectBank(configured, cwd, shareAcrossWorktrees);
 	switch (scoping) {
-		case "global":
-			return {
-				baseBank: globalBank,
-				bank: globalBank,
-				globalBank,
-				retainBank: globalBank,
-				recallBanks: [globalBank],
-			};
 		case "per-project":
 			return {
 				baseBank: globalBank,
@@ -165,16 +171,16 @@ function sharedBank(configured: string | undefined): string {
 }
 
 /**
- * Derive the per-project bank id from `cwd` alone.
+ * Derive the per-project bank id from the cwd, or from its repository's
+ * primary checkout when worktree sharing is enabled.
  *
- * Earlier versions resolved the enclosing git root before hashing, which
- * made the bank id unstable: removing or adding a `.git` anywhere above the
- * cwd repointed the same conversation directory to a different bank and
- * fragmented memories (#2412). The git lookup is gone here; the rescue path
- * for already-fragmented installs lives in {@link extendRecallWithLegacyBanks}.
+ * The default path remains cwd-only: earlier versions resolved the enclosing
+ * git root before hashing, which made the bank id unstable when `.git` was
+ * added or removed above the cwd and fragmented memories (#2412). The rescue
+ * path for already-fragmented installs lives in {@link extendRecallWithLegacyBanks}.
  */
-function projectBank(configured: string | undefined, cwd: string): string {
-	const projectRoot = path.resolve(cwd || ".");
+function projectBank(configured: string | undefined, cwd: string, shareAcrossWorktrees: boolean): string {
+	const projectRoot = resolveMemoryProjectRoot(cwd, shareAcrossWorktrees);
 	const project = projectBankSegment(projectRoot);
 	const base = sanitizeBankName(configured);
 	return limitBankName(base ? `${base}-${project}` : project);

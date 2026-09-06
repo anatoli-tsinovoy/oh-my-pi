@@ -7,6 +7,7 @@ import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
+import { resolveMemoryProjectRoot } from "../memory-backend/project-scope";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };
 import consolidateSystemTemplate from "../prompts/memories/sharpshooter-consolidate-system.md" with { type: "text" };
@@ -80,13 +81,21 @@ export function renderSharpshooterSessions(groups: readonly SharpshooterSessionD
 
 export async function runSharpshooterConsolidation(options: {
 	agentDir: string;
+	/** Invoking worktree; project docs are read from this directory. */
 	cwd: string;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
 	sessionId: string;
 	force?: boolean;
+	/** Captured storage scope for background callers; prevents live setting drift. */
+	storageCwd?: string;
 }): Promise<SharpshooterConsolidationResult> {
-	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
+	const projectCwd = options.cwd;
+	const storageCwd =
+		options.storageCwd ??
+		resolveMemoryProjectRoot(projectCwd, options.settings.get("sharpshooter.shareAcrossWorktrees") === true);
+	const scopedOptions = { ...options, cwd: storageCwd };
+	const bankDir = sharpshooterBankDir(options.agentDir, storageCwd);
 	try {
 		await fs.mkdir(bankDir, { recursive: true });
 	} catch (error) {
@@ -96,10 +105,10 @@ export async function runSharpshooterConsolidation(options: {
 	let acquired = false;
 	try {
 		return await withFileLock(
-			sharpshooterLockPath(options.agentDir, options.cwd),
+			sharpshooterLockPath(options.agentDir, storageCwd),
 			async () => {
 				acquired = true;
-				return await consolidateLocked(options, bankDir);
+				return await consolidateLocked(scopedOptions, bankDir, projectCwd);
 			},
 			{ retries: 1, retryDelayMs: 1 },
 		);
@@ -119,6 +128,7 @@ async function consolidateLocked(
 		force?: boolean;
 	},
 	bankDir: string,
+	projectCwd: string,
 ): Promise<SharpshooterConsolidationResult> {
 	const state = await readSharpshooterState(options.agentDir, options.cwd);
 	try {
@@ -140,7 +150,7 @@ async function consolidateLocked(
 		if (!model) return { ran: false, reason: "no_model" };
 
 		const currentFiles = await readCurrentMemoryFiles(options.agentDir, options.cwd);
-		const projectDocs = await readProjectDocs(options.cwd);
+		const projectDocs = await readProjectDocs(projectCwd);
 		const sessions = renderSharpshooterSessions(groups);
 		const input = prompt.render(consolidateInputTemplate, {
 			architecture: currentFiles["architecture.md"],

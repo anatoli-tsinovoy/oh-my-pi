@@ -1,8 +1,10 @@
 import { rm } from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { MemoryBackend, MemoryBackendSearchItem, MemoryBackendStatus } from "../memory-backend/types";
+import { resolveMemoryProjectRoot } from "../memory-backend/project-scope";
 import { truncateApproxTokens } from "../mnemopi/config";
 import type { AgentSession } from "../session/agent-session";
+import type { Settings } from "../config/settings";
 import { runSharpshooterConsolidation } from "./consolidate";
 import { maybeStartSharpshooterExtraction, resolveSharpshooterModel } from "./extract";
 import {
@@ -72,6 +74,10 @@ function formatTimestamp(timestamp: number | undefined): string {
 	return timestamp ? new Date(timestamp).toISOString() : "never";
 }
 
+function resolveStorageCwd(cwd: string, settings?: Settings): string {
+	return resolveMemoryProjectRoot(cwd, settings?.get("sharpshooter.shareAcrossWorktrees") === true);
+}
+
 export const sharpshooterBackend: MemoryBackend = {
 	id: "sharpshooter",
 
@@ -82,7 +88,7 @@ export const sharpshooterBackend: MemoryBackend = {
 			releaseSharpshooterSession(session);
 			const disposeScheduler = startSharpshooterScheduler({
 				agentDir,
-				cwd: settings.getCwd(),
+				cwd: session.sessionManager.getCwd(),
 				settings,
 				modelRegistry,
 				sessionId: session.sessionId,
@@ -114,8 +120,9 @@ export const sharpshooterBackend: MemoryBackend = {
 		}
 	},
 
-	async buildDeveloperInstructions(agentDir, settings): Promise<string | undefined> {
-		const files = await readMemoryFiles(agentDir, settings.getCwd());
+	async buildDeveloperInstructions(agentDir, settings, session): Promise<string | undefined> {
+		const cwd = session?.sessionManager.getCwd() ?? settings.getCwd();
+		const files = await readMemoryFiles(agentDir, resolveStorageCwd(cwd, settings));
 		const populated = files.filter(file => file.content.trim().length > 0);
 		if (populated.length === 0) return undefined;
 		const parts = [
@@ -125,8 +132,11 @@ export const sharpshooterBackend: MemoryBackend = {
 		return truncateApproxTokens(parts.join("\n\n"), settings.get("sharpshooter.injectionTokenLimit"));
 	},
 
-	async clear(agentDir, cwd): Promise<void> {
-		await rm(sharpshooterBankDir(agentDir, cwd), { recursive: true, force: true });
+	async clear(agentDir, cwd, session): Promise<void> {
+		await rm(sharpshooterBankDir(agentDir, resolveStorageCwd(cwd, session?.settings)), {
+			recursive: true,
+			force: true,
+		});
 	},
 
 	async enqueue(agentDir, cwd, session): Promise<void> {
@@ -134,9 +144,11 @@ export const sharpshooterBackend: MemoryBackend = {
 			logger.debug("Sharpshooter: consolidation skipped without an active session.");
 			return;
 		}
+		const storageCwd = resolveStorageCwd(cwd, session.settings);
 		await runSharpshooterConsolidation({
 			agentDir,
 			cwd,
+			storageCwd,
 			settings: session.settings,
 			modelRegistry: session.modelRegistry,
 			sessionId: session.sessionId,
@@ -144,11 +156,12 @@ export const sharpshooterBackend: MemoryBackend = {
 		});
 	},
 
-	async status({ agentDir, cwd }): Promise<MemoryBackendStatus> {
+	async status({ agentDir, cwd, session }): Promise<MemoryBackendStatus> {
+		const storageCwd = resolveStorageCwd(cwd, session?.settings);
 		const [files, queueDepth, state] = await Promise.all([
-			readMemoryFiles(agentDir, cwd),
-			sharpshooterQueueDepth(agentDir, cwd),
-			readSharpshooterState(agentDir, cwd),
+			readMemoryFiles(agentDir, storageCwd),
+			sharpshooterQueueDepth(agentDir, storageCwd),
+			readSharpshooterState(agentDir, storageCwd),
 		]);
 		const fileSummary = files.map(file => `${file.name}: ${file.lines} lines`).join(", ");
 		return {
@@ -156,16 +169,17 @@ export const sharpshooterBackend: MemoryBackend = {
 			active: true,
 			writable: false,
 			searchable: true,
-			scope: sharpshooterBankId(cwd),
+			scope: sharpshooterBankId(storageCwd),
 			message: `${fileSummary}; queue: ${queueDepth}; last consolidated: ${formatTimestamp(state.lastConsolidatedAt)}`,
 		};
 	},
 
-	async stats(agentDir, cwd): Promise<string> {
+	async stats(agentDir, cwd, session): Promise<string> {
+		const storageCwd = resolveStorageCwd(cwd, session?.settings);
 		const [files, sessions, state] = await Promise.all([
-			readMemoryFiles(agentDir, cwd),
-			listSharpshooterDeltas(agentDir, cwd),
-			readSharpshooterState(agentDir, cwd),
+			readMemoryFiles(agentDir, storageCwd),
+			listSharpshooterDeltas(agentDir, storageCwd),
+			readSharpshooterState(agentDir, storageCwd),
 		]);
 		const queueDepth = sessions.reduce((sum, group) => sum + group.deltas.length, 0);
 		const lines = ["# Sharpshooter Memory Stats", "", "## Files"];
@@ -189,7 +203,8 @@ export const sharpshooterBackend: MemoryBackend = {
 	},
 
 	async diagnose(agentDir, cwd, session): Promise<string> {
-		const state = await readSharpshooterState(agentDir, cwd);
+		const storageCwd = resolveStorageCwd(cwd, session?.settings);
+		const state = await readSharpshooterState(agentDir, storageCwd);
 		const intervalMinutes = session?.settings.get("sharpshooter.intervalMinutes") ?? 5;
 		const intervalMs = Math.max(0, intervalMinutes) * 60_000;
 		const dueInMs = Math.max(0, state.lastConsolidatedAt + intervalMs - Date.now());
@@ -199,7 +214,7 @@ export const sharpshooterBackend: MemoryBackend = {
 			"",
 			`- Model: ${model ? `${model.provider}/${model.id}` : "unavailable"}`,
 			`- Interval: ${intervalMinutes} minutes`,
-			`- Lock: ${sharpshooterLockPath(agentDir, cwd)}`,
+			`- Lock: ${sharpshooterLockPath(agentDir, storageCwd)}`,
 			`- Due in: ${Math.ceil(dueInMs / 1000)} seconds`,
 			state.lastError
 				? `- Last error: ${formatTimestamp(state.lastError.at)} — ${state.lastError.message}`
@@ -207,8 +222,8 @@ export const sharpshooterBackend: MemoryBackend = {
 		].join("\n");
 	},
 
-	async queuePreview({ agentDir, cwd }): Promise<string> {
-		const sessions = await listSharpshooterDeltas(agentDir, cwd);
+	async queuePreview({ agentDir, cwd, session }): Promise<string> {
+		const sessions = await listSharpshooterDeltas(agentDir, resolveStorageCwd(cwd, session?.settings));
 		if (sessions.length === 0) return "Queue is empty.";
 		const lines = ["# Pending Sharpshooter Deltas"];
 		for (const group of sessions) {
@@ -222,13 +237,13 @@ export const sharpshooterBackend: MemoryBackend = {
 		return lines.join("\n");
 	},
 
-	async search({ agentDir, cwd }, query, options) {
+	async search({ agentDir, cwd, session }, query, options) {
 		if (options?.signal?.aborted) {
 			return { backend: "sharpshooter", query, count: 0, items: [], message: "Search aborted." };
 		}
 		const needle = query.toLowerCase();
 		if (!needle) return { backend: "sharpshooter", query, count: 0, items: [] };
-		const files = await readMemoryFiles(agentDir, cwd);
+		const files = await readMemoryFiles(agentDir, resolveStorageCwd(cwd, session?.settings));
 		const items: MemoryBackendSearchItem[] = [];
 		for (const file of files) {
 			for (const line of file.content.split(/\r?\n/)) {

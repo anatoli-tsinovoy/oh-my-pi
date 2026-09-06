@@ -15,6 +15,43 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sharpshooter/extract";
 import { listSharpshooterDeltas } from "@oh-my-pi/pi-coding-agent/sharpshooter/queue";
 
+function runGit(cwd: string, args: string[]): string {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd,
+		stdout: "pipe",
+		stderr: "pipe",
+		env: {
+			...process.env,
+			GIT_CONFIG_GLOBAL: "/dev/null",
+			GIT_CONFIG_SYSTEM: "/dev/null",
+			GIT_CONFIG_NOSYSTEM: "1",
+			GIT_AUTHOR_NAME: "Sharpshooter Test",
+			GIT_AUTHOR_EMAIL: "sharpshooter@example.invalid",
+			GIT_COMMITTER_NAME: "Sharpshooter Test",
+			GIT_COMMITTER_EMAIL: "sharpshooter@example.invalid",
+		},
+	});
+	if (result.exitCode !== 0) {
+		const stderr = new TextDecoder().decode(result.stderr).trim();
+		throw new Error(`git ${args.join(" ")} failed: ${stderr || `exit ${result.exitCode}`}`);
+	}
+	return new TextDecoder().decode(result.stdout).trim();
+}
+
+async function createLinkedWorktree(root: string): Promise<{ primary: string; worktree: string }> {
+	const primary = path.join(root, "primary");
+	const worktree = path.join(root, "linked");
+	await fs.mkdir(primary, { recursive: true });
+	runGit(primary, ["init", "--initial-branch=main"]);
+	runGit(primary, ["config", "user.email", "sharpshooter@example.invalid"]);
+	runGit(primary, ["config", "user.name", "Sharpshooter Test"]);
+	await Bun.write(path.join(primary, "README.md"), "fixture\n");
+	runGit(primary, ["add", "-A"]);
+	runGit(primary, ["commit", "-m", "fixture"]);
+	runGit(primary, ["worktree", "add", worktree, "-b", "linked"]);
+	return { primary, worktree };
+}
+
 function message(role: "user" | "assistant", content: unknown): AgentMessage {
 	return { role, content, timestamp: Date.now() } as unknown as AgentMessage;
 }
@@ -39,12 +76,19 @@ function assistantResponse(content: AssistantMessage["content"]): AssistantMessa
 	};
 }
 
-function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId = "session-extract") {
+function extractionDependencies(
+	cwd: string,
+	messages: AgentMessage[],
+	sessionId = "session-extract",
+	shareAcrossWorktrees = false,
+) {
 	const model = getBundledModel("anthropic", "claude-haiku-4-5");
 	if (!model) throw new Error("Expected bundled Claude Haiku model");
+	const scope = { value: shareAcrossWorktrees };
 	const settings = {
 		get(key: string) {
 			if (key === "sharpshooter.model") return `${model.provider}/${model.id}`;
+			if (key === "sharpshooter.shareAcrossWorktrees") return scope.value;
 			return undefined;
 		},
 		getModelRole() {
@@ -65,7 +109,7 @@ function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId
 		sessionId,
 		sessionManager: { getCwd: () => cwd },
 	} as unknown as AgentSession;
-	return { modelRegistry, session, settings };
+	return { modelRegistry, session, settings, scope };
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, message: string): Promise<void> {
@@ -147,6 +191,60 @@ describe("maybeStartSharpshooterExtraction", () => {
 		await pending.promise;
 		await Promise.resolve();
 		await Promise.resolve();
+	});
+
+	it("keeps in-flight extraction in its captured shared worktree bank", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "sharpshooter-extract-worktree-"));
+		try {
+			const { primary, worktree } = await createLinkedWorktree(root);
+			const agentDir = path.join(root, "agent");
+			const currentPrompt = "Keep the shared status indicator stable across every release.";
+			const deps = extractionDependencies(
+				worktree,
+				[message("user", [{ type: "text", text: currentPrompt }])],
+				"session-shared",
+				true,
+			);
+			const pending = Promise.withResolvers<AssistantMessage>();
+			const completion = vi.spyOn(ai, "completeSimple").mockImplementation(() => pending.promise);
+
+			maybeStartSharpshooterExtraction({
+				agentDir,
+				modelRegistry: deps.modelRegistry,
+				session: deps.session,
+				settings: deps.settings,
+			});
+			await waitFor(() => completion.mock.calls.length === 1, "shared extraction did not start");
+			deps.scope.value = false;
+			pending.resolve(
+				assistantResponse([
+					{
+						type: "toolCall",
+						id: "call-record",
+						name: "record_deltas",
+						arguments: {
+							deltas: [
+								{
+									kind: "style_decision",
+									statement: "Shared status indicator remains stable.",
+									source: "explicit_user",
+									evidence: "shared status indicator",
+									friction: { corrective: true, regression: false, subtle: true },
+								},
+							],
+						},
+					},
+				]),
+			);
+
+			await waitFor(
+				async () => (await listSharpshooterDeltas(agentDir, primary)).length === 1,
+				"captured shared delta was not queued",
+			);
+			expect(await listSharpshooterDeltas(agentDir, worktree)).toEqual([]);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("queues only deltas whose evidence is a verbatim prompt substring", async () => {

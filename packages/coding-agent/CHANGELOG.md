@@ -3,6 +3,10 @@
 ## [Unreleased]
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Added
+
+- Added opt-in `mnemopi.shareAcrossWorktrees` and `sharpshooter.shareAcrossWorktrees` settings to share project memory across linked worktrees and subdirectories.
+
 ### Changed
 
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.

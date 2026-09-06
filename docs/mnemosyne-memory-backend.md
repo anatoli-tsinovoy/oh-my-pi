@@ -45,8 +45,9 @@ Read the full content and metadata for a recalled result with `read memory://<me
 | ----------------------------- | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `memory.backend`              | `off`              | Set to `mnemopi` to enable this backend.                                                                                                                                                                                                                                               |
 | `mnemopi.dbPath`              | agent memories dir | Optional SQLite database path.                                                                                                                                                                                                                                                         |
-| `mnemopi.bank`                | unset              | Optional shared bank base name passed to `Mnemopi`; the coding-agent wrapper scopes from this base according to `mnemopi.scoping`. Unset → shared bank `default`; per-project modes derive a project bank from the working-directory basename plus a stable hash of its absolute path. |
+| `mnemopi.bank`                | unset              | Optional shared bank base name passed to `Mnemopi`; per-project banks append a basename and stable path hash. The path is the working directory by default, or the primary checkout when `shareAcrossWorktrees` is enabled. |
 | `mnemopi.scoping`             | `per-project`      | Memory visibility mode: `global` = one shared bank, `per-project` = isolated project memory, `per-project-tagged` = project-local writes plus global recall visibility.                                                                                                                |
+| `mnemopi.shareAcrossWorktrees` | `false`           | Share the project bank across linked worktrees and subdirectories of one repository. Applies to both per-project modes; global scope is unchanged. |
 | `mnemopi.autoRecall`          | `true`             | Recall memory on the first turn of a session.                                                                                                                                                                                                                                          |
 | `mnemopi.autoRetain`          | `true`             | Retain completed turns automatically.                                                                                                                                                                                                                                                  |
 | `mnemopi.polyphonicRecall`    | `false`            | Enable 4-voice polyphonic recall (vector, graph, fact, temporal) with reciprocal rank fusion; `MNEMOPI_POLYPHONIC_RECALL` overrides when set.                                                                                                                                          |
@@ -73,10 +74,14 @@ Read the full content and metadata for a recalled result with `read memory://<me
 The coding-agent wrapper applies scoping on top of the underlying `Mnemopi` package:
 
 - `global` uses one shared bank for recall and writes.
-- `per-project` writes to and recalls from a bank derived from the current working directory alone — its basename plus a stable hash of its absolute path, independent of the surrounding git layout.
+- `per-project` writes to and recalls from a bank derived from the current working directory by default — its basename plus a stable hash of its absolute path, independent of the surrounding git layout.
 - `per-project-tagged` writes to the project-local bank and recalls from both the project-local bank and the shared global bank, with duplicate recall results merged.
 
 The combined project-plus-global behavior lives in the wrapper. The `@oh-my-pi/pi-mnemopi` package itself still exposes banks and constructor options directly, including `bank` for selecting a bank name. Project-local banks other than the shared bank are stored as sibling bank databases managed by Mnemopi's `BankManager`.
+
+Set `mnemopi.shareAcrossWorktrees: true` to derive project banks from the repository's primary checkout path instead. Linked worktrees and subdirectories then share recall and writes. Bare-repository worktrees share the common repository directory's bank; non-repository directories keep their directory-local identity. The full path is hashed, so unrelated clones with the same basename do not share memory.
+
+Enabling sharing reuses the primary checkout's bank; it does not migrate or merge old worktree-local banks. Shared mode does not add the legacy per-directory recall banks. Disabling sharing restores the existing directory-local scope and legacy-bank recall behavior. Changes through `/settings` apply to the active session; see [Sharing memory across worktrees](./memory.md#sharing-memory-across-worktrees) for configuration and clearing behavior.
 
 ## Recall previews and full-row reads
 

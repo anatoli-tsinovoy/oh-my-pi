@@ -3021,6 +3021,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Model selector for extraction/consolidation, empty = smol role",
 		},
 	},
+	"sharpshooter.shareAcrossWorktrees": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Sharpshooter",
+			label: "Share Across Worktrees",
+			description: "Share decision memory across a repository's worktrees and subdirectories",
+		},
+	},
 	"sharpshooter.intervalMinutes": { type: "number", default: 5 },
 	"sharpshooter.injectionTokenLimit": { type: "number", default: 15000 },
 
@@ -3103,6 +3113,18 @@ export const SETTINGS_SCHEMA = {
 					description: "Write to a project-local bank but merge project + shared recall results",
 				},
 			],
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.shareAcrossWorktrees": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Share Across Worktrees",
+			description:
+				"Share project memory across a repository's worktrees and subdirectories; global scope is unchanged",
 			condition: "mnemopiActive",
 		},
 	},
