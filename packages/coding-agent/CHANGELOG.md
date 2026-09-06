@@ -23,6 +23,10 @@
 - `memory://` now resolves against the session that issued it: a caller's own memory backend answers `memory://<id>`, so co-located sessions no longer read each other's memory rows, and a caller whose session is no longer live fails closed instead of being answered by a peer. Prompt completion binds to the same caller, so `memory://<memory-id>` stays on offer while a subagent shares the working directory. Advisors retain their owning session's memory access even without a session file.
 
 ## [18.1.11] - 2026-09-05
+### Fixed
+
+- Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
+- Android/Termux builds now produce a runnable bundled launcher instead of a Bun-compiled executable that crashes on startup.
 
 ### Added
 
