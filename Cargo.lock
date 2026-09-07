@@ -593,8 +593,6 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
- "log",
- "prettyplease 0.2.37",
  "proc-macro2",
  "quote",
  "regex",
@@ -749,7 +747,7 @@ checksum = "bd0f9631d8aaaee112c41985d675ef269e02acbd4f33122836af4f0c5f699ff6"
 dependencies = [
  "darling 0.24.1",
  "ident_case",
- "prettyplease 0.3.0",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "syn 3.0.5",
@@ -4937,25 +4935,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "maudio"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab8050247e9de440204a366e45b93068a5772a7e5be1c9dcc33ee5366214ecd0"
-dependencies = [
- "maudio-sys",
-]
-
-[[package]]
-name = "maudio-sys"
-version = "0.1.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5083fb2131d5a4d9cf42703a656ee44b153054fc435bdf3eeed0363931932491"
-dependencies = [
- "bindgen",
- "cc",
-]
-
-[[package]]
 name = "maybe-async"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6499,7 +6478,6 @@ dependencies = [
  "bytes",
  "flume",
  "libc",
- "maudio",
  "opus",
  "opus2",
  "parking_lot",
@@ -6745,16 +6723,6 @@ checksum = "3ae130e2f271fbc2ac3a40fb1d07180839cdbbe443c7a27e1e3c13c5cac0116d"
 dependencies = [
  "diff",
  "yansi",
-]
-
-[[package]]
-name = "prettyplease"
-version = "0.2.37"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
-dependencies = [
- "proc-macro2",
- "syn 2.0.119",
 ]
 
 [[package]]
