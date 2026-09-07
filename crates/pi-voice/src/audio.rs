@@ -20,14 +20,14 @@ use crate::{
 };
 
 // PulseAudio TCP playback stutters with a 20 ms target buffer; 50 ms absorbs
-// transport jitter while preserving interactive latency.
-#[cfg(target_os = "linux")]
+// transport jitter while preserving interactive latency on Linux and Android.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const PLAYBACK_PERIOD_MS: u32 = 50;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 const PLAYBACK_PERIOD_MS: u32 = 20;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const CAPTURE_PERIOD_MS: u32 = 50;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 const CAPTURE_PERIOD_MS: u32 = 20;
 // Backends queue up to `device::playback_drain_periods` periods (three for
 // AudioQueue buffers/WASAPI padding; PulseAudio scales this with the widened
@@ -46,18 +46,18 @@ const PLAYBACK_DRAIN_MARGIN_CALLBACKS: usize = 1;
 /// [`PlaybackState::wait_for_drain`] can outlive the stream lock.
 pub struct PlaybackState {
 	gain_bits: AtomicU32,
-	drained:   AtomicBool,
-	stopped:   AtomicBool,
-	notify:    Notify,
+	drained: AtomicBool,
+	stopped: AtomicBool,
+	notify: Notify,
 }
 
 impl PlaybackState {
 	fn new() -> Self {
 		Self {
 			gain_bits: AtomicU32::new(1.0f32.to_bits()),
-			drained:   AtomicBool::new(false),
-			stopped:   AtomicBool::new(false),
-			notify:    Notify::new(),
+			drained: AtomicBool::new(false),
+			stopped: AtomicBool::new(false),
+			notify: Notify::new(),
 		}
 	}
 
@@ -109,7 +109,7 @@ impl Drop for FillGuard {
 /// remote-audio decoder so it can feed the same speaker stream.
 #[derive(Clone)]
 pub struct PlaybackWriter {
-	tx:    flume::Sender<Vec<f32>>,
+	tx: flume::Sender<Vec<f32>>,
 	state: Arc<PlaybackState>,
 }
 
@@ -133,7 +133,7 @@ impl PlaybackWriter {
 pub struct PlaybackStream {
 	device: Option<PlaybackDevice>,
 	writer: Option<PlaybackWriter>,
-	state:  Arc<PlaybackState>,
+	state: Arc<PlaybackState>,
 }
 
 impl PlaybackStream {

@@ -17,10 +17,9 @@ tokio.workspace = true
 webrtc.workspace = true
 
 [target.'cfg(target_os = "android")'.dependencies]
-maudio = { workspace = true, features = ["generate-bindings", "no-aaudio"] }
 opus2.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 # dlopen/dlsym for the PulseAudio and ALSA backends: no link-time dependency
 # on libpulse/libasound, so the prebuilt addon loads on systems without them.
 libc.workspace = true
