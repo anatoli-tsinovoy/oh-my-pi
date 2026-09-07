@@ -1,7 +1,11 @@
-//! Linux default-device audio through runtime-loaded `PulseAudio` or ALSA.
+//! Unix default-device audio through runtime-loaded `PulseAudio`.
+//!
+//! Linux also retains the runtime-loaded ALSA fallback; Android intentionally
+//! reports the PulseAudio failure instead of probing a different audio stack.
 
 use std::{
-	ffi::{CStr, c_char, c_int, c_long, c_uint, c_void},
+	ffi::{CStr, c_char, c_int, c_void},
+	mem::{size_of, size_of_val},
 	ptr,
 	sync::{
 		Arc, Mutex, OnceLock,
@@ -11,6 +15,9 @@ use std::{
 	thread::{self, JoinHandle},
 	time::Duration,
 };
+
+#[cfg(target_os = "linux")]
+use std::ffi::{c_long, c_uint};
 
 use super::{CaptureSink, DeviceConfig, PlaybackFill};
 use crate::VoiceResult;
@@ -22,29 +29,33 @@ const PA_SAMPLE_FLOAT32_NATIVE: c_int = 5;
 #[cfg(target_endian = "big")]
 const PA_SAMPLE_FLOAT32_NATIVE: c_int = 6;
 
+#[cfg(target_os = "linux")]
 const SND_PCM_STREAM_PLAYBACK: c_int = 0;
+#[cfg(target_os = "linux")]
 const SND_PCM_STREAM_CAPTURE: c_int = 1;
+#[cfg(target_os = "linux")]
 const SND_PCM_NONBLOCK: c_int = 1;
+#[cfg(target_os = "linux")]
 const SND_PCM_ACCESS_RW_INTERLEAVED: c_int = 3;
-#[cfg(target_endian = "little")]
+#[cfg(all(target_os = "linux", target_endian = "little"))]
 const SND_PCM_FORMAT_FLOAT_NATIVE: c_int = 14;
-#[cfg(target_endian = "big")]
+#[cfg(all(target_os = "linux", target_endian = "big"))]
 const SND_PCM_FORMAT_FLOAT_NATIVE: c_int = 15;
 
 #[repr(C)]
 struct PaSampleSpec {
-	format:   c_int,
-	rate:     u32,
+	format: c_int,
+	rate: u32,
 	channels: u8,
 }
 
 #[repr(C)]
 struct PaBufferAttr {
 	maxlength: u32,
-	tlength:   u32,
-	prebuf:    u32,
-	minreq:    u32,
-	fragsize:  u32,
+	tlength: u32,
+	prebuf: u32,
+	minreq: u32,
+	fragsize: u32,
 }
 
 type PaSimpleNew = unsafe extern "C" fn(
@@ -64,14 +75,25 @@ type PaSimpleRead = unsafe extern "C" fn(*mut c_void, *mut c_void, usize, *mut c
 type PaStrerror = unsafe extern "C" fn(c_int) -> *const c_char;
 
 struct PulseApi {
-	simple_new:   PaSimpleNew,
-	simple_free:  PaSimpleFree,
+	simple_new: PaSimpleNew,
+	simple_free: PaSimpleFree,
 	simple_write: PaSimpleWrite,
-	simple_read:  PaSimpleRead,
-	strerror:     PaStrerror,
+	simple_read: PaSimpleRead,
+	strerror: PaStrerror,
 }
 
 static PULSE_API: OnceLock<Result<&'static PulseApi, String>> = OnceLock::new();
+
+fn pulse_simple_library() -> &'static CStr {
+	#[cfg(target_os = "android")]
+	{
+		c"libpulse-simple.so"
+	}
+	#[cfg(target_os = "linux")]
+	{
+		c"libpulse-simple.so.0"
+	}
+}
 
 impl PulseApi {
 	fn get() -> Result<&'static Self, String> {
@@ -79,8 +101,31 @@ impl PulseApi {
 	}
 
 	fn load() -> Result<&'static Self, String> {
-		let simple = open_library(c"libpulse-simple.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
-		let pulse = open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL)?;
+		let simple = open_library(pulse_simple_library(), libc::RTLD_NOW | libc::RTLD_GLOBAL)
+			.map_err(|error| {
+				#[cfg(target_os = "android")]
+				{
+					format!(
+						"Android PulseAudio simple client library {} unavailable: {error}",
+						pulse_simple_library().to_string_lossy()
+					)
+				}
+				#[cfg(target_os = "linux")]
+				{
+					error
+				}
+			})?;
+		let pulse =
+			open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL).map_err(|error| {
+				#[cfg(target_os = "android")]
+				{
+					format!("Android PulseAudio client library libpulse.so.0 unavailable: {error}")
+				}
+				#[cfg(target_os = "linux")]
+				{
+					error
+				}
+			})?;
 
 		// SAFETY: each symbol is resolved from the library defining this exact C
 		// API.
@@ -118,29 +163,39 @@ impl PulseApi {
 	}
 }
 
+#[cfg(target_os = "linux")]
 type SndPcmOpen = unsafe extern "C" fn(*mut *mut c_void, *const c_char, c_int, c_int) -> c_int;
+#[cfg(target_os = "linux")]
 type SndPcmSetParams =
 	unsafe extern "C" fn(*mut c_void, c_int, c_int, c_uint, c_uint, c_int, c_uint) -> c_int;
+#[cfg(target_os = "linux")]
 type SndPcmIo = unsafe extern "C" fn(*mut c_void, *mut c_void, c_long) -> c_long;
+#[cfg(target_os = "linux")]
 type SndPcmRecover = unsafe extern "C" fn(*mut c_void, c_int, c_int) -> c_int;
+#[cfg(target_os = "linux")]
 type SndPcmWait = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
+#[cfg(target_os = "linux")]
 type SndPcmControl = unsafe extern "C" fn(*mut c_void) -> c_int;
+#[cfg(target_os = "linux")]
 type SndStrerror = unsafe extern "C" fn(c_int) -> *const c_char;
 
+#[cfg(target_os = "linux")]
 struct AlsaApi {
-	pcm_open:       SndPcmOpen,
+	pcm_open: SndPcmOpen,
 	pcm_set_params: SndPcmSetParams,
-	pcm_writei:     SndPcmIo,
-	pcm_readi:      SndPcmIo,
-	pcm_recover:    SndPcmRecover,
-	pcm_wait:       SndPcmWait,
-	pcm_start:      SndPcmControl,
-	pcm_close:      SndPcmControl,
-	strerror:       SndStrerror,
+	pcm_writei: SndPcmIo,
+	pcm_readi: SndPcmIo,
+	pcm_recover: SndPcmRecover,
+	pcm_wait: SndPcmWait,
+	pcm_start: SndPcmControl,
+	pcm_close: SndPcmControl,
+	strerror: SndStrerror,
 }
 
+#[cfg(target_os = "linux")]
 static ALSA_API: OnceLock<Result<&'static AlsaApi, String>> = OnceLock::new();
 
+#[cfg(target_os = "linux")]
 impl AlsaApi {
 	fn get() -> Result<&'static Self, String> {
 		ALSA_API.get_or_init(Self::load).clone()
@@ -280,11 +335,8 @@ impl PulseStream {
 		direction: c_int,
 		attr: &PaBufferAttr,
 	) -> Result<Self, String> {
-		let spec = PaSampleSpec {
-			format:   PA_SAMPLE_FLOAT32_NATIVE,
-			rate:     config.sample_rate,
-			channels: 1,
-		};
+		let spec =
+			PaSampleSpec { format: PA_SAMPLE_FLOAT32_NATIVE, rate: config.sample_rate, channels: 1 };
 		let mut error = 0;
 		// SAFETY: all pointers reference valid values for the duration of
 		// pa_simple_new.
@@ -309,12 +361,15 @@ impl PulseStream {
 	}
 }
 
+#[cfg(target_os = "linux")]
 struct AlsaStream(*mut c_void);
 
 // SAFETY: the pointer is transferred to and exclusively dereferenced by its
 // worker thread.
+#[cfg(target_os = "linux")]
 unsafe impl Send for AlsaStream {}
 
+#[cfg(target_os = "linux")]
 impl AlsaStream {
 	fn open(api: &AlsaApi, config: DeviceConfig, direction: c_int) -> Result<Self, String> {
 		let latency = config
@@ -379,11 +434,13 @@ impl AlsaStream {
 	}
 }
 
+#[cfg(target_os = "linux")]
 enum AlsaOpenError {
 	Open(String),
 	Params(String),
 }
 
+#[cfg(target_os = "linux")]
 impl AlsaOpenError {
 	fn message(self) -> String {
 		match self {
@@ -465,18 +522,18 @@ fn pulse_attr(
 	Ok(if direction == PA_STREAM_RECORD {
 		PaBufferAttr {
 			maxlength: backlog_bytes,
-			tlength:   u32::MAX,
-			prebuf:    u32::MAX,
-			minreq:    u32::MAX,
-			fragsize:  period_bytes,
+			tlength: u32::MAX,
+			prebuf: u32::MAX,
+			minreq: u32::MAX,
+			fragsize: period_bytes,
 		}
 	} else {
 		PaBufferAttr {
 			maxlength: backlog_bytes,
-			tlength:   latency_bytes,
-			prebuf:    u32::MAX,
-			minreq:    u32::MAX,
-			fragsize:  u32::MAX,
+			tlength: latency_bytes,
+			prebuf: u32::MAX,
+			minreq: u32::MAX,
+			fragsize: u32::MAX,
 		}
 	})
 }
@@ -485,9 +542,8 @@ fn pulse_attr(
 /// opened with this config, before a fill callback observing no new data
 /// reflects genuine drain rather than an in-flight refill. Mirrors the
 /// `PULSE_BACKLOG_PERIODS` multiplier `pulse_attr` applies to the same
-/// latency target. ALSA (the fallback backend when `PulseAudio` is
-/// unavailable) never widens beyond the base period, so this stays a safe
-/// upper bound even if the stream falls back.
+/// latency target. On Linux, the ALSA fallback never widens beyond the base
+/// period, so this stays a safe upper bound even if the stream falls back.
 pub(crate) fn playback_drain_periods(config: DeviceConfig) -> u32 {
 	drain_periods_for_latency(config.period_ms, pulse_latency_ms(config.period_ms))
 }
@@ -601,12 +657,14 @@ fn pulse_capture_loop(
 	Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn close_alsa_with_error(api: &AlsaApi, stream: &AlsaStream, error: String) -> Result<(), String> {
 	// SAFETY: stream is open and exclusively owned by this thread.
 	unsafe { (api.pcm_close)(stream.0) };
 	Err(error)
 }
 
+#[cfg(target_os = "linux")]
 fn recover_alsa(
 	api: &AlsaApi,
 	stream: &AlsaStream,
@@ -624,6 +682,7 @@ fn recover_alsa(
 	Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn wait_for_alsa(api: &AlsaApi, stream: &AlsaStream, timeout_ms: c_int) -> Result<(), String> {
 	// SAFETY: stream is open and timeout_ms is a valid non-negative timeout.
 	let status = unsafe { (api.pcm_wait)(stream.0, timeout_ms) };
@@ -634,6 +693,7 @@ fn wait_for_alsa(api: &AlsaApi, stream: &AlsaStream, timeout_ms: c_int) -> Resul
 	}
 }
 
+#[cfg(target_os = "linux")]
 fn alsa_playback_loop(
 	api: &AlsaApi,
 	stream: &AlsaStream,
@@ -703,6 +763,7 @@ fn alsa_playback_loop(
 	Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn alsa_capture_loop(
 	api: &AlsaApi,
 	stream: &AlsaStream,
@@ -776,10 +837,10 @@ impl Drop for ThreadDone {
 }
 
 struct RunningDevice {
-	stop:      AtomicBool,
-	delivery:  Arc<DeliveryGate>,
+	stop: AtomicBool,
+	delivery: Arc<DeliveryGate>,
 	worker_id: OnceLock<thread::ThreadId>,
-	error:     Mutex<Option<String>>,
+	error: Mutex<Option<String>>,
 }
 
 fn finish(
@@ -828,14 +889,16 @@ fn finish(
 		.map_or(Ok(()), Err)
 }
 
-/// The per-direction parts of a Linux worker: stream constants and the
-/// `PulseAudio`/ALSA loops driving callback `C`.
+/// The per-direction parts of a Unix worker: PulseAudio everywhere and ALSA on
+/// Linux.
 struct Direction<C> {
 	name:       &'static str,
 	pulse:      c_int,
+	#[cfg(target_os = "linux")]
 	alsa:       c_int,
 	pulse_loop:
 		fn(&PulseApi, &PulseStream, &AtomicBool, &DeliveryGate, &mut C, usize) -> VoiceResult<()>,
+	#[cfg(target_os = "linux")]
 	alsa_loop: fn(
 		&AlsaApi,
 		&AlsaStream,
@@ -850,20 +913,24 @@ struct Direction<C> {
 const PLAYBACK: Direction<PlaybackFill> = Direction {
 	name:       "playback",
 	pulse:      PA_STREAM_PLAYBACK,
+	#[cfg(target_os = "linux")]
 	alsa:       SND_PCM_STREAM_PLAYBACK,
 	pulse_loop: pulse_playback_loop,
+	#[cfg(target_os = "linux")]
 	alsa_loop:  alsa_playback_loop,
 };
 
 const CAPTURE: Direction<CaptureSink> = Direction {
 	name:       "capture",
 	pulse:      PA_STREAM_RECORD,
+	#[cfg(target_os = "linux")]
 	alsa:       SND_PCM_STREAM_CAPTURE,
 	pulse_loop: pulse_capture_loop,
+	#[cfg(target_os = "linux")]
 	alsa_loop:  alsa_capture_loop,
 };
 
-/// Running `PulseAudio` or ALSA worker for either direction.
+/// Running PulseAudio, with a Linux ALSA fallback, for either direction.
 pub struct Device {
 	running: Arc<RunningDevice>,
 	thread:  Option<JoinHandle<()>>,
@@ -886,9 +953,16 @@ impl Device {
 		mut callback: C,
 		direction: &Direction<C>,
 	) -> VoiceResult<Self> {
-		let &Direction { name, pulse, alsa, pulse_loop, alsa_loop } = direction;
+		let name = direction.name;
+		let pulse = direction.pulse;
+		let pulse_loop = direction.pulse_loop;
+		#[cfg(target_os = "linux")]
+		let alsa = direction.alsa;
+		#[cfg(target_os = "linux")]
+		let alsa_loop = direction.alsa_loop;
 		let samples = config.period_samples();
 		let attr = pulse_attr(config, pulse, pulse_latency_ms(config.period_ms))?;
+		#[cfg(target_os = "linux")]
 		let timeout_ms = c_int::try_from(config.period_ms)
 			.unwrap_or(c_int::MAX)
 			.max(1);
@@ -926,6 +1000,7 @@ impl Device {
 					},
 					Err(error) => error,
 				};
+				#[cfg(target_os = "linux")]
 				match AlsaApi::get()
 					.and_then(|api| AlsaStream::open(api, config, alsa).map(|stream| (api, stream)))
 				{
@@ -950,6 +1025,11 @@ impl Device {
 						)));
 					},
 				}
+				#[cfg(target_os = "android")]
+				let _ = opened_tx.send(Err(format!(
+					"Android PulseAudio {name} unavailable; ensure a PulseAudio server is running and reachable \
+					 (set PULSE_SERVER if needed): {pulse_error}"
+				)));
 			})
 			.map_err(|error| format!("could not start {name} worker: {error}"))?;
 		match opened_rx.recv() {
