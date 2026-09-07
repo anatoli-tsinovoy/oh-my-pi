@@ -1,12 +1,13 @@
 //! Default-device audio backends.
 //!
-//! One backend per platform, each implementing the same two devices: bundled
-//! miniaudio/OpenSL ES on Android, `CoreAudio` `AudioQueue` on macOS,
-//! shared-mode WASAPI with automatic format conversion on Windows, and the
-//! `PulseAudio` simple API with an ALSA fallback (both loaded via `dlopen`) on
-//! Linux. Every backend delegates format conversion, channel mixing, and
-//! resampling to its platform audio implementation so the engine keeps a
-//! single mono `f32` contract at the requested logical sample rate.
+//! One backend per platform, each implementing the same two devices: shared
+//! `PulseAudio` simple API through runtime-loaded libraries on Linux and
+//! Android, `CoreAudio` `AudioQueue` on macOS, and shared-mode WASAPI with
+//! automatic format conversion on Windows. Linux retains an ALSA fallback;
+//! Android intentionally has no alternate audio backend. Every backend
+//! delegates format conversion, channel mixing, and resampling to its platform
+//! audio implementation so the engine keeps a single mono `f32` contract at
+//! the requested logical sample rate.
 //!
 //! # Contract
 //! - [`PlaybackDevice::start`] opens the default speaker and invokes `fill`
@@ -25,10 +26,10 @@
 //!   stops from callbacks; the carve-out exists for contract soundness, not for
 //!   use. Dropping a device stops it.
 
-#[cfg(target_os = "android")]
-mod android;
-#[cfg(target_os = "android")]
-use android as imp;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+mod unix;
+#[cfg(any(target_os = "linux", target_os = "android"))]
+use unix as imp;
 
 #[cfg(target_os = "macos")]
 mod coreaudio;
@@ -39,11 +40,6 @@ use coreaudio as imp;
 mod wasapi;
 #[cfg(target_os = "windows")]
 use wasapi as imp;
-
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "linux")]
-use linux as imp;
 
 #[cfg(not(any(
 	target_os = "android",
@@ -74,10 +70,9 @@ pub struct DeviceConfig {
 	/// Logical client-side sample rate in Hz; the OS converts to hardware.
 	pub sample_rate: u32,
 	/// Target callback period in milliseconds.
-	pub period_ms:   u32,
+	pub period_ms: u32,
 }
 
-#[cfg(not(target_os = "android"))]
 impl DeviceConfig {
 	/// Samples per callback period at the logical rate (never zero).
 	pub fn period_samples(self) -> usize {
@@ -109,13 +104,13 @@ impl PlaybackDevice {
 /// at three for backends with a hardware/API-enforced queue depth
 /// (`CoreAudio` `AudioQueue` buffer count, WASAPI padding cap); `PulseAudio`
 /// scales this with the widened remote/`PULSE_LATENCY_MSEC` backlog before
-/// the stream even opens (see `linux::playback_drain_periods`).
-#[cfg(target_os = "linux")]
+/// the stream even opens (see `unix::playback_drain_periods`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn playback_drain_periods(config: DeviceConfig) -> u32 {
 	imp::playback_drain_periods(config)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
 pub const fn playback_drain_periods(_config: DeviceConfig) -> u32 {
 	3
 }
