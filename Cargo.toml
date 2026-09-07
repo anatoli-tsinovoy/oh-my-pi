@@ -291,7 +291,6 @@ xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio & Realtime Media
 # ──────────────────────────────────────────────────────────────────────────────
-maudio = "0.1.8"
 opus = "0.4.0"
 opus2 = { version = "0.4.0", default-features = false, features = ["backend-mousiki"] }
 webrtc = "0.17.2"
