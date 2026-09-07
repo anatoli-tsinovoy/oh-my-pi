@@ -48,6 +48,15 @@ There is no native `PhotonImage` class, `image.rs`, or ProjFS overlay helper mod
 - `AudioPlayback(sampleRate)` opens the default speaker. `write(samples)` queues mono `Float32Array` PCM in order; `setGain(gain)` changes render-time gain even for queued samples; `end()` drains and closes, while `stop()` discards queued audio immediately.
 - `LiveWebRtcPeer(onEvent, onLevel, onFailure)` owns a WebRTC peer for Codex live media. `createOffer()` returns SDP, `acceptAnswer(sdp)` applies the remote answer, `waitForOpen(timeoutMs?)` waits for the `oai-events` data channel, `pushAudio()` queues 16 kHz mono PCM, `setMuted()` controls transmission, and `close()` tears down media, data channel, peer, and playback.
 
+### Platform audio backends
+
+- Linux and Android use the same runtime-loaded PulseAudio simple-client backend for `AudioCapture` and `AudioPlayback`. Linux retains its ALSA fallback; Android does not compile or select ALSA. macOS CoreAudio/AudioQueue and Windows shared-mode WASAPI behavior are unchanged.
+- Android/Termux requires the `pulseaudio` package (`pkg install pulseaudio`). Start the PulseAudio daemon explicitly (for example, `pulseaudio --start`) before constructing an audio device; this addon never starts it automatically and does not fall back to Termux `MediaPlayer`.
+- Prefer PulseAudio's local Unix socket for a phone-local server, normally by leaving `PULSE_SERVER` unset. Set `PULSE_SERVER` only for an intentional remote server connection; remote PulseAudio uses its own transport/authentication and wider buffering. No unauthenticated TCP listener is created or assumed by this addon.
+- Capture additionally requires Android microphone permission. Install the `termux-api` package and the matching Termux:API app, grant that app microphone permission in Android settings, and ensure PulseAudio loads `module-sles-source` (for example, `pactl load-module module-sles-source` or a `load-module module-sles-source` line in `$PREFIX/etc/pulse/default.pa`). Confirm a real source with `pactl list short sources` before using `AudioCapture`.
+- PulseAudio may suspend an idle sink or source; the first operation after suspension can incur normal device wake-up latency. Shared Pulse period/backlog/drain handling and bounded `stop()`/callback-detachment guarantees are retained on Linux and Android.
+- Camera/torch behavior is outside this audio contract and is not promised until device-specific support is verified.
+
 ### SIXEL image encoding (`sixel`)
 
 - **JS input boundary**: `Uint8Array` containing encoded image bytes.
