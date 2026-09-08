@@ -1,9 +1,9 @@
 # Changelog
 
 ## [Unreleased]
-### Added
+### Changed
 
-- Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management, with audio capture/playback and live voice through bundled OpenSL ES/miniaudio; clipboard integration remains Termux API based.
+- Android ARM64/Termux audio now uses the shared runtime-loaded PulseAudio client instead of OpenSL ES/miniaudio; install the `pulseaudio` Termux package and start its daemon explicitly.
 
 ### Fixed
 

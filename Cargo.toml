@@ -282,6 +282,7 @@ xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
 # ──────────────────────────────────────────────────────────────────────────────
 audiopus_sys = { version = "0.2.2", features = ["static"] }
 opus = "0.3.1"
+opus2 = { version = "0.4.0", default-features = false, features = ["backend-mousiki"] }
 webrtc = "0.17.2"
 
 # ──────────────────────────────────────────────────────────────────────────────
