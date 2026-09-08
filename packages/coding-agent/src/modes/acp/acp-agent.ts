@@ -70,7 +70,7 @@ import type { SessionInfo as StoredSessionInfo } from "../../session/session-lis
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
+import { getDefaultSttModelKey, getSttModelOptions } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
 import { OTHER_OPTION } from "../../tools/ask";
@@ -260,14 +260,14 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 			speechVoice: "speech.voice",
 		},
 		defaults: {
-			speechToTextModel: DEFAULT_STT_MODEL_KEY,
+			speechToTextModel: getDefaultSttModelKey(),
 			textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
 			voice: DEFAULT_TTS_VOICE,
 		},
 		speechToText: {
 			setting: "stt.modelName",
-			defaultValue: DEFAULT_STT_MODEL_KEY,
-			models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
+			defaultValue: getDefaultSttModelKey(),
+			models: getSttModelOptions().map(({ value, label, description }) => ({ value, label, description })),
 		},
 		textToSpeech: {
 			modelSetting: "tts.localModel",
