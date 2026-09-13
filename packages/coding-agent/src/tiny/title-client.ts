@@ -29,13 +29,7 @@ import { connectJsonlSocket, LineParser, writeJsonLine } from "./jsonl-socket";
 import { formatTitleUserMessage } from "./message-preproc";
 import { ensureTinyMlxRuntime, getTinyMlxModelDir, MLX_LM_VERSION } from "./mlx-runtime";
 import MLX_SERVER_SCRIPT from "./mlx-server.py" with { type: "text" };
-import {
-	getTinyLocalModelSpec,
-	isTinyLocalModelKey,
-	isTinyMemoryLocalModelKey,
-	isTinyTitleLocalModelKey,
-	type TinyLocalModelKey,
-} from "./models";
+import { getTinyLocalModelSpec, isTinyLocalModelKey, isTinyTitleLocalModelKey, type TinyLocalModelKey } from "./models";
 import { normalizeGeneratedTitle } from "./text";
 import {
 	TINY_WORKER_ARG,
@@ -614,7 +608,7 @@ export class TinyTitleClient {
 		promptText: string,
 		options: TinyModelCompletionOptions = {},
 	): Promise<string | null> {
-		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
+		if (!isTinyLocalModelKey(modelKey)) return null;
 		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
 		const requested = options.maxTokens ?? MEMORY_COMPLETION_DEFAULT_MAX_NEW_TOKENS;
 		const { promise, resolve } = Promise.withResolvers<string | null>();

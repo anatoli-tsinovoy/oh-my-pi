@@ -98,6 +98,20 @@ class FakeSttWorker {
 }
 
 describe("tiny title client prompt construction", () => {
+	it("allows small local models to complete without title truncation", async () => {
+		const output =
+			"The parser preserves exact passage annotations while a separate source summary provides context. ".repeat(4);
+		const worker = new FakeTinyWorker((message, worker) => {
+			if (message.type === "chat") worker.emit({ type: "text", id: message.id, text: output });
+		});
+		const client = new TinyTitleClient(async () => worker);
+		try {
+			expect(await client.complete("lfm2.5-230m", "Summarize source")).toBe(output.trim());
+			expect(await client.complete("online", "Never send online")).toBeNull();
+		} finally {
+			await client.terminate();
+		}
+	});
 	it("renders the title chat with a custom system prompt, the <title> prefill, and extracts the reply", async () => {
 		let sent: TinyWorkerRequest | undefined;
 		const worker = new FakeTinyWorker((message, worker) => {
