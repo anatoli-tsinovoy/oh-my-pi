@@ -13,7 +13,7 @@
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).
 
-### Fixed
+### Added
 
 - The hidden notice announcing a mid-session tool-availability change now states that it lists only what changed, so an additions-only notice no longer reads as the complete tool set and the model keeps using tools that are still callable ([#11824](https://github.com/can1357/oh-my-pi/issues/11824) by [@camjac251](https://github.com/camjac251)).
 - TTSR stream buffers now reset at every assistant message boundary, not only at turn start, so a `scope: text` or tool-argument rule can no longer fire on a later message because of text streamed by an earlier response in the same turn ([#11957](https://github.com/can1357/oh-my-pi/pull/11957) by [@srobroek](https://github.com/srobroek)).
@@ -28,6 +28,7 @@
 - Fixed background task cards missing their final completion or failure after an early result or live-session focus replay.
 - Ranged reads on Windows no longer intermittently open the selector-suffixed path when filesystem probes return transient errors ([#11284](https://github.com/can1357/oh-my-pi/issues/11284)).
 - Fixed generic local TINY completions rejecting small title models; all registered local models can now produce completion text without title normalization or truncation.
+- Added support for all registered local TINY models in generic completions, including small title models, without title normalization or truncation ([#11964](https://github.com/can1357/oh-my-pi/pull/11964) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.1.19] - 2026-09-12
 
