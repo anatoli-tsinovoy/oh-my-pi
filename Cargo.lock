@@ -4982,6 +4982,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mousiki"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "025feef2fc01604ee1fac4ae254b33480574b16210945d0096d665009ba9c666"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "libm",
+ "log",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5636,6 +5648,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "33718946cc77d4032911d4efe03a66dbcbfbd2bb16c3da06aaeadcc637c32216"
 dependencies = [
  "opusic-sys",
+]
+
+[[package]]
+name = "opus2"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49521e33fbf825d2abc8d696506c278cb8469d0c6cc05d3785bef5c5f7ee957b"
+dependencies = [
+ "mousiki",
 ]
 
 [[package]]
@@ -6377,6 +6398,7 @@ dependencies = [
  "flume",
  "libc",
  "opus",
+ "opus2",
  "parking_lot",
  "tokio",
  "webrtc",
