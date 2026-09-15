@@ -797,6 +797,7 @@
 
 - Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
 - Android/Termux builds now produce a relocatable bundled launcher with its generated CLI and native assets, so copied artifacts run without the original repository layout.
+- Fixed legacy extensions resolving bundled resources against the current project instead of the relocated Android bundle.
 
 ## [18.2.0] - 2026-09-15
 
