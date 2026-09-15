@@ -21,15 +21,8 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "@oh-my-pi/pi-coding-agent/stt/models";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODELS,
-	TTS_LOCAL_VOICE_OPTIONS,
-} from "@oh-my-pi/pi-coding-agent/tts/models";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import type {
 	AgentSideConnection,
@@ -1094,44 +1087,61 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("lists static speech models for ACP mobile voice settings", async () => {
+	it("lists speech models for ACP mobile voice settings", async () => {
 		const harness = await createHarness();
-		const voices = TTS_LOCAL_VOICE_OPTIONS.map(({ value, label }) => ({ value, label }));
 
 		const result = await harness.agent.extMethod("speech.models.list", {});
+		const defaults = result.defaults as {
+			speechToTextModel: string;
+			textToSpeechModel: string;
+			voice: string;
+		};
+		const speechToText = result.speechToText as {
+			setting: string;
+			defaultValue: string;
+			models: Array<{ value: string }>;
+		};
+		const textToSpeech = result.textToSpeech as {
+			modelSetting: string;
+			voiceSetting: string;
+			speechVoiceSetting: string;
+			defaultModel: string;
+			defaultVoice: string;
+			models: Array<{ value: string }>;
+			voices: Array<{ value: string }>;
+		};
 
-		expect(result).toEqual({
-			settings: {
-				speechToTextModel: "stt.modelName",
-				textToSpeechModel: "tts.localModel",
-				textToSpeechVoice: "tts.localVoice",
-				speechVoice: "speech.voice",
-			},
-			defaults: {
-				speechToTextModel: DEFAULT_STT_MODEL_KEY,
-				textToSpeechModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				voice: DEFAULT_TTS_VOICE,
-			},
-			speechToText: {
-				setting: "stt.modelName",
-				defaultValue: DEFAULT_STT_MODEL_KEY,
-				models: STT_MODEL_OPTIONS.map(({ value, label, description }) => ({ value, label, description })),
-			},
-			textToSpeech: {
-				modelSetting: "tts.localModel",
-				voiceSetting: "tts.localVoice",
-				speechVoiceSetting: "speech.voice",
-				defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
-				defaultVoice: DEFAULT_TTS_VOICE,
-				models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }) => ({
-					value: key,
-					label,
-					description,
-					voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
-				})),
-				voices,
-			},
+		expect(result.settings).toEqual({
+			speechToTextModel: "stt.modelName",
+			textToSpeechModel: "tts.localModel",
+			textToSpeechVoice: "tts.localVoice",
+			speechVoice: "speech.voice",
 		});
+		expect(speechToText.setting).toBe("stt.modelName");
+		expect(textToSpeech).toMatchObject({
+			modelSetting: "tts.localModel",
+			voiceSetting: "tts.localVoice",
+			speechVoiceSetting: "speech.voice",
+		});
+
+		const advertisedSttModels = speechToText.models.map(({ value }) => value);
+		expect(defaults.speechToTextModel).toBe(speechToText.defaultValue);
+		expect(advertisedSttModels).toContain(defaults.speechToTextModel);
+
+		const advertisedTtsModels = textToSpeech.models.map(({ value }) => value);
+		const advertisedVoices = textToSpeech.voices.map(({ value }) => value);
+		expect(textToSpeech.defaultModel).toBe(defaults.textToSpeechModel);
+		expect(textToSpeech.defaultVoice).toBe(defaults.voice);
+		expect(advertisedTtsModels).toContain(defaults.textToSpeechModel);
+		expect(advertisedVoices).toContain(defaults.voice);
+
+		if (process.platform === "android") {
+			expect(defaults.speechToTextModel).toBe("fast");
+			expect(advertisedSttModels).not.toContain("parakeet");
+		} else {
+			expect(defaults.speechToTextModel).toBe("parakeet");
+			expect(advertisedSttModels).toContain("parakeet");
+		}
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
