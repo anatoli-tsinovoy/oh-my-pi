@@ -9,6 +9,7 @@
 - Fixed legacy extensions resolving bundled resources against the current project instead of the relocated Android bundle.
 - Fixed local Whisper speech-to-text on Android/Termux by using Transformers.js with the ONNX Runtime WebAssembly backend instead of the unavailable native Node binding.
 - Fixed local speech-to-text on Android/Termux by defaulting to Whisper when the sherpa native addon is unavailable and loading ONNX Runtime WebAssembly entirely from the local runtime.
+- Fixed `omp say` and local speech playback failing on Android/Termux by running Kokoro through the ONNX Runtime WebAssembly backend.
 
 ## [18.2.0] - 2026-09-15
 
