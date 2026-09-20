@@ -54,6 +54,11 @@ export interface AnnotationOverlayCallbacks {
 	onWarning?(message: string): void;
 	/** Open the draft in the host's editor and invoke `commit` with its result. */
 	onAnnotationExternalEditor?(draft: string, commit: (text: string | null) => void): void | Promise<void>;
+	/** Open a local file in the host's file viewer/editor. */
+	onOpenFile?(path: string): void | Promise<void>;
+	/** PR sources are immutable remote snapshots and must not open local files. */
+	cwd?: string;
+	allowOpenFile?: boolean;
 }
 
 export interface CodeReviewOverlayCallbacks extends AnnotationOverlayCallbacks {
@@ -288,6 +293,10 @@ export class AnnotationOverlay implements Component {
 				return;
 			}
 			this.#editor.handleInput(data);
+			return;
+		}
+		if (!this.#textSource && this.#callbacks.allowOpenFile !== false && matchesKey(data, "ctrl+o")) {
+			void this.#openCurrentFileInTmux();
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.cancel")) {
@@ -746,6 +755,21 @@ export class AnnotationOverlay implements Component {
 			this.#tui.requestRender(true);
 		}
 	}
+	async #openCurrentFileInTmux(): Promise<void> {
+		if (this.#textSource || this.#externalOperation || this.#callbacks.allowOpenFile === false) return;
+		const file = this.#currentFile();
+		const openFile = this.#callbacks.onOpenFile;
+		if (!file || !openFile) return;
+		this.#externalOperation = true;
+		try {
+			await openFile(file.newPath ?? file.path);
+		} catch (error) {
+			this.#callbacks.onWarning?.(`Failed to open file: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			this.#externalOperation = false;
+			this.#tui.requestRender(true);
+		}
+	}
 
 	#annotationCount(fileIndex: number): number {
 		let count = 0;
@@ -1036,7 +1060,11 @@ export class AnnotationOverlay implements Component {
 						? "↑↓ line · ⇧ faster · pgup/pgdn · g/G ends · a line note · A text note · e edit note"
 						: "↑↓ line · ⇧ faster · pgup/pgdn · g/G ends · a line note · A file note · e edit note"
 					: "↑↓ select · ⏎ confirm";
-		return [this.#theme.fg("dim", `${focusHelp} · u undo · tab regions · esc cancel`)];
+		const fileHelp =
+			this.#textSource || this.#callbacks.allowOpenFile === false || !this.#callbacks.onOpenFile
+				? ""
+				: " · ctrl+o open file · [/] file";
+		return [this.#theme.fg("dim", `${focusHelp}${fileHelp} · u undo · tab regions · esc cancel`)];
 	}
 
 	#ensureCursorVisible(renderedRowBySource: readonly number[]): void {

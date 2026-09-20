@@ -18,6 +18,7 @@ const DOWN = "\x1b[B";
 const CANCEL = "\x1b";
 const SHIFT_ENTER = "\x1b[13;2~";
 const CTRL_U = "\x15";
+const CTRL_O = "\x0f";
 const CTRL_E = "\x05";
 let darkTheme: Theme | undefined;
 let previousKeybindings: KeybindingsManager;
@@ -243,8 +244,9 @@ describe("AnnotationOverlay", () => {
 		expect(overlay.getTextAnnotations()).toEqual([]);
 	});
 
-	it("commits external-editor drafts", async () => {
+	it("commits external-editor drafts and does not open PR files locally", async () => {
 		const observedDrafts: string[] = [];
+		let opened = 0;
 		const overlay = new AnnotationOverlay(
 			makeTui(),
 			darkTheme!,
@@ -252,6 +254,10 @@ describe("AnnotationOverlay", () => {
 			parseReviewDiffSnapshot(oneLineDiff).files,
 			"PR #1",
 			{
+				allowOpenFile: false,
+				onOpenFile: () => {
+					opened++;
+				},
 				onAnnotationExternalEditor: (draft, commit) => {
 					observedDrafts.push(draft);
 					commit("external\neditor");
@@ -269,6 +275,10 @@ describe("AnnotationOverlay", () => {
 		expect(render(overlay)).toContain("external");
 		overlay.handleInput(ENTER);
 		expect(overlay.getAnnotations()).toEqual([expect.objectContaining({ note: "external\neditor" })]);
+
+		overlay.handleInput(CTRL_O);
+		await Bun.sleep(0);
+		expect(opened).toBe(0);
 	});
 
 	it("returns undefined on cancel without a review result", () => {

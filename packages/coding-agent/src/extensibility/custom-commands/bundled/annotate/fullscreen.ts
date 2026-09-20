@@ -8,6 +8,7 @@ import type {
 	TextReviewSource,
 } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 import { getEditorCommand, openInEditor } from "../../../../utils/external-editor";
+import { openFileInTmux } from "./tmux";
 
 const ANNOTATION_OVERLAY_OPTIONS = {
 	width: "100%",
@@ -40,6 +41,8 @@ export function showCodeReviewOverlay(
 				onComplete: done,
 				onWarning: message => ctx.ui.notify(message, "warning"),
 				onAnnotationExternalEditor: (draft, commit) => editAnnotationDraft(tui, draft, commit),
+				allowOpenFile: target.kind !== "pr",
+				onOpenFile: target.kind === "pr" ? undefined : file => openFileInTmux(file, ctx.cwd),
 			}),
 		{ overlay: true, overlayOptions: ANNOTATION_OVERLAY_OPTIONS },
 	);
