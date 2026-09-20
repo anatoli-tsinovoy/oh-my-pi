@@ -2,6 +2,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
+import type { CopySelection } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import type { CollabController } from "../collab/controller";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -475,6 +476,7 @@ export interface InteractiveModeContext {
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;
+	selectMessage(): Promise<CopySelection | undefined>;
 	showTreeSelector(): void;
 	showSessionSelector(source?: ForeignSessionSource): void;
 	/** Settle side requests before replacing the session or deleting its artifacts. */

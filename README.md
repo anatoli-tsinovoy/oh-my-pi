@@ -202,6 +202,8 @@ Other agents shell out to rg, grep, find, and bash. On many machines those binar
 
 Get a clear verdict on whether the change ships, with every issue ranked P0 through P3 and scored for confidence. /review spawns dedicated reviewer subagents that sweep branches, single commits, or uncommitted work in parallel. You tackle what blocks release first; nothing important hides in a wall of prose.
 
+Use `/annotate` to attach your own notes before asking the agent to act. Annotate local changes or GitHub PR diffs, the latest assistant reply (`/annotate last`), session content selected through the built-in `/copy` picker (`/annotate session`), or clipboard text (`/annotate clipboard`). Code review can continue with the agent or choose **Paste annotations into prompt**; that action and all text annotation flows only paste into the prompt, never submit automatically, leaving submission to you. [Annotation workflow and controls](docs/slash-command-internals.md#annotate).
+
 ### 11 · Hashline: edit by content hash
 
 Perfect edits, fewer tokens. The model points at anchors instead of retyping the lines it wants to change, so whitespace battles and string-not-found loops just stop happening. Edit a stale file and the anchors diverge — we reject the patch before it corrupts anything. Grok 4 Fast spends 61% fewer output tokens on the same work.

@@ -27,6 +27,7 @@ export {
 import type { type as ArkType } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
+import type { CopySelection } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import type {
 	AgentMessage,
 	AgentToolResult,
@@ -234,6 +235,8 @@ export type AutocompleteProviderFactory = (current: AutocompleteProvider) => Aut
 export interface ExtensionUIContext {
 	/** True when selector timeouts start only after the dialog is presented. */
 	timeoutStartsOnPresentation?: boolean;
+	/** Select exact session content through the terminal's copy selector, without copying it. TUI only. */
+	selectMessage?(): Promise<CopySelection | undefined>;
 	/** Show a selector and return the selected label, even when an option also includes a description. */
 	select(
 		title: string,

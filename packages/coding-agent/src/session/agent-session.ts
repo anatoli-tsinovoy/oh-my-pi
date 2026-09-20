@@ -149,7 +149,7 @@ import { emitSessionShutdownEvent } from "../extensibility/extensions";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { createExtensionModelQuery } from "../extensibility/extensions/model-api";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
-import type { HookCommandContext } from "../extensibility/hooks/types";
+import type { CustomCommandContext } from "../extensibility/custom-commands/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
@@ -7122,10 +7122,27 @@ export class AgentSession {
 
 		// Get command context from extension runner (includes session control methods)
 		const baseCtx = this.#createCommandContext();
-		const ctx = {
+		const ctx: CustomCommandContext = {
 			...baseCtx,
+			ui: {
+				select: (title, options) => baseCtx.ui.select(title, options),
+				confirm: (title, message) => baseCtx.ui.confirm(title, message),
+				input: (title, placeholder) => baseCtx.ui.input(title, placeholder),
+				notify: (message, type) => baseCtx.ui.notify(message, type),
+				setStatus: (key, text) => baseCtx.ui.setStatus(key, text),
+				custom: (factory, options) => baseCtx.ui.custom(factory, options),
+				setEditorText: text => baseCtx.ui.setEditorText(text),
+				pasteToEditor: text => baseCtx.ui.pasteToEditor(text),
+				getEditorText: () => baseCtx.ui.getEditorText(),
+				editor: (title, prefill, options, editorOptions) =>
+					baseCtx.ui.editor(title, prefill, options, editorOptions),
+				get theme() {
+					return baseCtx.ui.theme;
+				},
+				selectMessage: () => baseCtx.ui.selectMessage?.() ?? Promise.resolve(undefined),
+			},
 			hasQueuedMessages: baseCtx.hasPendingMessages,
-		} as unknown as HookCommandContext;
+		};
 
 		try {
 			const args = parseCommandArgs(argsString);

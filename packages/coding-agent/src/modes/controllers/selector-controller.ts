@@ -100,7 +100,7 @@ import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { createAgentHubRuntime } from "../agent-hub-runtime";
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { CopySelectorComponent, type CopySelection } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { ExtensionDashboard } from "@oh-my-pi/pi-tui/overlays/extensions/extension-dashboard";
 import { listLiveToolRecords, liveToolRecordFromSession } from "@oh-my-pi/pi-tui/overlays/extensions/live-tool-session";
 import { createExtensionDashboardRuntime } from "../components/extensions/dashboard-runtime";
@@ -1525,10 +1525,35 @@ export class SelectorController {
 	}
 
 	showCopySelector(): void {
+		this.#showMessageSelector(
+			selection => {
+				if (!selection.content.trim()) {
+					this.ctx.showStatus("Nothing to copy in that item");
+					return;
+				}
+				void copyToClipboard(selection.content);
+				this.ctx.showStatus(`Copied ${selection.label} to clipboard`);
+			},
+			() => {},
+			false,
+		);
+	}
+
+	selectMessage(): Promise<CopySelection | undefined> {
+		const { promise, resolve } = Promise.withResolvers<CopySelection | undefined>();
+		if (!this.#showMessageSelector(resolve, () => resolve(undefined), true)) resolve(undefined);
+		return promise;
+	}
+
+	#showMessageSelector(
+		onPick: (selection: CopySelection) => void,
+		onCancel: () => void,
+		selectOnly: boolean,
+	): boolean {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
-			this.ctx.showStatus("Nothing to copy yet.");
-			return;
+			this.ctx.showStatus(selectOnly ? "No messages to annotate yet." : "Nothing to copy yet.");
+			return false;
 		}
 
 		const done = () => {
@@ -1539,6 +1564,8 @@ export class SelectorController {
 		};
 		const selector = new CopySelectorComponent(entries, {
 			ui: this.ctx.ui,
+			title: selectOnly ? "Select message to annotate" : undefined,
+			actionLabel: selectOnly ? "select" : undefined,
 			getTool: name => this.ctx.session.getToolByName(name),
 			isBuiltInTool: name => this.ctx.session.hasBuiltInTool(name),
 			getMessageRenderer: type => this.ctx.session.extensionRunner?.getMessageRenderer(type),
@@ -1547,26 +1574,28 @@ export class SelectorController {
 			proseOnlyThinking: () => this.ctx.proseOnlyThinking,
 			linkTargets: getAssistantMessageLinkTargets(this.ctx),
 			requestRender: () => this.ctx.ui.requestRender(),
-			onPick: (content, label) => {
+			onPick: (_content, _label, selection) => {
 				done();
-				if (!content.trim()) {
-					this.ctx.showStatus("Nothing to copy in that item");
-					return;
-				}
-				void copyToClipboard(content);
-				this.ctx.showStatus(`Copied ${label} to clipboard`);
+				onPick(selection);
 			},
-			onOpen: (href, label) => {
+			...(selectOnly
+				? {}
+				: {
+						onOpen: (href: string, label: string) => {
+							done();
+							openPath(href);
+							this.ctx.showStatus(`Opening ${label}: ${href}`);
+						},
+					}),
+			onCancel: () => {
 				done();
-				openPath(href);
-				this.ctx.showStatus(`Opening ${label}: ${href}`);
+				onCancel();
 			},
-			onCancel: done,
 		});
 		if (selector.targetCount === 0) {
 			selector.dispose();
-			this.ctx.showStatus("Nothing to copy yet.");
-			return;
+			this.ctx.showStatus(selectOnly ? "No messages to annotate yet." : "Nothing to copy yet.");
+			return false;
 		}
 		const overlayHandle = this.ctx.ui.showOverlay(selector, {
 			anchor: "bottom-center",
@@ -1577,6 +1606,7 @@ export class SelectorController {
 		});
 		this.ctx.ui.setFocus(selector);
 		this.ctx.ui.requestRender();
+		return true;
 	}
 
 	showTreeSelector(): void {

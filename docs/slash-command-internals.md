@@ -23,6 +23,29 @@ This document describes how slash commands are discovered, deduplicated, surface
 - [`src/modes/controllers/input-controller.ts`](../packages/coding-agent/src/modes/controllers/input-controller.ts)
 - [`src/modes/utils/ui-helpers.ts`](../packages/coding-agent/src/modes/utils/ui-helpers.ts)
 
+## Annotate
+
+`/annotate` opens a source menu when no source argument is supplied. No extension installation is needed.
+
+| Command | Source |
+|---|---|
+| `/annotate code-review [focus]` | Local base-branch, working-copy, or commit diff, or a GitHub PR |
+| `/annotate last` | Latest non-empty assistant reply |
+| `/annotate session` | A message or block selected in the built-in `/copy` picker |
+| `/annotate clipboard` | Local clipboard text, with a paste editor when unavailable or over SSH |
+
+Code review lists up to three recent GitHub PR references found in the conversation, followed by the local base-branch, working-copy, and commit choices. Pass `/annotate code-review pr://owner/repo/N [focus]` to select a PR explicitly and skip the menu. The PR diff is fetched once: the annotation view and subsequent review use the same snapshot. PR context comes from GitHub, not similarly named files in the working directory. Annotations remain local; the command does not publish GitHub comments.
+
+`/annotate session` reuses the built-in `/copy` selector, returning the selected message or block exactly (including code, quotes, commands, and tool output).
+
+In the annotation view, `a` adds a line note, `A` adds a whole-file or whole-text note, and `e` reopens an existing note (with a chooser when several apply). Enter saves; Shift+Enter inserts a newline. Accepting an empty existing note deletes it; an empty new note does nothing. Escape cancels an edit without changing the saved note. The configured external-editor shortcut edits the draft; returning from the editor does not save or submit it.
+
+Code review offers **Continue with LLM review** and **Paste annotations into prompt**. The paste action and all text-source annotation flows only paste into the prompt editor; they never submit automatically. Cancelling does neither. Pasting requires at least one annotation.
+
+Annotation anchors (including exact line quotes) and notes are preserved exactly. Whole code, command, tool-output, and clipboard sources are included verbatim and bypass summary; the latest assistant reply includes only annotated passages. Older session messages or quote sources longer than 1,000 JavaScript string characters ask the currently selected session model to rephrase grounding context to at most 999 characters, using that model's credentials. This separate provider call can incur normal provider charges; it does not fall back to another provider/model or download a local model. The generated context supplements exact selected passages; it never replaces them. An invalid summary (blank, oversized, timed-out, or failed) falls back to the full original source verbatim with a warning.
+
+If the `omp-code-review` extension is still installed, its `/annotate` command takes precedence over the bundled command. Uninstall that extension to use the native implementation.
+
 ## 1) Discovery model
 
 Slash commands are a capability (`id: "slash-commands"`) keyed by command name (`key: cmd => cmd.name`).
