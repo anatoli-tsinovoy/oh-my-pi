@@ -416,3 +416,12 @@ branch only when the original session/leaf is unchanged and the main session is
 idle. Multi-turn side conversations remain in BTW history; promoting only their
 latest pair would discard earlier context. History browsing does not promote
 answers or relax these branch guards.
+
+## 12) Built-in command note: `/plan-review`
+
+`/plan-review` reopens the current plan in the interactive TUI's Plan Review overlay (plan mode only). Annotation controls follow focus:
+
+- With section-list focus, `a` starts a note for the selected section; with body focus, `a` starts a note for the visible body line.
+- `e` opens a chooser for existing annotations at the focused section or line, then edits the selected note. `Enter` commits the draft; submitting an empty replacement deletes that saved annotation.
+- `Esc` leaves annotation editing without changing the saved note. The external-editor key changes only the draft; press `Enter` to commit its result.
+- `u` undoes the latest in-overlay change.

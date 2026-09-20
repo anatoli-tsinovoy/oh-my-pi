@@ -6,6 +6,10 @@
 
 - Added the native annotation overlay for diffs and text, with inline/external note editing, empty-note deletion, cancellation, and `/copy`-backed session selection without auto-submission
 
+### Changed
+
+- Plan Review now lets users edit existing annotations from the overlay.
+
 ## [18.2.5] - 2026-09-17
 
 ### Added
