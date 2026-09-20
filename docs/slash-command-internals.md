@@ -25,14 +25,17 @@ This document describes how slash commands are discovered, deduplicated, surface
 
 ## Annotate
 
-`/annotate` opens a source menu when no source argument is supplied. No extension installation is needed.
+`/annotate` opens a source menu when no source argument is supplied.
 
 | Command | Source |
 |---|---|
 | `/annotate code-review [focus]` | Local base-branch, working-copy, or commit diff, or a GitHub PR |
 | `/annotate last` | Latest non-empty assistant reply |
 | `/annotate session` | A message or block selected in the built-in `/copy` picker |
-| `/annotate clipboard` | Local clipboard text, with a paste editor when unavailable or over SSH |
+| `/annotate path-to-file` | Text read from a file |
+| `/annotate "user prompt"` | Literal prompt text |
+
+With an argument, `/annotate` treats the entire remainder as one source specification. A remainder wrapped in matching single or double quotes is always a literal prompt; only the matching outer pair is stripped, and the interior text is preserved exactly. Without matching outer quotes, unquoted `last`, `session`, and `code-review` select those modes (including code-review's optional focus/PR syntax); any other nonblank remainder is one file path, including spaces. File paths are resolved with `resolveReadPath` relative to the current working directory, with `~` expansion. Missing, unreadable, or non-regular paths notify the user and never fall back to a prompt.
 
 Code review lists up to three recent GitHub PR references found in the conversation, followed by the local base-branch, working-copy, and commit choices. Pass `/annotate code-review pr://owner/repo/N [focus]` to select a PR explicitly and skip the menu. The PR diff is fetched once: the annotation view and subsequent review use the same snapshot. PR context comes from GitHub, not similarly named files in the working directory. Annotations remain local; the command does not publish GitHub comments.
 
@@ -42,9 +45,7 @@ In the annotation view, `a` adds a line note, `A` adds a whole-file or whole-tex
 
 Code review offers **Continue with LLM review** and **Paste annotations into prompt**. The paste action and all text-source annotation flows only paste into the prompt editor; they never submit automatically. Cancelling does neither. Pasting requires at least one annotation.
 
-Annotation anchors (including exact line quotes) and notes are preserved exactly. Whole code, command, tool-output, and clipboard sources are included verbatim and bypass summary; the latest assistant reply includes only annotated passages. Older session messages or quote sources longer than 1,000 JavaScript string characters ask the currently selected session model to rephrase grounding context to at most 999 characters, using that model's credentials. This separate provider call can incur normal provider charges; it does not fall back to another provider/model or download a local model. The generated context supplements exact selected passages; it never replaces them. An invalid summary (blank, oversized, timed-out, or failed) falls back to the full original source verbatim with a warning.
-
-If the `omp-code-review` extension is still installed, its `/annotate` command takes precedence over the bundled command. Uninstall that extension to use the native implementation.
+Annotation anchors (including exact line quotes) and notes are preserved exactly. File and literal-prompt sources are included verbatim regardless of length and bypass summarization; the latest assistant reply includes only annotated passages. Older session messages or quote sources longer than 1,000 JavaScript string characters ask the currently selected session model to rephrase grounding context to at most 999 characters, using that model's credentials. This separate provider call can incur normal provider charges; it does not fall back to another provider/model or download a local model. The generated context supplements exact selected passages; it never replaces them. An invalid summary (blank, oversized, timed-out, or failed) falls back to the full original source verbatim with a warning.
 
 ## 1) Discovery model
 
@@ -416,12 +417,3 @@ branch only when the original session/leaf is unchanged and the main session is
 idle. Multi-turn side conversations remain in BTW history; promoting only their
 latest pair would discard earlier context. History browsing does not promote
 answers or relax these branch guards.
-
-## 12) Built-in command note: `/plan-review`
-
-`/plan-review` reopens the current plan in the interactive TUI's Plan Review overlay (plan mode only). Annotation controls follow focus:
-
-- With section-list focus, `a` starts a note for the selected section; with body focus, `a` starts a note for the visible body line.
-- `e` opens a chooser for existing annotations at the focused section or line, then edits the selected note. `Enter` commits the draft; submitting an empty replacement deletes that saved annotation.
-- `Esc` leaves annotation editing without changing the saved note. The external-editor key changes only the draft; press `Enter` to commit its result.
-- `u` undoes the latest in-overlay change.

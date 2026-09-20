@@ -202,7 +202,7 @@ Other agents shell out to rg, grep, find, and bash. On many machines those binar
 
 Get a clear verdict on whether the change ships, with every issue ranked P0 through P3 and scored for confidence. /review spawns dedicated reviewer subagents that sweep branches, single commits, or uncommitted work in parallel. You tackle what blocks release first; nothing important hides in a wall of prose.
 
-Use `/annotate` to attach your own notes before asking the agent to act. Annotate local changes or GitHub PR diffs, the latest assistant reply (`/annotate last`), session content selected through the built-in `/copy` picker (`/annotate session`), or clipboard text (`/annotate clipboard`). Code review can continue with the agent or choose **Paste annotations into prompt**; that action and all text annotation flows only paste into the prompt, never submit automatically, leaving submission to you. [Annotation workflow and controls](docs/slash-command-internals.md#annotate).
+Use `/annotate` to attach your own notes before asking the agent to act. Annotate local changes or GitHub PR diffs, the latest assistant reply (`/annotate last`), session content selected through the built-in `/copy` picker (`/annotate session`), a file (`/annotate path-to-file`), or a literal prompt (`/annotate "user prompt"`). A remainder wrapped in matching single or double quotes is always a literal prompt; only the matching outer pair is stripped. Otherwise, unquoted `last`, `session`, and `code-review` select their modes, and any other nonblank remainder is one file path (spaces included), resolved relative to the current working directory with `~` expansion. Missing, unreadable, or non-regular paths notify instead of becoming prompts. File and literal-prompt sources are included verbatim without summarization. Code review can continue with the agent or choose **Paste annotations into prompt**; that action and all text annotation flows only paste into the prompt, never submit automatically, leaving submission to you. [Annotation workflow and controls](docs/slash-command-internals.md#annotate).
 
 ### 11 · Hashline: edit by content hash
 
@@ -328,6 +328,7 @@ Slash commands shift how a whole session runs:
 
 - `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
 - `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
+- `/plan-review` — reopen the current plan in the interactive Plan Review overlay (plan mode only). With section-list focus, `a` annotates the selected section; with body focus, `a` annotates the visible body line. `e` chooses an existing annotation at the focused section or line; Enter commits, and an empty replacement deletes that annotation. `Esc` cancels without changing the saved note; the external-editor key changes only the draft until Enter. `u` undoes the latest in-overlay change.
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 

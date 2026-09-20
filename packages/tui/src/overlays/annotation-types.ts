@@ -81,12 +81,13 @@ export interface CodeReviewOverlayResult {
 export type TextReviewSourceProvenance =
 	| { kind: "latest-assistant"; entryId: string }
 	| { kind: "session"; entryId: string }
-	| { kind: "clipboard" };
+	| { kind: "file"; path: string }
+	| { kind: "prompt" };
 
 export interface TextReviewSource {
 	/** Identifies the source within this annotation run. */
 	id: string;
-	kind: "message" | "code" | "quote" | "command" | "clipboard";
+	kind: "message" | "code" | "quote" | "command" | "file" | "prompt";
 	label: string;
 	text: string;
 	/** Identifies the active session entry that supplied this source, when applicable. */

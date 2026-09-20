@@ -199,7 +199,6 @@ import { AttachmentChipsBand } from "@oh-my-pi/pi-tui/prompt/attachment-chips";
 import type { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "@oh-my-pi/pi-tui/chrome/chat-block";
 import { CodexResetFireworksController } from "@oh-my-pi/pi-tui/overlays/codex-reset-fireworks";
-import type { CopySelection } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { DynamicBorder } from "@oh-my-pi/pi-tui/chrome/dynamic-border";
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
@@ -6551,10 +6550,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showCopySelector(): void {
 		this.#selectorController.showCopySelector();
-	}
-
-	selectMessage(): Promise<CopySelection | undefined> {
-		return this.#selectorController.selectMessage();
 	}
 
 	showTreeSelector(): void {

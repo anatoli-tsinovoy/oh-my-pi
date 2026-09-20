@@ -18,22 +18,15 @@ import {
 } from "../review";
 import { buildReviewPrompt, formatCodeReviewAnnotations } from "../review/prompt";
 import { getReviewTargetIssue, resolveLocalReviewTarget, type ReviewTargetUI } from "../review/target";
-import { acquireClipboardText } from "./clipboard";
+import { acquireFileTextReviewSource, createPromptTextReviewSource } from "./direct-source";
 import { showCodeReviewOverlay, showTextReviewOverlay } from "./fullscreen";
-import {
-	createClipboardTextReviewSource,
-	selectAnnotationSourceKind,
-	selectSessionTextReviewSource,
-	type AnnotationSourceKind,
-} from "./text-source";
+import { selectAnnotationSourceKind, selectSessionTextReviewSource, type AnnotationSourceKind } from "./text-source";
 import {
 	buildTextReviewPrompt,
 	normalizeTextReviewContextSummary,
 	shouldSummarizeTextReviewSource,
 } from "./text-review";
 import { generateTextReviewContextSummary } from "./text-summary";
-
-const ANNOTATE_USAGE = "Usage: /annotate [code-review [focus]|last|session|clipboard]";
 
 interface CodeReviewDependencies {
 	resolveLocalReviewTarget(
@@ -55,7 +48,8 @@ interface CodeReviewDependencies {
 interface TextAnnotationDependencies {
 	selectAnnotationSourceKind: typeof selectAnnotationSourceKind;
 	selectSessionTextReviewSource: typeof selectSessionTextReviewSource;
-	acquireClipboardText: typeof acquireClipboardText;
+	acquireFileTextReviewSource: typeof acquireFileTextReviewSource;
+	createPromptTextReviewSource: typeof createPromptTextReviewSource;
 	showTextReviewOverlay: typeof showTextReviewOverlay;
 	generateTextReviewContextSummary: typeof generateTextReviewContextSummary;
 }
@@ -69,7 +63,8 @@ const defaultCodeReviewDependencies: CodeReviewDependencies = {
 const defaultTextAnnotationDependencies: TextAnnotationDependencies = {
 	selectAnnotationSourceKind,
 	selectSessionTextReviewSource,
-	acquireClipboardText,
+	acquireFileTextReviewSource,
+	createPromptTextReviewSource,
 	showTextReviewOverlay,
 	generateTextReviewContextSummary,
 };
@@ -81,7 +76,7 @@ function parseCodeReviewFocus(args: string): string | undefined {
 
 function parseAnnotationSourceKind(args: string): AnnotationSourceKind | undefined {
 	const trimmed = args.trim();
-	if (trimmed === "last" || trimmed === "session" || trimmed === "clipboard") return trimmed;
+	if (trimmed === "last" || trimmed === "session") return trimmed;
 	return undefined;
 }
 
@@ -165,29 +160,39 @@ export async function runAnnotateCommand(
 	const textDependencies = { ...defaultTextAnnotationDependencies, ...dependencies };
 	const trimmed = args.trim();
 	let kind: AnnotationSourceKind | undefined;
-	if (trimmed.length === 0) kind = await textDependencies.selectAnnotationSourceKind(ctx.ui);
-	else {
-		kind = parseAnnotationSourceKind(trimmed);
-		if (!kind) {
-			ctx.ui.notify(ANNOTATE_USAGE, "error");
-			return undefined;
+	let source: TextReviewSource | undefined;
+	if (trimmed.length === 0) {
+		kind = await textDependencies.selectAnnotationSourceKind(ctx.ui);
+	} else {
+		const first = trimmed[0];
+		const isQuoted = (first === '"' || first === "'") && trimmed.length >= 2 && trimmed[trimmed.length - 1] === first;
+		if (isQuoted) {
+			source = textDependencies.createPromptTextReviewSource(ctx, trimmed.slice(1, -1));
+		} else {
+			kind = parseAnnotationSourceKind(trimmed);
+			if (!kind) source = await textDependencies.acquireFileTextReviewSource(ctx, trimmed);
 		}
 	}
-	if (!kind) return undefined;
-	let source: TextReviewSource | undefined;
-	switch (kind) {
-		case "code-review":
-			return runCodeReviewCommand(api, "", ctx, dependencies);
-		case "last":
-			source = await textDependencies.selectSessionTextReviewSource(ctx, { autoSelect: "latest-assistant" });
-			break;
-		case "session":
-			source = await textDependencies.selectSessionTextReviewSource(ctx);
-			break;
-		case "clipboard": {
-			const text = await textDependencies.acquireClipboardText(ctx);
-			if (text !== undefined) source = createClipboardTextReviewSource(ctx, text);
-			break;
+	if (kind) {
+		switch (kind) {
+			case "code-review":
+				return runCodeReviewCommand(api, "", ctx, dependencies);
+			case "last":
+				source = await textDependencies.selectSessionTextReviewSource(ctx, { autoSelect: "latest-assistant" });
+				break;
+			case "session":
+				source = await textDependencies.selectSessionTextReviewSource(ctx);
+				break;
+			case "file": {
+				const filePath = await ctx.ui.input("File path to annotate");
+				if (filePath !== undefined) source = await textDependencies.acquireFileTextReviewSource(ctx, filePath);
+				break;
+			}
+			case "prompt": {
+				const text = await ctx.ui.editor("Text prompt to annotate");
+				if (text !== undefined) source = textDependencies.createPromptTextReviewSource(ctx, text);
+				break;
+			}
 		}
 	}
 	if (!source) return undefined;
@@ -222,12 +227,12 @@ export async function runAnnotateCommand(
 
 export class AnnotateCommand implements CustomCommand {
 	name = "annotate";
-	description = "Annotate a diff or text from the latest reply, session, or clipboard";
+	description = "Annotate a diff or text from a file, prompt, latest reply, or session";
 
 	constructor(private readonly api: CustomCommandAPI) {}
 
-	execute(args: string[], ctx: CustomCommandContext): Promise<string | undefined> {
-		return runAnnotateCommand(this.api, args.join(" "), ctx);
+	execute(args: string[], ctx: CustomCommandContext, rawArgs?: string): Promise<string | undefined> {
+		return runAnnotateCommand(this.api, rawArgs ?? args.join(" "), ctx);
 	}
 }
 

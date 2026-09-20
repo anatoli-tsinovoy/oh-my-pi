@@ -20,7 +20,9 @@ export function markdownFenceFor(value: string): string {
 }
 
 function shouldIncludeSource(source: TextReviewSource): boolean {
-	if (source.kind === "code" || source.kind === "command" || source.kind === "clipboard") return true;
+	if (source.kind === "code" || source.kind === "command" || source.kind === "file" || source.kind === "prompt") {
+		return true;
+	}
 	if (source.provenance?.kind === "latest-assistant") return false;
 	return source.text.length <= SHORT_SOURCE_CHARACTER_LIMIT;
 }
@@ -53,6 +55,24 @@ interface RenderedTextAnnotation {
 	quoteFence?: string;
 }
 
+function exactPlaceholder(label: string, index: number, values: readonly string[]): string {
+	let suffix = 0;
+	let placeholder = `__OMP_ANNOTATE_${label}_${index}_${suffix}__`;
+	while (values.some(value => value.includes(placeholder))) {
+		placeholder = `__OMP_ANNOTATE_${label}_${index}_${++suffix}__`;
+	}
+	return placeholder;
+}
+
+/** Restore caller text after the prompt renderer has normalized its static template. */
+function restoreExactValues(rendered: string, replacements: readonly (readonly [string, string])[]): string {
+	let result = rendered;
+	for (const [placeholder, value] of replacements) {
+		if (result.includes(placeholder)) result = result.replace(placeholder, () => value);
+	}
+	return result;
+}
+
 /** Build one paste-only text feedback prompt; empty annotations produce no prompt. */
 export function buildTextReviewPrompt(
 	source: TextReviewSource,
@@ -60,33 +80,54 @@ export function buildTextReviewPrompt(
 	contextSummary?: string,
 ): string | undefined {
 	if (annotations.length === 0) return undefined;
+	const summary = shouldSummarizeTextReviewSource(source)
+		? normalizeTextReviewContextSummary(contextSummary ?? "")
+		: "";
+	const sourceLabel =
+		source.kind === "message" && source.provenance?.kind === "latest-assistant"
+			? "your last reply"
+			: sanitizePreviewLabel(source.label) || `${source.kind} source`;
+	const exactValues = [
+		source.text,
+		summary,
+		source.label,
+		sourceLabel,
+		...annotations.flatMap(annotation =>
+			annotation.scope === "line" ? [annotation.quote, annotation.note] : [annotation.note],
+		),
+	];
+	const replacements: Array<readonly [string, string]> = [];
+	let placeholderIndex = 0;
+	const exact = (label: string, value: string): string => {
+		const placeholder = exactPlaceholder(label, placeholderIndex++, exactValues);
+		replacements.push([placeholder, value]);
+		return placeholder;
+	};
+	const sourceText = exact("SOURCE", source.text);
+	const summaryText = summary ? exact("SUMMARY", summary) : "";
 	const renderedAnnotations: RenderedTextAnnotation[] = annotations.map((annotation, index) => {
+		const note = exact("NOTE", annotation.note);
 		if (annotation.scope === "text") {
-			return { number: index + 1, isLine: false, note: annotation.note };
+			return { number: index + 1, isLine: false, note };
 		}
 		const quoteIsInline = !/[\r\n`]/.test(annotation.quote);
 		return {
 			number: index + 1,
 			isLine: true,
-			quote: annotation.quote,
-			note: annotation.note,
+			quote: exact("QUOTE", annotation.quote),
+			note,
 			quoteIsInline,
 			quoteFence: quoteIsInline ? undefined : markdownFenceFor(annotation.quote),
 		};
 	});
-	const summary = shouldSummarizeTextReviewSource(source)
-		? normalizeTextReviewContextSummary(contextSummary ?? "")
-		: "";
-	return prompt.render(textReviewTemplate, {
-		sourceLabel:
-			source.kind === "message" && source.provenance?.kind === "latest-assistant"
-				? "your last reply"
-				: sanitizePreviewLabel(source.label) || `${source.kind} source`,
+	const rendered = prompt.render(textReviewTemplate, {
+		sourceLabel,
 		includeSource: shouldIncludeSource(source) || (shouldSummarizeTextReviewSource(source) && !summary),
 		sourceFence: markdownFenceFor(source.text),
-		sourceText: source.text,
-		contextSummary: summary,
+		sourceText,
+		contextSummary: summaryText,
 		summaryFence: summary ? markdownFenceFor(summary) : "```",
 		annotations: renderedAnnotations,
 	});
+	return restoreExactValues(rendered, replacements);
 }

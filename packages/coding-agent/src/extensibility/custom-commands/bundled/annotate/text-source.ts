@@ -1,10 +1,12 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { CopySelection } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { transcriptEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entry";
+import { CopySelectorComponent, type CopySelection } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
+import { isTranscriptEntry } from "../../../../session/session-context";
 import type { SessionEntry } from "../../../../session/session-entries";
 import type { TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
 
-export type AnnotationSourceKind = "code-review" | "last" | "session" | "clipboard";
+export type AnnotationSourceKind = "code-review" | "last" | "session" | "file" | "prompt";
 
 export const ANNOTATION_SOURCE_CHOICES = [
 	{
@@ -23,9 +25,14 @@ export const ANNOTATION_SOURCE_CHOICES = [
 		description: "Choose a message, code block, quote, or command from this session",
 	},
 	{
-		kind: "clipboard",
-		label: "Clipboard text",
-		description: "Read text from the system clipboard",
+		kind: "file",
+		label: "File",
+		description: "Read a regular text file from the current working directory",
+	},
+	{
+		kind: "prompt",
+		label: "Text prompt",
+		description: "Enter text directly for annotation",
 	},
 ] as const satisfies ReadonlyArray<{ kind: AnnotationSourceKind; label: string; description: string }>;
 
@@ -59,13 +66,13 @@ function latestAssistantEntry(branch: readonly SessionEntry[]): { id: string; te
 }
 
 function sourceKind(selection: CopySelection): TextReviewSource["kind"] {
-	switch (selection.kind) {
-		case "code":
-		case "output":
+	if (selection.block?.command?.kind === "bash" || selection.block?.command?.kind === "eval") return "command";
+	if (selection.block?.kind === "code" || selection.block?.kind === "quote") return selection.block.kind;
+	switch (transcriptEntryMessage(selection.entry)?.role) {
+		case "toolResult":
 			return "code";
-		case "quote":
-			return "quote";
-		case "command":
+		case "bashExecution":
+		case "pythonExecution":
 			return "command";
 		default:
 			return "message";
@@ -78,23 +85,22 @@ function sourceFromSelection(
 	latestAssistantId: string | undefined,
 ): TextReviewSource {
 	const kind = sourceKind(selection);
-	const provenance =
-		selection.entryId === undefined
-			? undefined
-			: selection.entryId === latestAssistantId && selection.kind === "message"
-				? { kind: "latest-assistant" as const, entryId: selection.entryId }
-				: { kind: "session" as const, entryId: selection.entryId };
+	const entryId = selection.entry.id;
+	const isLatestWholeAssistant =
+		selection.block === undefined &&
+		entryId === latestAssistantId &&
+		transcriptEntryMessage(selection.entry)?.role === "assistant";
 	return {
-		id: selection.entryId ? `${selection.kind}:${selection.entryId}` : `selection:${selection.kind}`,
+		id: `${kind}:${entryId}`,
 		kind,
 		label: selection.label,
 		text: selection.content,
-		provenance,
+		provenance: isLatestWholeAssistant ? { kind: "latest-assistant", entryId } : { kind: "session", entryId },
 		sessionId: ctx.sessionManager.getSessionId(),
 	};
 }
 
-/** Choose exact content via the host's native `/copy` selector. */
+/** Choose exact content through the native copy selector without copying it. */
 export async function selectSessionTextReviewSource(
 	ctx: CustomCommandContext,
 	options?: { autoSelect?: "latest-assistant" },
@@ -115,18 +121,22 @@ export async function selectSessionTextReviewSource(
 			sessionId: ctx.sessionManager.getSessionId(),
 		};
 	}
-	const selection = await ctx.ui.selectMessage();
-	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
-}
 
-/** Capture clipboard text as a distinct annotation source. */
-export function createClipboardTextReviewSource(ctx: CustomCommandContext, text: string): TextReviewSource {
-	return {
-		id: "clipboard",
-		kind: "clipboard",
-		label: "Clipboard text",
-		text,
-		provenance: { kind: "clipboard" },
-		sessionId: ctx.sessionManager.getSessionId(),
-	};
+	const entries = branch.filter(isTranscriptEntry);
+	if (entries.length === 0) {
+		ctx.ui.notify("No messages to annotate yet.", "warning");
+		return undefined;
+	}
+	const selection = await ctx.ui.custom<CopySelection | undefined>((tui, _theme, _keybindings, done) => {
+		return new CopySelectorComponent(entries, {
+			ui: tui,
+			cwd: ctx.sessionManager.getCwd?.() ?? ctx.cwd,
+			title: "Select message to annotate",
+			actionLabel: "select",
+			requestRender: () => tui.requestRender(),
+			onPick: (_content, _label, picked) => done(picked),
+			onCancel: () => done(undefined),
+		});
+	});
+	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
 }

@@ -9,7 +9,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CopySelectorComponent } from "@oh-my-pi/pi-tui/overlays/copy-selector";
+import { CopySelectorComponent, type CopySelection } from "@oh-my-pi/pi-tui/overlays/copy-selector";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
@@ -128,12 +128,16 @@ function makeSelector(
 	onCancel = () => {},
 	opens?: Array<{ href: string; label: string }>,
 	entries: SessionMessageEntry[] = makeEntries(),
+	selections?: CopySelection[],
 ): CopySelectorComponent {
 	return new CopySelectorComponent(entries, {
 		ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
 		cwd: "/tmp",
 		requestRender: () => {},
-		onPick: (content, label) => picks.push({ content, label }),
+		onPick: (content, label, selection) => {
+			picks.push({ content, label });
+			selections?.push(selection);
+		},
 		onOpen: opens ? (href, label) => opens.push({ href, label }) : undefined,
 		onCancel,
 	});
@@ -163,6 +167,77 @@ describe("CopySelectorComponent", () => {
 		// The newest item is the assistant turn (bash result folded into it);
 		// its item-level copy is the assistant prose, not tool noise.
 		expect(picks).toEqual([{ content: ASSISTANT_TEXT, label: "assistant message" }]);
+	});
+
+	it("keeps whole-turn picks exact and ties them to the native transcript entries", () => {
+		const entries = makeEntries();
+		const picks: Array<{ content: string; label: string }> = [];
+		const selections: CopySelection[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, selections);
+		selector.render(100);
+
+		selector.handleInput(ENTER);
+		selector.handleInput(UP);
+		selector.handleInput(ENTER);
+		selector.dispose();
+
+		expect(picks).toEqual([
+			{ content: ASSISTANT_TEXT, label: "assistant message" },
+			{ content: "fix the logging", label: "user message" },
+		]);
+		expect(selections).toHaveLength(2);
+		expect(selections[0]).toMatchObject({ content: ASSISTANT_TEXT, label: "assistant message" });
+		expect(selections[0]?.entry).toBe(entries[1]);
+		expect(selections[0]?.block).toBeUndefined();
+		expect(selections[1]).toMatchObject({ content: "fix the logging", label: "user message" });
+		expect(selections[1]?.entry).toBe(entries[0]);
+		expect(selections[1]?.block).toBeUndefined();
+	});
+
+	it("keeps block content and metadata exact while retaining each block's source entry", () => {
+		const quote = "quoted first line\nquoted second line";
+		const assistantText = `${ASSISTANT_TEXT}\n> ${quote.replace("\n", "\n> ")}`;
+		const entries = makeEntries(assistantText);
+		const assistantEntry = entries[1]!;
+		const toolResultEntry = entries[2]!;
+		const picks: Array<{ content: string; label: string }> = [];
+		const selections: CopySelection[] = [];
+		const selector = makeSelector(picks, () => {}, undefined, entries, selections);
+		selector.render(100);
+		selector.handleInput(RIGHT);
+
+		for (let index = 0; index < 5; index++) {
+			selector.handleInput(ENTER);
+			if (index < 4) selector.handleInput("\x1b[B");
+		}
+		selector.dispose();
+
+		expect(picks).toEqual([
+			{ content: CODE, label: "ts code" },
+			{ content: quote, label: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR` },
+			{ content: "bun test", label: "bash command" },
+			{ content: "12 pass", label: "bash result" },
+		]);
+		expect(selections.map(selection => selection.entry)).toEqual([
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			assistantEntry,
+			toolResultEntry,
+		]);
+		expect(selections.map(selection => selection.block)).toEqual([
+			{ content: CODE, label: "ts code", language: "ts", kind: "code" },
+			{ content: quote, label: "quote", kind: "quote" },
+			{ content: LINK, label: `link${theme.sep.dot}the PR`, href: LINK },
+			{
+				content: "bun test",
+				label: "bash command",
+				language: "bash",
+				command: { kind: "bash", code: "bun test", language: "bash" },
+			},
+			{ content: "12 pass", label: "bash result" },
+		]);
 	});
 
 	it("folds lazily created grouped reads into the assistant turn so Enter copies the yield", () => {
