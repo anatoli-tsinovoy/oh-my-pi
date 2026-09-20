@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added the native annotation overlay for diffs and text, with inline/external note editing, empty-note deletion, cancellation, and `/copy`-backed session selection without auto-submission
+- Added the native annotation overlay for diffs and text, with inline/external note editing, empty-note deletion, cancellation, and `/copy`-backed session selection without auto-submission ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy))
 
 ### Changed
 
-- Plan Review now lets users edit existing annotations from the overlay.
+- Plan Review now lets users edit existing annotations from the overlay ([#12601](https://github.com/can1357/oh-my-pi/pull/12601) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.2.5] - 2026-09-17
 
