@@ -6,6 +6,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
+import * as models from "@oh-my-pi/pi-coding-agent/stt/models";
 import { STTController, type STTControllerDependencies } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { getTinyModelsCacheDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -44,6 +45,7 @@ describe("isSttModelCached completeness", () => {
 
 	afterEach(async () => {
 		restoreSettingsTestState(state);
+		vi.restoreAllMocks();
 		await removeWithRetries(tmp);
 	});
 
@@ -64,11 +66,15 @@ describe("isSttModelCached completeness", () => {
 	});
 
 	it("requires every sherpa model file to be present", async () => {
+		const parakeetSpec = models.resolveSttModelSpec("parakeet-tdt-0.6b-v3", "linux");
+		vi.spyOn(models, "resolveSttModelSpec").mockReturnValue(parakeetSpec);
+
 		const repoDir = path.join(cacheDir, PARAKEET_REPO);
 		await touch(path.join(repoDir, "encoder.int8.onnx"));
 		await touch(path.join(repoDir, "decoder.int8.onnx"));
 		await touch(path.join(repoDir, "joiner.int8.onnx"));
-		// tokens.txt still missing.
+		// tokens.txt still missing. Resolve the desktop sherpa spec explicitly;
+		// Android maps this model id to Whisper because the native addon is unavailable.
 		expect(await downloader.isSttModelCached("parakeet-tdt-0.6b-v3")).toBe(false);
 
 		await touch(path.join(repoDir, "tokens.txt"));
@@ -142,7 +148,7 @@ describe("STTController preflight", () => {
 
 	it("uncached model: downloads in the foreground with progress before recording", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(false);
-		const download = vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
 			onProgress?.({
 				status: "progress",
 				percent: 42,
@@ -160,8 +166,6 @@ describe("STTController preflight", () => {
 		await controller.toggle(editor, options);
 
 		expect(controller.state).toBe("recording");
-		// Foreground path passes a progress callback (2 args) and surfaces it.
-		expect(download.mock.calls[0]).toHaveLength(2);
 		expect(options.showStatus).toHaveBeenCalledWith("Downloading speech model Whisper base (42%)");
 		// Status was written, so the line is cleared at the end.
 		expect(options.showStatus).toHaveBeenLastCalledWith("");
@@ -169,7 +173,17 @@ describe("STTController preflight", () => {
 
 	it("re-runs preflight when the model changes mid-session", async () => {
 		const isCached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
-		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		vi.spyOn(downloader, "downloadSttModel").mockImplementation((_key, onProgress) => {
+			onProgress?.({
+				status: "progress",
+				percent: 42,
+				loaded: 1,
+				total: 2,
+				repo: WHISPER_BASE_REPO,
+				label: "Whisper base",
+			});
+			return Promise.resolve();
+		});
 
 		const editor = makeEditor();
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry });
@@ -182,7 +196,8 @@ describe("STTController preflight", () => {
 		settings.setModelRole("dictation", "local/whisper-large-v3-turbo");
 		await controller.toggle(editor, makeOptions()); // recording -> idle
 		expect(controller.state).toBe("idle");
-		await controller.toggle(editor, makeOptions()); // idle -> recording
+		const secondOptions = makeOptions();
+		await controller.toggle(editor, secondOptions); // idle -> recording
 
 		expect(controller.state).toBe("recording");
 		// Preflight ran exactly once for the new model rather than short-circuiting.
@@ -195,7 +210,7 @@ describe("STTController preflight", () => {
 		expect(isCached).toHaveBeenCalledTimes(2);
 	});
 
-	it("falls back to the full parakeet id when the dictation chain is empty", async () => {
+	it("falls back to the platform default when the dictation chain is empty", async () => {
 		settings.setModelRole("dictation", "missing/model");
 		const emptyRegistry: STTControllerDependencies["registry"] = {
 			getError: () => undefined,
@@ -203,19 +218,20 @@ describe("STTController preflight", () => {
 			getAll: () => [],
 			resolver: () => () => "test-key",
 		};
+		const defaultModelKey = process.platform === "android" ? "whisper-base" : "parakeet-tdt-0.6b-v3";
 		const isCached = vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
 		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
 		controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry: emptyRegistry });
 
 		await controller.toggle(makeEditor(), makeOptions());
 
-		expect(isCached).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3");
-		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith("parakeet-tdt-0.6b-v3", expect.anything());
+		expect(isCached).toHaveBeenCalledWith(defaultModelKey);
+		expect(asrClient.sttClient.startStream).toHaveBeenCalledWith(defaultModelKey, expect.anything());
 	});
-
 	it("stops recording and surfaces asynchronous microphone failures", async () => {
 		vi.spyOn(downloader, "isSttModelCached").mockResolvedValue(true);
-		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(new Promise<void>(() => {}));
+		const warmup = Promise.withResolvers<void>();
+		vi.spyOn(downloader, "downloadSttModel").mockReturnValue(warmup.promise);
 		let onAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
 		const stopCapture = vi.fn();
 		const editor = makeEditor();

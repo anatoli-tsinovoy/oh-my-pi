@@ -1096,6 +1096,13 @@ describe("ACP agent", () => {
 			speechToText: { models: Array<{ value: string }> };
 			textToSpeech: { models: Array<{ value: string; voices: unknown[] }>; voices: unknown[] };
 		};
+		const expectedSttDefault = process.platform === "android" ? "local/whisper-base" : "local/parakeet-tdt-0.6b-v3";
+		const expectedSttModels = [
+			"local/whisper-base",
+			"local/whisper-small",
+			"local/whisper-large-v3-turbo",
+			...(process.platform === "android" ? [] : ["local/parakeet-tdt-0.6b-v3"]),
+		];
 
 		expect(result).toMatchObject({
 			settings: {
@@ -1105,13 +1112,13 @@ describe("ACP agent", () => {
 				speechVoice: "speech.voice",
 			},
 			defaults: {
-				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				speechToTextModel: expectedSttDefault,
 				textToSpeechModel: "local/kokoro",
 				voice: "af_heart",
 			},
 			speechToText: {
 				setting: "modelRoles.dictation",
-				defaultValue: "local/parakeet-tdt-0.6b-v3",
+				defaultValue: expectedSttDefault,
 			},
 			textToSpeech: {
 				modelSetting: "modelRoles.speech",
@@ -1121,12 +1128,7 @@ describe("ACP agent", () => {
 				defaultVoice: "af_heart",
 			},
 		});
-		expect(result.speechToText.models.map(model => model.value)).toEqual([
-			"local/whisper-base",
-			"local/whisper-small",
-			"local/whisper-large-v3-turbo",
-			"local/parakeet-tdt-0.6b-v3",
-		]);
+		expect(result.speechToText.models.map(model => model.value)).toEqual(expectedSttModels);
 		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 
