@@ -23,7 +23,8 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/fresh`                                | Slash command (TUI/headless) | Yes (provider-facing in-memory id/state only) | No; keeps current session file/header                                                      | None                                                                                |
 | `/clear`                                | Interactive slash command    | Yes (clears live/model conversation context)  | No; retains session identity, metadata, transcript file, and full on-disk history          | Appends a durable `reset_boundary`                                                  |
 | `/delete`                               | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a new one | None                                                                                |
-| `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
+| `/fork`                                 | Interactive slash command    | Yes (active session identity changes)          | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
+| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command  | No (parent session retained)                   | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group   | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir           | None                                                                                |
 | `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session              | None                                                                                |
 | `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                |
@@ -222,16 +223,45 @@ for keyboard controls, follow-ups, persistence, and migration safety.
 
 ## Fork
 
-Interactive `/fork` creates a new session from the current one and switches the active session identity.
+Bare `/fork` creates a new session from the current one and switches the active
+session identity. `/fork pane` opens a separate OMP process in a new pane;
+`/fork window` and `/fork tab` open it in a new multiplexer group (a tmux
+window, Zellij/Herdr tab, or CMUX workspace). The child starts from the current
+persisted transcript, while the parent session stays active and continues
+running.
+
+Placement is autodetected in tmux, Zellij, Herdr, and CMUX. Plain terminals,
+`screen`, and `wmux` cannot host this fork placement and receive an explicit
+error; use bare `/fork` there instead.
 
 ### Preconditions and immediate guards
 
-- If agent is streaming, `/fork` is rejected with warning.
-- UI status/loading indicators are cleared before operation.
+- Bare `/fork` is rejected with a warning while the agent is streaming.
+- A placement fork during streaming asks before launching. The child can omit
+  the partial response, and confirming does not stop the parent response.
+- Placement forks require an already persisted session transcript; pending
+  writes are flushed before the child launches. The parent never switches
+  sessions.
+- A CLI `--api-key` override cannot be safely passed through a multiplexer command;
+  placement forks refuse it rather than exposing the key.
+- UI status/loading indicators are cleared only for the original bare `/fork`
+  flow.
+
+### Terminal placement flow
+
+For a placement command, the controller rebuilds the child CLI command from the
+current CLI entry point and restart-safe launch flags. It replaces stale startup
+model, thinking, profile, and working-directory flags with the active session
+values. The child also receives the effective agent/config directories and the
+resolved config overlays, which retain their original paths after `/move`.
+It starts with `--fork` and the absolute path of the current transcript. The
+generic terminal launcher handles provider-specific execution and reports
+capability or launch failures in the TUI. `window` and `tab` both map to the
+multiplexer group placement.
 
 ### Session-level flow
 
-`AgentSession.fork()`:
+The original bare `/fork` uses `AgentSession.fork()`:
 
 1. Emits `session_before_switch` with `reason: "fork"` (cancellable).
 2. Flushes pending writes.
