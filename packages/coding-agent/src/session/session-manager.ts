@@ -3502,7 +3502,7 @@ export class SessionManager {
 
 	/**
 	 * Pair any tool calls the forked active branch's final assistant turn left
-	 * unresolved with synthetic aborted results, in place.
+	 * unresolved with synthetic results, in place.
 	 *
 	 * A `/tan` fork of a *live* parent is taken while the parent may be mid-turn
 	 * — its last assistant turn emitted a tool call whose `toolResult` is
@@ -3511,9 +3511,10 @@ export class SessionManager {
 	 * which a running parent never wrote. Left unpaired, the clone renders the
 	 * parent's in-flight tool call as its own perpetually pending work (the
 	 * transcript keeps dangling calls while the clone streams) and replays an
-	 * orphan `tool_use` into the model. Synthesizing the same `assistant_stop_
-	 * aborted` results the agent loop records for an interrupted turn makes the
-	 * forked transcript terminal and well-formed before the clone is prompted.
+	 * orphan `tool_use` into the model. Pairing with `assistant_stop_aborted`
+	 * results for interrupted turns, or `assistant_stop_length` for truncated
+	 * output arguments, makes the forked transcript terminal and well-formed
+	 * before the clone is prompted.
 	 *
 	 * Assistant turns and results on sibling branches are excluded: the clone
 	 * consumes only the root-to-active-leaf path.
@@ -3543,6 +3544,7 @@ export class SessionManager {
 		const usedIds = new Set(history.map(entry => entry.id));
 		// Chain the synthetic results after the active leaf so they extend the
 		// selected branch without mutating or depending on sibling paths.
+		const reason = assistant.stopReason === "length" ? "length" : "aborted";
 		let parentId = leaf.id;
 		for (const call of dangling) {
 			const id = generateId(usedIds);
@@ -3552,7 +3554,7 @@ export class SessionManager {
 				id,
 				parentId,
 				timestamp: nowIso(),
-				message: createSyntheticToolResultMessage(call, "aborted"),
+				message: createSyntheticToolResultMessage(call, reason),
 			};
 			history.push(entry);
 			parentId = id;
