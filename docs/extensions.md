@@ -814,12 +814,12 @@ editor.
 #### Launching terminal commands
 
 `ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a
-multiplexer pane or group (a tmux window, Zellij/Herdr tab, or CMUX workspace—not an
-OS window), runs the command, and returns its native ID when the CLI reports one;
-otherwise `result.id` is unavailable. Zellij pane IDs are returned as `terminal_<id>`
-while tab IDs are numeric. CMUX workspace creation uses the JSON-capable
-`workspace create` CLI command for ID reporting. RPC, ACP, print, and headless
-contexts do not provide this optional method.
+multiplexer pane or provider-native group (a tmux window, Zellij/Herdr tab, or CMUX
+workspace—not an OS window) and returns the reported native ID. RPC, ACP, print, and
+headless contexts do not provide this optional method. The public request type is
+derived from the canonical multiplexer taxonomy and only supports tmux, Zellij,
+Herdr, and CMUX; screen and wmux are recognized by the taxonomy but explicitly
+unsupported by this launcher.
 
 The TUI host injects this capability; extensions do not need to import dispatcher
 code to use it.
@@ -836,39 +836,71 @@ const result = await ctx.ui.openTerminal?.({
 });
 ```
 
-Targets are provider-native IDs/refs: tmux pane placement uses a pane ID (defaulting
-to `TMUX_PANE`); new-window targets are tmux session names/IDs and may be omitted to
-use the current session. An explicit tmux pane or session target can address the CLI
-when `TMUX` is unset. Zellij pane placement may target an existing tab ID, while
-new-tab creation has no target flag; Herdr pane/tab placement uses pane/workspace
-IDs; CMUX pane/workspace placement uses surface/window IDs. An explicit CMUX surface
-target takes precedence over `CMUX_WORKSPACE_ID` and is not combined with that
-ambient workspace. Unsupported target combinations fail rather than being ignored.
-Capability checks use provider identity markers or a native target, not `TERM` alone.
-CMUX socket/transport markers without a native target are insufficient.
+Targets are provider-native IDs/refs, with different meanings by placement:
+
+- tmux pane placement targets a pane ID and defaults to `TMUX_PANE`; new-window
+  targets are session names/IDs and may be omitted inside the current TMUX session.
+  An explicit pane or session target can address the CLI when `TMUX` is unset.
+- Zellij pane placement may target an existing tab ID. New-tab creation has no
+  target option. Both require an active `ZELLIJ` session.
+- Herdr pane placement targets a pane ID and defaults to `HERDR_PANE_ID`; tab
+  placement targets a workspace ID and defaults to `HERDR_WORKSPACE_ID`. The
+  destination must be in an active Herdr pane or workspace.
+- CMUX pane placement targets a surface ID; workspace placement targets a window
+  ID. Both targets may be omitted when the corresponding CMUX context is active.
+  An explicit surface target is authoritative and is not combined with the ambient
+  workspace. Socket-path and transport markers alone do not establish an active
+  local CMUX surface.
+
+Unsupported target combinations fail rather than being ignored. Capability checks
+use provider identity markers or a native target, not `TERM` alone. The `focus`
+option is available on every supported provider: tmux uses `-d` when false,
+Zellij uses `--no-focus`, Herdr uses `--focus`/`--no-focus`, and CMUX passes
+`--focus true|false` to both split and workspace creation.
+
 Execution is provider-specific. tmux accepts multiple command arguments for direct
 execution, but treats a single command argument as shell text. For one-argument
-direct launches, the dispatcher prefixes `/usr/bin/env --`; this gives tmux a
-multi-argument direct command while preserving executables containing spaces,
-leading dashes, or shell metacharacters as data. A one-argument executable name
-containing `=` is rejected because `env` reads it as an environment assignment.
-`execution: "shell"` instead POSIX-quotes argv into one shell command. Zellij accepts
-direct argv execution. Herdr `pane run` and CMUX `--command` enter a safely quoted
-command into a normal interactive shell, which remains open after the command exits.
-CMUX split has no cwd flag, so it changes directory inside that shell before entering
-the command; CMUX does not accept an explicit `focus` preference. Herdr and Zellij
-window placements create tabs, and CMUX creates a workspace. Provider-specific fields
-include pane direction, Zellij floating panes/names, Herdr tab labels, and CMUX
-workspace names.
+direct launches the dispatcher prefixes `/usr/bin/env --`, keeping executables with
+spaces, leading dashes, or shell metacharacters as data; a one-argument executable
+name containing `=` is rejected because `env` reads it as an assignment.
+`execution: "shell"` POSIX-quotes tmux argv into one shell command. Zellij accepts
+direct argv execution.
+
+Herdr `pane run` and CMUX `--command` submit text to the destination's interactive
+shell rather than launching argv directly. Their requests therefore require
+`shellGrammar: "posix"`. Set it only when you have confirmed that the newly-created
+destination shell uses POSIX-compatible command grammar. This required assertion is
+validated before invoking a CLI; it is not inferred from the local OS or `$SHELL`,
+and neither backend's configured shell is guessed. Without that confirmation, do
+not request a Herdr or CMUX launch. Once asserted, argv words and CMUX's working
+directory command are quoted with the shared POSIX shell-quoting helpers; those
+quotes are not claimed to work in Nushell, PowerShell, `cmd.exe`, or other shell
+grammars. CMUX split has no cwd flag, so it changes directory inside that shell
+before entering the command.
+
+Because these commands are submitted as terminal input, shell-input requests
+reject C0/C1 control bytes and DEL in command arguments before creating a pane or
+workspace; CMUX split also rejects them in `cwd`, which is embedded in its shell
+command. The restriction is not applied to direct tmux or Zellij argv, where
+argument newlines remain data rather than terminal input.
+
+Herdr and Zellij `window` placements create tabs; CMUX creates a workspace.
+Provider-specific fields include pane direction, Zellij floating panes/names,
+Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify a
+split direction, and Zellij new-tab creation cannot target a tab. tmux returns
+required pane (`%...`) or window (`@...`) IDs; Zellij returns its required pane ID
+as `terminal_<id>` and tab IDs as numeric strings; Herdr requires pane/tab IDs in
+its JSON response. CMUX reports workspace/pane IDs when present, but its JSON
+response may omit an ID, in which case `result.id` is unavailable.
 
 Failures reject with a sanitized error naming the provider, operation, and exit
 status when available; command argv and CLI output are not included. A malformed
-CMUX workspace-creation JSON response rejects without retrying the creation.
+CMUX JSON response rejects without retrying the creation.
 
 There is no shared environment override: each multiplexer applies its own
 environment propagation rules; the dispatcher does not synthesize uniform variable
-inheritance. Request argv stays separate for direct backends; shell-input backends
-quote each argument before submitting it to their shell.
+inheritance. Request argv stays separate for direct backends; only shell-input
+backends turn argv into shell text, under the required POSIX grammar assertion.
 
 ### RPC mode (`rpc-mode.ts`)
 

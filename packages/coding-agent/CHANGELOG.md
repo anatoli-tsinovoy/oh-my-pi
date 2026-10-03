@@ -9,6 +9,7 @@
 ### Added
 
 - `/dump all` writes a zip to the temp directory with the main transcript, the LLM request JSON, and one file per subagent transcript (nested subagents included, killed ones marked aborted); the TUI copies the archive path to the clipboard. Plain `/dump` is unchanged ([#13908](https://github.com/can1357/oh-my-pi/pull/13908) by [@H4vC](https://github.com/H4vC))
+- Added interactive extension terminal launches for tmux, Zellij, Herdr, and CMUX, with explicit POSIX-shell requirements for Herdr/CMUX shell-input backends that reject terminal-control bytes before submission ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Changed
 
