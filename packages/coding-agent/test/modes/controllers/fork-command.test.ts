@@ -212,12 +212,9 @@ describe("/fork terminal placement", () => {
 		expect(request?.command).toEqual(expectedRequest?.command);
 		expect(request?.cwd).toBe(expectedRequest?.cwd);
 		expect(ctx.showHookConfirm).toHaveBeenCalledTimes(1);
-		expect(ctx.showStatus).toHaveBeenCalledWith(
-			expect.stringMatching(new RegExp(`Orca \\(${placementLabel}\\)`)),
-		);
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`Orca \\(${placementLabel}\\)`)));
 		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("this session continues here"));
 	});
-
 
 	it("flushes and launches an absolute persisted source with the active profile", async () => {
 		const { controller, launchTerminal, flush, ctx, session } = createContext();
