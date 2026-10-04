@@ -102,6 +102,53 @@ type CmuxPaneShellGrammarIsRequired = AssertFalse<
 	>
 >;
 
+type OrcaWindowWorktreeOptionsAreSupported = AssertTrue<
+	IsAssignable<
+		{
+			multiplexer: "orca";
+			placement: "window";
+			command: readonly string[];
+			cwd: string;
+			target: "path:/workspace";
+			name: string;
+			focus: true;
+			shellGrammar: "posix";
+		},
+		TerminalLaunchRequest
+	>
+>;
+type OrcaPaneFocusIsExcluded = AssertFalse<
+	IsAssignable<
+		{
+			multiplexer: "orca";
+			placement: "pane";
+			command: readonly string[];
+			cwd: string;
+			shellGrammar: "posix";
+			focus: true;
+		},
+		TerminalLaunchRequest
+	>
+>;
+type OrcaPaneShellGrammarIsRequired = AssertFalse<
+	IsAssignable<
+		{ multiplexer: "orca"; placement: "pane"; command: readonly string[]; cwd: string },
+		TerminalLaunchRequest
+	>
+>;
+type OrcaPaneDirectionIsRestricted = AssertFalse<
+	IsAssignable<
+		{
+			multiplexer: "orca";
+			placement: "pane";
+			command: readonly string[];
+			cwd: string;
+			shellGrammar: "posix";
+			direction: "left";
+		},
+		TerminalLaunchRequest
+	>
+>;
 const terminalLaunchTypeChecks: [
 	ZellijWindowTargetIsExcluded,
 	ZellijFloatingDirectionIsExcluded,
@@ -112,7 +159,11 @@ const terminalLaunchTypeChecks: [
 	HerdrWindowShellGrammarIsRequired,
 	CmuxWindowShellGrammarIsRequired,
 	CmuxPaneShellGrammarIsRequired,
-] = [false, false, true, false, false, false, false, false, false];
+	OrcaWindowWorktreeOptionsAreSupported,
+	OrcaPaneFocusIsExcluded,
+	OrcaPaneShellGrammarIsRequired,
+	OrcaPaneDirectionIsRestricted,
+] = [false, false, true, false, false, false, false, false, false, true, false, false, false];
 void terminalLaunchTypeChecks;
 
 describe("generic terminal launch construction", () => {
@@ -944,5 +995,365 @@ describe("terminal launch dispatcher", () => {
 			["--focus", "false"],
 			["--focus", "true"],
 		]);
+	});
+
+	it("resolves an Orca pane by worktree-scoped pane identity and preserves shell argument boundaries", async () => {
+		const argument = "quoted ' text; printf injected; $(printf nested) *";
+		const { calls, launch } = createHarness(
+			{ ORCA_PANE_KEY: "tab-11:12345678-1234-1234-1234-123456789abc", ORCA_WORKTREE_ID: "worktree-1" },
+			[
+				{
+					stdout: JSON.stringify({
+						ok: true,
+						id: "rpc-list-id",
+						result: {
+							totalCount: 2,
+							truncated: false,
+							terminals: [
+								{
+									handle: "term-other",
+									worktreeId: "worktree-2",
+									tabId: "tab-11",
+									leafId: "12345678-1234-1234-1234-123456789abc",
+								},
+								{
+									handle: "term-current",
+									worktreeId: "worktree-1",
+									tabId: "tab-11",
+									leafId: "12345678-1234-1234-1234-123456789abc",
+								},
+							],
+						},
+					}),
+					exitCode: 0,
+				},
+				{
+					stdout: '{"ok":true,"id":"rpc-split-id","result":{"split":{"handle":"term-split"}}}',
+					exitCode: 0,
+				},
+			],
+		);
+
+		const result = await launch({
+			multiplexer: "orca",
+			placement: "pane",
+			command: ["printf", "%s", argument],
+			cwd: "/tmp",
+			direction: "down",
+			shellGrammar: "posix",
+		});
+
+		const cli = process.platform === "linux" ? "orca-ide" : "orca";
+		const shellCommand = `cd '/tmp' && 'printf' '%s' 'quoted '\\'' text; printf injected; $(printf nested) *'`;
+		expect(calls).toEqual([
+			{
+				argv: [cli, "terminal", "list", "--worktree", "id:worktree-1", "--json"],
+				cwd: "/tmp",
+			},
+			{
+				argv: [
+					cli,
+					"terminal",
+					"split",
+					"--terminal",
+					"term-current",
+					"--direction",
+					"vertical",
+					"--command",
+					shellCommand,
+					"--json",
+				],
+				cwd: "/tmp",
+			},
+		]);
+		expect(result).toEqual({ multiplexer: "orca", placement: "pane", id: "term-split" });
+
+		if (process.platform !== "win32") {
+			const executed = Bun.spawnSync(["/bin/sh", "-c", shellCommand], { stdout: "pipe", stderr: "pipe" });
+			expect(executed.exitCode).toBe(0);
+			expect(executed.stdout.toString()).toBe(argument);
+		}
+	});
+
+	it("resolves the calling Orca pane beyond the default terminal-list limit", async () => {
+		const source = {
+			handle: "term-current",
+			worktreeId: "worktree-1",
+			tabId: "tab-11",
+			leafId: "12345678-1234-1234-1234-123456789abc",
+		};
+		const other = { ...source, handle: "term-other", tabId: "tab-10" };
+		const { calls, launch } = createHarness(
+			{ ORCA_PANE_KEY: `${source.tabId}:${source.leafId}`, ORCA_WORKTREE_ID: source.worktreeId },
+			[
+				{
+					stdout: JSON.stringify({ ok: true, result: { terminals: [other], totalCount: 2, truncated: true } }),
+					exitCode: 0,
+				},
+				{
+					stdout: JSON.stringify({
+						ok: true,
+						result: { terminals: [other, source], totalCount: 2, truncated: false },
+					}),
+					exitCode: 0,
+				},
+				{ stdout: '{"ok":true,"result":{"split":{"handle":"term-new"}}}', exitCode: 0 },
+			],
+		);
+		const result = await launch({
+			multiplexer: "orca",
+			placement: "pane",
+			command: ["omp", "--fork", "/tmp/source.jsonl"],
+			cwd: "/tmp",
+			shellGrammar: "posix",
+		});
+		const cli = process.platform === "linux" ? "orca-ide" : "orca";
+		expect(calls[1]?.argv).toEqual([
+			cli,
+			"terminal",
+			"list",
+			"--worktree",
+			"id:worktree-1",
+			"--limit",
+			"2",
+			"--json",
+		]);
+		expect(calls[2]?.argv.slice(0, 5)).toEqual([cli, "terminal", "split", "--terminal", "term-current"]);
+		expect(result.id).toBe("term-new");
+	});
+
+	it("honors explicit Orca pane handles and maps both supported directions", async () => {
+		const { calls, launch } = createHarness({}, [
+			{ stdout: '{"ok":true,"result":{"split":{"handle":"term-right"}}}', exitCode: 0 },
+			{ stdout: '{"ok":true,"result":{"split":{"handle":"term-down"}}}', exitCode: 0 },
+		]);
+		for (const [direction, expected] of [
+			["right", "horizontal"],
+			["down", "vertical"],
+		] as const) {
+			await launch({
+				multiplexer: "orca",
+				placement: "pane",
+				command: ["echo", "safe"],
+				cwd: "/repo",
+				target: "term-explicit",
+				direction,
+				shellGrammar: "posix",
+			});
+			expect(calls.at(-1)?.argv).toEqual([
+				process.platform === "linux" ? "orca-ide" : "orca",
+				"terminal",
+				"split",
+				"--terminal",
+				"term-explicit",
+				"--direction",
+				expected,
+				"--command",
+				"cd '/repo' && 'echo' 'safe'",
+				"--json",
+			]);
+		}
+		expect(calls).toHaveLength(2);
+	});
+
+	it("creates Orca terminals in the requested worktree with supported title and focus options", async () => {
+		const { calls, launch } = createHarness({ ORCA_WORKTREE_ID: "worktree-from-runtime" }, [
+			{
+				stdout: '{"ok":true,"id":"rpc-create-id","result":{"terminal":{"handle":"term-created"}}}',
+				exitCode: 0,
+			},
+			{
+				stdout: '{"ok":true,"id":"rpc-create-id-2","result":{"terminal":{"handle":"term-created-2"}}}',
+				exitCode: 0,
+			},
+		]);
+		const cli = process.platform === "linux" ? "orca-ide" : "orca";
+
+		const explicit = await launch({
+			multiplexer: "orca",
+			placement: "window",
+			command: ["printf", "%s", "literal; $(printf no)"],
+			cwd: "/repo's path",
+			target: "path:/other/worktree",
+			name: "agent's tests",
+			focus: true,
+			shellGrammar: "posix",
+		});
+		const implicit = await launch({
+			multiplexer: "orca",
+			placement: "window",
+			command: ["omp"],
+			cwd: "/repo",
+			focus: false,
+			shellGrammar: "posix",
+		});
+
+		expect(calls.map(call => call.argv)).toEqual([
+			[
+				cli,
+				"terminal",
+				"create",
+				"--worktree",
+				"path:/other/worktree",
+				"--title",
+				"agent's tests",
+				"--focus",
+				"--command",
+				"cd '/repo'\\''s path' && 'printf' '%s' 'literal; $(printf no)'",
+				"--json",
+			],
+			[
+				cli,
+				"terminal",
+				"create",
+				"--worktree",
+				"id:worktree-from-runtime",
+				"--command",
+				"cd '/repo' && 'omp'",
+				"--json",
+			],
+		]);
+		expect(explicit).toEqual({ multiplexer: "orca", placement: "window", id: "term-created" });
+		expect(implicit).toEqual({ multiplexer: "orca", placement: "window", id: "term-created-2" });
+	});
+
+	it("fails closed when an Orca pane identity is unavailable or cannot be uniquely matched", async () => {
+		const noPaneKey = createHarness({ ORCA_WORKTREE_ID: "worktree-1" }, []);
+		await expect(
+			noPaneKey.launch({
+				multiplexer: "orca",
+				placement: "pane",
+				command: ["omp"],
+				cwd: "/repo",
+				shellGrammar: "posix",
+			}),
+		).rejects.toThrow("ORCA_PANE_KEY");
+		expect(noPaneKey.calls).toEqual([]);
+
+		const noMatch = createHarness(
+			{ ORCA_PANE_KEY: "tab-11:12345678-1234-1234-1234-123456789abc", ORCA_WORKTREE_ID: "worktree-1" },
+			[
+				{
+					stdout:
+						'{"ok":true,"result":{"terminals":[{"handle":"term-wrong","worktreeId":"worktree-2","tabId":"tab-11","leafId":"12345678-1234-1234-1234-123456789abc"}],"totalCount":1,"truncated":false}}',
+					exitCode: 0,
+				},
+			],
+		);
+		await expect(
+			noMatch.launch({
+				multiplexer: "orca",
+				placement: "pane",
+				command: ["omp"],
+				cwd: "/repo",
+				shellGrammar: "posix",
+			}),
+		).rejects.toThrow("could not resolve ORCA_PANE_KEY");
+		expect(noMatch.calls).toHaveLength(1);
+
+		const ambiguous = createHarness(
+			{ ORCA_PANE_KEY: "tab-11:12345678-1234-1234-1234-123456789abc", ORCA_WORKTREE_ID: "worktree-1" },
+			[
+				{
+					stdout:
+						'{"ok":true,"result":{"terminals":[{"handle":"term-1","worktreeId":"worktree-1","tabId":"tab-11","leafId":"12345678-1234-1234-1234-123456789abc"},{"handle":"term-2","worktreeId":"worktree-1","tabId":"tab-11","leafId":"12345678-1234-1234-1234-123456789abc"}],"totalCount":2,"truncated":false}}',
+					exitCode: 0,
+				},
+			],
+		);
+		await expect(
+			ambiguous.launch({
+				multiplexer: "orca",
+				placement: "pane",
+				command: ["omp"],
+				cwd: "/repo",
+				shellGrammar: "posix",
+			}),
+		).rejects.toThrow("multiple terminal handles");
+		expect(ambiguous.calls).toHaveLength(1);
+	});
+
+	it("requires successful Orca JSON envelopes and nested handles without leaking command data", async () => {
+		const nonzero = createHarness({}, [{ stdout: "PRIVATE_ORCA_OUTPUT", exitCode: 23 }]);
+		let nonzeroError: unknown;
+		try {
+			await nonzero.launch({
+				multiplexer: "orca",
+				placement: "pane",
+				command: ["PRIVATE_ORCA_ARGUMENT"],
+				cwd: "/repo",
+				target: "term-target",
+				shellGrammar: "posix",
+			});
+		} catch (error) {
+			nonzeroError = error;
+		}
+		expect(nonzeroError).toBeInstanceOf(Error);
+		expect((nonzeroError as Error).message).toContain("exit 23");
+		expect((nonzeroError as Error).message).not.toContain("PRIVATE_ORCA_OUTPUT");
+		expect((nonzeroError as Error).message).not.toContain("PRIVATE_ORCA_ARGUMENT");
+
+		const rejected = createHarness({}, [
+			{
+				stdout: '{"ok":false,"id":"rpc-error-id","error":{"message":"PRIVATE_ORCA_ERROR"}}',
+				exitCode: 0,
+			},
+		]);
+		let rejectedError: unknown;
+		try {
+			await rejected.launch({
+				multiplexer: "orca",
+				placement: "window",
+				command: ["PRIVATE_ORCA_ARGUMENT"],
+				cwd: "/repo",
+				target: "id:worktree-1",
+				shellGrammar: "posix",
+			});
+		} catch (error) {
+			rejectedError = error;
+		}
+		expect(rejectedError).toBeInstanceOf(Error);
+		expect((rejectedError as Error).message).toContain("unsuccessful response");
+		expect((rejectedError as Error).message).not.toContain("PRIVATE_ORCA_ERROR");
+		expect((rejectedError as Error).message).not.toContain("PRIVATE_ORCA_ARGUMENT");
+
+		const missing = createHarness({}, [{ stdout: '{"ok":true,"id":"rpc-id-only"}', exitCode: 0 }]);
+		await expect(
+			missing.launch({
+				multiplexer: "orca",
+				placement: "pane",
+				command: ["omp"],
+				cwd: "/repo",
+				target: "term-target",
+				shellGrammar: "posix",
+			}),
+		).rejects.toThrow("no terminal handle");
+	});
+
+	it("rejects Orca shell-control bytes before invoking the CLI", async () => {
+		const { calls, launch } = createHarness({}, []);
+		for (const control of ["\u0003", "\u007f", "\u0085"]) {
+			await expect(
+				launch({
+					multiplexer: "orca",
+					placement: "pane",
+					command: ["printf", `%s${control}`],
+					cwd: "/repo",
+					target: "term-target",
+					shellGrammar: "posix",
+				}),
+			).rejects.toThrow("terminal control bytes");
+			await expect(
+				launch({
+					multiplexer: "orca",
+					placement: "window",
+					command: ["omp"],
+					cwd: `/repo${control}`,
+					target: "id:worktree-1",
+					shellGrammar: "posix",
+				}),
+			).rejects.toThrow("terminal control bytes");
+		}
+		expect(calls).toEqual([]);
 	});
 });

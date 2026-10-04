@@ -29,7 +29,7 @@ This document describes operator-visible behavior for session export, sharing, c
 | `/clear`                                | Interactive slash command    | Yes (clears live/model conversation context)  | Retains identity/file/history; a lazy session still follows the normal persistence gate    | Appends `reset_boundary`                                                            |
 | `/delete`                               | Interactive slash command    | Yes (starts an empty conversation)            | Attempts to delete the current persisted session and artifacts, then switches to a new one | None                                                                                |
 | `/fork`                                 | Interactive slash command    | Yes (active session identity changes)         | Creates new session file and switches current session to it (persistent mode only)         | Copies artifact directory to new session namespace when present                     |
-| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command  | No (parent session retained)                   | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group   | Child receives a separate forked session                                            |
+| `/fork pane`, `/fork window`, `/fork tab` | Interactive slash command  | No (parent session retained)                   | Opens a child OMP process from the flushed current transcript in a multiplexer pane/group (tmux window, Zellij/Herdr/Orca tab, or CMUX workspace) | Child receives a separate forked session                                            |
 | `--fork <id\|path>`                     | CLI startup                  | Yes after session creation                    | Creates a new session fork from the selected source into current cwd/session dir           | Copies source artifacts recursively by default                                      |
 | `/resume [id\|@claude\|@codex]`         | Interactive slash command    | Yes (active in-memory state replaced)         | Switches to a selected/matched session, or imports a selected foreign session              | None                                                                                |
 | `--resume`                              | CLI startup picker           | Yes after session creation                    | Opens selected existing session file (picker opens in current-folder scope; the global list is preloaded only for the empty-everything early exit and instant Tab switching) | None                |
@@ -283,16 +283,16 @@ for keyboard controls, follow-ups, persistence, and migration safety.
 Bare `/fork` creates a new session from the current one and switches the active
 session identity. `/fork pane` opens a separate OMP process in a new pane;
 `/fork window` and `/fork tab` open it in a new multiplexer group (a tmux
-window, Zellij/Herdr tab, or CMUX workspace). The child starts from the current
+window, Zellij/Herdr/Orca tab, or CMUX workspace). The child starts from the current
 persisted transcript, while the parent session stays active and continues
 running.
 
 Typing `/fork ` suggests `pane`, `window`, and `tab`; the selected argument
 appears as dim inline text and Tab accepts it.
 
-Placement commands autodetect tmux, Zellij, Herdr, or CMUX from the terminal;
+Placement commands autodetect tmux, Zellij, Herdr, CMUX, or Orca from the terminal;
 `/fork auto` is not a subcommand (valid arguments are `pane`, `window`, and
-`tab`). `window` maps to a tmux window, a Zellij/Herdr tab, or a CMUX workspace.
+`tab`). `window` maps to a tmux window, a Zellij/Herdr/Orca tab, or a CMUX workspace.
 Plain terminals, `screen`, and `wmux` cannot host this fork placement and receive
 an explicit error; use bare `/fork` there instead.
 
@@ -319,11 +319,17 @@ values. The child also receives the effective agent/config directories and the
 resolved config overlays, which retain their original paths after `/move`.
 It starts with `--fork` and the absolute path of the current transcript. The
 generic terminal launcher handles provider-specific execution and reports
-capability or launch failures in the TUI. Herdr and CMUX launches require
+capability or launch failures in the TUI. Herdr, CMUX, and Orca launches require
 explicit confirmation that the destination's configured interactive shell
 accepts POSIX syntax; this is never inferred from the local OS or `SHELL`.
 Declining confirmation stops before the session is flushed or a terminal is
-launched. `window` and `tab` both map to the multiplexer group placement.
+launched. `window` and `tab` both map to the multiplexer group placement. Orca's
+CLI executable is `orca-ide` on Linux and `orca` on macOS and Windows.
+
+Orca's CLI `--command` accepts shell text, not argv, and has no `--cwd`; after
+confirmation, OMP supplies `cd <quoted-cwd> && <quoted-command>` using shared
+POSIX shell quoting. Orca splits activate the new pane by default. Tab creation
+is visible without switching focus, so `/fork tab` leaves the parent tab selected.
 
 ### Session-level flow
 

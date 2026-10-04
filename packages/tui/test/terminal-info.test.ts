@@ -83,6 +83,8 @@ describe("collectTerminalState", () => {
 			"CMUX_REMOTE_TRANSPORT",
 			"WMUX",
 			"WMUX_SURFACE_ID",
+			"ORCA_PANE_KEY",
+			"ORCA_WORKTREE_ID",
 		] as const;
 		const previous = new Map<string, string | undefined>();
 		for (const key of keys) {

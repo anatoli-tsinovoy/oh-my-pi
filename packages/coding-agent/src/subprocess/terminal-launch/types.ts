@@ -3,7 +3,7 @@ import type { TerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer"
 export interface PlacementCapabilities {
 	displayName: string;
 	execution?: readonly string[];
-	target?: "pane" | "session" | "tab" | "workspace" | "surface" | "window" | false;
+	target?: "pane" | "session" | "tab" | "workspace" | "surface" | "window" | "worktree" | false;
 	direction?: readonly string[];
 	floating?: true;
 	floatingDirectionExclusive?: true;
@@ -111,6 +111,24 @@ export const terminalLaunchCapabilities = {
 			shellGrammar: "posix",
 		},
 	},
+	orca: {
+		supported: true,
+		pane: {
+			execution: ["shell-input"],
+			target: "pane",
+			direction: ["right", "down"],
+			shellGrammar: "posix",
+			cwdShellInput: true,
+		},
+		window: {
+			execution: ["shell-input"],
+			target: "worktree",
+			focus: true,
+			name: true,
+			shellGrammar: "posix",
+			cwdShellInput: true,
+		},
+	},
 	wmux: {
 		displayName: "wmux",
 		supported: false,
@@ -201,7 +219,7 @@ export type TerminalLaunchRequest = { [M in TerminalLaunchMultiplexer]: Requests
 export interface TerminalLaunchResult {
 	multiplexer: TerminalLaunchMultiplexer;
 	placement: TerminalLaunchPlacement;
-	/** Provider-native pane, tab, workspace, window, or session ID when the CLI reports one. */
+	/** Provider-native pane, terminal handle, tab, workspace, window, or session ID when the CLI reports one. */
 	id?: string;
 }
 

@@ -94,8 +94,8 @@ class ResizeScheduler {
 }
 
 // Every signal isInsideTerminalMultiplexer() recognizes; the suite itself may
-// run under tmux, screen, Zellij, CMUX, or Herdr, and the SIGWINCH-side erase
-// only runs on direct terminals.
+// run under tmux, screen, Zellij, CMUX, Herdr, or Orca, and the SIGWINCH-side
+// erase only runs on direct terminals.
 const MUX_SIGNALS = [
 	"TMUX",
 	"STY",
@@ -109,6 +109,8 @@ const MUX_SIGNALS = [
 	"CMUX_REMOTE_TRANSPORT",
 	"WMUX",
 	"WMUX_SURFACE_ID",
+	"ORCA_PANE_KEY",
+	"ORCA_WORKTREE_ID",
 	"TERM",
 	"TERM_PROGRAM",
 	"PI_TUI_RESIZE_IN_PLACE",

@@ -215,6 +215,8 @@ describe("Raw 0x08 backspace disambiguation", () => {
 		"CMUX_REMOTE_TRANSPORT",
 		"WMUX",
 		"WMUX_SURFACE_ID",
+		"ORCA_PANE_KEY",
+		"ORCA_WORKTREE_ID",
 	] as const;
 	function withEnv(overrides: Partial<Record<(typeof envKeys)[number], string>>, run: () => void): void {
 		const saved: Record<string, string | undefined> = {};

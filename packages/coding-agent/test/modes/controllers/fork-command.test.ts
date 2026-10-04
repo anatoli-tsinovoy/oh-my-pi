@@ -189,6 +189,36 @@ describe("/fork terminal placement", () => {
 		},
 	);
 
+	it.each([
+		["pane", "pane"],
+		["window", "tab"],
+	] as const)("uses generic launcher metadata for an Orca %s", async (placement, placementLabel) => {
+		const { controller, ctx, launchTerminal } = createContext({
+			classifyTerminalMultiplexer: () => "orca",
+			confirmed: true,
+		});
+		const baseline = createContext({ classifyTerminalMultiplexer: () => "tmux" });
+		await baseline.controller.handleForkCommand(placement);
+		await controller.handleForkCommand(placement);
+		const expectedRequest = baseline.launchTerminal.mock.calls[0]?.[0];
+		const request = launchTerminal.mock.calls[0]?.[0];
+		expect(request).toMatchObject({
+			multiplexer: "orca",
+			placement,
+			cwd: "/workspace/project",
+			shellGrammar: "posix",
+		});
+		expect(request).not.toHaveProperty("focus");
+		expect(request?.command).toEqual(expectedRequest?.command);
+		expect(request?.cwd).toBe(expectedRequest?.cwd);
+		expect(ctx.showHookConfirm).toHaveBeenCalledTimes(1);
+		expect(ctx.showStatus).toHaveBeenCalledWith(
+			expect.stringMatching(new RegExp(`Orca \\(${placementLabel}\\)`)),
+		);
+		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("this session continues here"));
+	});
+
+
 	it("flushes and launches an absolute persisted source with the active profile", async () => {
 		const { controller, launchTerminal, flush, ctx, session } = createContext();
 		await controller.handleForkCommand("pane");

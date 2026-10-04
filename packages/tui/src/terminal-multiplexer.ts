@@ -1,12 +1,13 @@
 import { cmuxMultiplexer } from "./multiplexers/cmux";
 import { herdrMultiplexer } from "./multiplexers/herdr";
+import { orcaMultiplexer } from "./multiplexers/orca";
 import { screenMultiplexer } from "./multiplexers/screen";
 import { wmuxMultiplexer } from "./multiplexers/wmux";
 import { zellijMultiplexer } from "./multiplexers/zellij";
 import { tmuxMultiplexer } from "./tmux";
 
 /** Terminal multiplexers omp recognizes as owning the screen grid. */
-export type TerminalMultiplexer = "herdr" | "tmux" | "screen" | "zellij" | "cmux" | "wmux";
+export type TerminalMultiplexer = "herdr" | "tmux" | "screen" | "zellij" | "cmux" | "wmux" | "orca";
 
 /**
  * Whether an explicit session marker identifies the current provider.
@@ -31,6 +32,8 @@ export function hasTerminalMultiplexerSession(
 			return cmuxMultiplexer.isInside(env);
 		case "wmux":
 			return wmuxMultiplexer.isInside(env);
+		case "orca":
+			return orcaMultiplexer.isInside(env);
 	}
 }
 
@@ -40,12 +43,13 @@ export function hasTerminalMultiplexerSession(
  * (`isInsideTerminalMultiplexer`) and the debug snapshot label.
  *
  * TMUX/STY/ZELLIJ, Herdr, and the CMUX/WMUX workspace/surface/remote-transport
- * markers are authoritative session signals. TERM can also survive when those
- * are stripped (`sudo` without -E, `su`, env-sanitizing launchers/ssh). Do not
- * use CMUX_SOCKET_PATH / WMUX_CLI / WMUX_PIPE here: they are CLI socket/path
- * overrides and can be set outside a CMUX/WMUX terminal. wmux is a Windows
- * multiplexer (Electron + xterm.js) modeled on cmux/herdr that repaints its
- * pane in place and exports WMUX=1 plus a native WMUX_SURFACE_ID.
+ * markers are authoritative session signals. Orca's paired pane/worktree IDs
+ * identify its renderer- and runtime-owned PTYs. TERM can also survive when
+ * those markers are stripped (`sudo` without -E, `su`, env-sanitizing
+ * launchers/ssh). Do not use CMUX_SOCKET_PATH / WMUX_CLI / WMUX_PIPE here: they
+ * are CLI socket/path overrides and can be set outside a CMUX/WMUX terminal.
+ * wmux is a Windows multiplexer (Electron + xterm.js) modeled on cmux/herdr
+ * that repaints its pane in place and exports WMUX=1 plus a native WMUX_SURFACE_ID.
  */
 export function classifyTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): TerminalMultiplexer | null {
 	if (hasTerminalMultiplexerSession("herdr", env)) return "herdr";
@@ -57,6 +61,7 @@ export function classifyTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): T
 	const term = env.TERM?.toLowerCase() ?? "";
 	if (term.startsWith("tmux")) return "tmux";
 	if (term.startsWith("screen")) return "screen";
+	if (hasTerminalMultiplexerSession("orca", env)) return "orca";
 	return null;
 }
 

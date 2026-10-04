@@ -814,11 +814,12 @@ editor.
 #### Launching terminal commands
 
 `ctx.ui.openTerminal(request)` is available only in the interactive TUI. It creates a
-multiplexer pane or provider-native group (a tmux window, Zellij/Herdr tab, or CMUX
+multiplexer pane or provider-native group (a tmux window, Zellij/Herdr/Orca tab, or CMUX
 workspace—not an OS window) and returns the reported native ID. RPC, ACP, print, and
-headless contexts do not provide this optional method. The request type and supported
-provider set derive from the canonical launch capabilities; screen and wmux remain
-recognized by the multiplexer taxonomy but are currently unsupported.
+headless contexts do not provide this optional method. The request type and
+supported provider set derive from canonical launch capabilities: tmux, Zellij,
+Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
+multiplexer taxonomy but are currently unsupported.
 
 Provider-specific session detection is centralized in
 `@oh-my-pi/pi-tui/terminal-multiplexer`: `hasTerminalMultiplexerSession(provider,
@@ -867,6 +868,10 @@ Targets are provider-native IDs/refs, with different meanings by placement:
 - Herdr pane placement targets a pane ID and defaults to `HERDR_PANE_ID`; tab
   placement targets a workspace ID and defaults to `HERDR_WORKSPACE_ID`. The
   destination must be in an active Herdr pane or workspace.
+- Orca pane splits resolve `ORCA_PANE_KEY` to the current terminal handle;
+  detection requires both `ORCA_PANE_KEY` and `ORCA_WORKTREE_ID`. Tab creation
+  defaults to worktree `id:<ORCA_WORKTREE_ID>`; an application label alone is
+  insufficient to detect an Orca session.
 - CMUX pane placement targets a surface ID; workspace placement targets a window
   ID. Both targets may be omitted when the corresponding CMUX context is active.
   An explicit surface target is authoritative and is not combined with the ambient
@@ -874,10 +879,12 @@ Targets are provider-native IDs/refs, with different meanings by placement:
   local CMUX surface.
 
 Unsupported target combinations fail rather than being ignored. Capability checks
-use provider identity markers or a native target, not `TERM` alone. The `focus`
-option is available on every supported provider: tmux uses `-d` when false,
-Zellij uses `--no-focus`, Herdr uses `--focus`/`--no-focus`, and CMUX passes
-`--focus true|false` to both split and workspace creation.
+use provider identity markers or a native target, not `TERM` alone. `focus` controls
+apply only where a placement supports them: tmux uses `-d` when false, Zellij uses
+`--no-focus`, Herdr uses `--focus`/`--no-focus`, and CMUX passes `--focus true|false`
+to both split and workspace creation. Orca tab creation maps `focus: true` to
+`--focus`; without it, the tab is visible without switching focus. Orca pane splits
+activate the new pane by default and have no focus flag.
 
 Execution is provider-specific. tmux accepts multiple command arguments for direct
 execution, but treats a single command argument as shell text. For one-argument
@@ -887,25 +894,26 @@ name containing `=` is rejected because `env` reads it as an assignment.
 `execution: "shell"` POSIX-quotes tmux argv into one shell command. Zellij accepts
 direct argv execution.
 
-Herdr `pane run` and CMUX `--command` submit text to the destination's interactive
-shell rather than launching argv directly. Their requests therefore require
-`shellGrammar: "posix"`. Set it only when you have confirmed that the newly-created
-destination shell uses POSIX-compatible command grammar. This required assertion is
-validated before invoking a CLI; it is not inferred from the local OS or `$SHELL`,
-and neither backend's configured shell is guessed. Without that confirmation, do
-not request a Herdr or CMUX launch. Once asserted, argv words and CMUX's working
-directory command are quoted with the shared POSIX shell-quoting helpers; those
-quotes are not claimed to work in Nushell, PowerShell, `cmd.exe`, or other shell
-grammars. CMUX split has no cwd flag, so it changes directory inside that shell
-before entering the command.
+Herdr `pane run`, CMUX `--command`, and Orca `terminal split`/`terminal create`
+submit shell command text to the destination's interactive shell rather than
+launching argv directly. Their requests therefore require `shellGrammar: "posix"`.
+Set it only after confirming that the destination shell accepts POSIX syntax; it
+is not inferred from the local OS or `$SHELL`, and the configured shell is not
+guessed. Without that assertion, do not request a Herdr, CMUX, or Orca launch.
+Once asserted, argv words are quoted with the shared POSIX shell-quoting helpers.
+Orca split/create have no `--cwd` flag, so the adapter prepends
+`cd <quoted-cwd> &&` before the quoted command in `--command`; CMUX split also
+changes directory inside its shell before entering the command. These quotes are
+not claimed to work in Nushell, PowerShell, `cmd.exe`, or other shell grammars.
+Orca uses `orca-ide` on Linux and `orca` on macOS and Windows.
 
 Because these commands are submitted as terminal input, shell-input requests
 reject C0/C1 control bytes and DEL in command arguments before creating a pane or
-workspace; CMUX split also rejects them in `cwd`, which is embedded in its shell
-command. The restriction is not applied to direct tmux or Zellij argv, where
-argument newlines remain data rather than terminal input.
+workspace; CMUX and Orca also reject them in `cwd`, which is embedded in their
+shell command. The restriction is not applied to direct tmux or Zellij argv,
+where argument newlines remain data rather than terminal input.
 
-Herdr and Zellij `window` placements create tabs; CMUX creates a workspace.
+Herdr, Zellij, and Orca `window` placements create tabs; CMUX creates a workspace.
 Provider-specific fields include pane direction, Zellij floating panes/names,
 Herdr tab labels, and CMUX workspace names. Zellij floating panes cannot specify a
 split direction, and Zellij new-tab creation cannot target a tab. tmux returns
@@ -913,10 +921,13 @@ required pane (`%...`) or window (`@...`) IDs; Zellij returns its required pane 
 as `terminal_<id>` and tab IDs as numeric strings; Herdr requires pane/tab IDs in
 its JSON response. CMUX reports workspace/pane IDs when present, but its JSON
 response may omit an ID, in which case `result.id` is unavailable.
+Orca returns a pane handle at `result.split.handle` or a tab handle at
+`result.terminal.handle`; the top-level JSON `id` is the RPC request ID, not the
+terminal handle.
 
 Failures reject with a sanitized error naming the provider, operation, and exit
-status when available; command argv and CLI output are not included. A malformed
-CMUX JSON response rejects without retrying the creation.
+status when available; command argv and CLI output are not included. CMUX and Orca
+reject malformed JSON responses without retrying creation.
 
 There is no shared environment override: each multiplexer applies its own
 environment propagation rules; the dispatcher does not synthesize uniform variable
