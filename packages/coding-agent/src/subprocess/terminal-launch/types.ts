@@ -112,8 +112,10 @@ export const terminalLaunchCapabilities = {
 		},
 	},
 	orca: {
+		displayName: "Orca",
 		supported: true,
 		pane: {
+			displayName: "pane",
 			execution: ["shell-input"],
 			target: "pane",
 			direction: ["right", "down"],
@@ -121,6 +123,7 @@ export const terminalLaunchCapabilities = {
 			cwdShellInput: true,
 		},
 		window: {
+			displayName: "tab",
 			execution: ["shell-input"],
 			target: "worktree",
 			focus: true,
@@ -151,15 +154,15 @@ export interface TerminalLaunchPlacementInfo {
 
 type CapabilityValues<C, K extends PropertyKey> = K extends keyof C
 	? C[K] extends readonly (infer Value)[]
-		? Value
-		: never
+	? Value
+	: never
 	: never;
 
 type TargetOption<C> = C extends { target: false }
 	? { target?: never }
 	: C extends { target: string }
-		? { target?: string }
-		: { target?: never };
+	? { target?: string }
+	: { target?: never };
 
 type ExecutionOption<C> = C extends { execution: readonly string[] }
 	? { execution?: CapabilityValues<C, "execution"> }
@@ -168,9 +171,9 @@ type ExecutionOption<C> = C extends { execution: readonly string[] }
 type DirectionAndFloatingOptions<C> = C extends { floatingDirectionExclusive: true }
 	? { floating: true; direction?: never } | { floating?: false; direction?: CapabilityValues<C, "direction"> }
 	: {
-			direction?: CapabilityValues<C, "direction">;
-			floating?: C extends { floating: true } ? boolean : never;
-		};
+		direction?: CapabilityValues<C, "direction">;
+		floating?: C extends { floating: true } ? boolean : never;
+	};
 
 type OptionalStringOption<C, K extends "name" | "label"> =
 	C extends Record<K, true> ? { [P in K]?: string } : { [P in K]?: never };
@@ -208,10 +211,10 @@ type RequestsForEntry<Multiplexer extends TerminalLaunchMultiplexer, Entry> = {
 
 type RequestsFor<Multiplexer extends TerminalLaunchMultiplexer> =
 	(typeof terminalLaunchCapabilities)[Multiplexer] extends infer Entry
-		? Entry extends { supported: true }
-			? RequestsForEntry<Multiplexer, Entry>
-			: never
-		: never;
+	? Entry extends { supported: true }
+	? RequestsForEntry<Multiplexer, Entry>
+	: never
+	: never;
 
 /** Requests are derived from the canonical capability map, excluding unsupported providers and impossible options. */
 export type TerminalLaunchRequest = { [M in TerminalLaunchMultiplexer]: RequestsFor<M> }[TerminalLaunchMultiplexer];
