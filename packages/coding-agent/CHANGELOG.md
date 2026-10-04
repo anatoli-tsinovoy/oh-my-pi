@@ -177,6 +177,7 @@
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
 - Added capability-driven request construction for detected multiplexers, including provider presentation, unsupported-provider errors, and required POSIX shell confirmation for shell-input launches.
 - Added Orca support for placement forks (`/fork pane`, `/fork window`, and `/fork tab`), with confirmation that the destination shell accepts POSIX syntax.
+- Added Orca support for placement forks (`/fork pane`, `/fork window`, and `/fork tab`), with confirmation that the destination shell accepts POSIX syntax ([#14](https://github.com/anatoli-tsinovoy/oh-my-pi/pull/14) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Changed
 
