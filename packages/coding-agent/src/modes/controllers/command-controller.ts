@@ -21,6 +21,8 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getActiveProfile, getConfigDirName } from "@oh-my-pi/pi-utils/dirs";
+import { classifyTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-multiplexer";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -100,9 +102,62 @@ import type { UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-da
 import { cfgTerminalShowImages } from "../settings";
 import { cfgProviderAppendOnlyContext } from "../../session/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "../../commands/settings";
+import { flagConsumesValue, restartArgv } from "../../cli/flag-tables";
+import {
+	createDefaultTerminalLaunchRequest,
+	getTerminalLaunchPlacement,
+	launchTerminal,
+	TerminalLaunchError,
+	type TerminalLaunchRequest,
+	type TerminalLaunchResult,
+} from "../../subprocess/terminal-launch";
+import { resolveCliEntryCmd } from "../../subprocess/worker-client";
 
 function formatCreditValue(value: number): string {
 	return value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+interface ForkTerminalDependencies {
+	classifyTerminalMultiplexer: typeof classifyTerminalMultiplexer;
+	environment: () => NodeJS.ProcessEnv;
+	launchTerminal: (request: TerminalLaunchRequest) => Promise<TerminalLaunchResult>;
+	resolveCliEntryCmd: typeof resolveCliEntryCmd;
+	getActiveProfile: typeof getActiveProfile;
+	argv: () => string[];
+}
+
+const FORK_LAUNCH_OVERRIDES: Record<string, true> = {
+	"--api-key": true,
+	"--config": true,
+	"--cwd": true,
+	"--model": true,
+	"--profile": true,
+	"--provider": true,
+	"--thinking": true,
+};
+
+function stripForkLaunchOverrides(argv: string[]): string[] {
+	const result: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		const option = arg.startsWith("--") ? arg.split("=", 1)[0]! : arg;
+		if (Object.hasOwn(FORK_LAUNCH_OVERRIDES, option)) {
+			if (flagConsumesValue(arg, argv[i + 1])) i++;
+			continue;
+		}
+		result.push(arg);
+		if (flagConsumesValue(arg, argv[i + 1])) result.push(argv[++i]!);
+	}
+	return result;
+}
+
+function hasForkApiKeyOverride(argv: string[]): boolean {
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i]!;
+		if (arg === "--api-key" || arg.startsWith("--api-key=")) return true;
+		if (flagConsumesValue(arg, argv[i + 1])) i++;
+	}
+	return false;
 }
 
 export class CommandController {
@@ -110,8 +165,22 @@ export class CommandController {
 	#reportSheet: OverlayHandle | undefined;
 	/** The editor sat on the bottom row when the text-mode report above it opened. */
 	#reportOpenedAtBottom = false;
+	#forkTerminalDependencies: ForkTerminalDependencies;
 
-	constructor(private readonly ctx: InteractiveModeContext) {}
+	constructor(
+		private readonly ctx: InteractiveModeContext,
+		forkTerminalDependencies: Partial<ForkTerminalDependencies> = {},
+	) {
+		this.#forkTerminalDependencies = {
+			classifyTerminalMultiplexer,
+			environment: () => process.env,
+			launchTerminal,
+			resolveCliEntryCmd,
+			getActiveProfile,
+			argv: () => process.argv.slice(2),
+			...forkTerminalDependencies,
+		};
+	}
 
 	/**
 	 * Esc: take away the report shown above the editor (text mode); false when
@@ -1273,7 +1342,12 @@ export class CommandController {
 		await this.#runNewSessionFlow({ drop: true }, "Session deleted");
 	}
 
-	async handleForkCommand(): Promise<void> {
+	async handleForkCommand(placement?: "pane" | "window"): Promise<void> {
+		if (placement !== undefined) {
+			await this.#handleForkTerminalCommand(placement);
+			return;
+		}
+
 		if (this.ctx.session.isStreaming) {
 			this.ctx.showWarning("Wait for the current response to finish or abort it before forking.");
 			return;
@@ -1312,6 +1386,119 @@ export class CommandController {
 				1,
 			),
 		]);
+	}
+
+	async #handleForkTerminalCommand(placement: "pane" | "window"): Promise<void> {
+		const dependencies = this.#forkTerminalDependencies;
+		const environment = dependencies.environment();
+		const multiplexer = dependencies.classifyTerminalMultiplexer(environment);
+		const placementInfo = getTerminalLaunchPlacement(multiplexer, placement);
+		if ("error" in placementInfo) {
+			this.ctx.showError(placementInfo.error);
+			return;
+		}
+
+		if (this.ctx.session.isStreaming) {
+			const confirmed = await this.ctx.showHookConfirm(
+				"Fork while a response is running?",
+				"The child may not include the partial response. Continue opening a fork? The current session will keep running here.",
+			);
+			if (!confirmed) return;
+		}
+
+		const initialSessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!initialSessionFile) {
+			this.ctx.showError("Cannot open a fork in another terminal: the current session has not been persisted yet.");
+			return;
+		}
+
+		const restartArgs = restartArgv(dependencies.argv(), undefined);
+		if (hasForkApiKeyOverride(restartArgs)) {
+			this.ctx.showError(
+				"Cannot open a fork in another terminal when --api-key was supplied at startup; the key cannot be forwarded without exposing it in the multiplexer command. Configure provider credentials in the auth store and retry.",
+			);
+			return;
+		}
+		const shellGrammar = placementInfo.shellGrammar;
+		if (shellGrammar === "posix") {
+			const confirmed = await this.ctx.showHookConfirm(
+				"Confirm destination shell compatibility",
+				"This fork command uses POSIX shell syntax. Continue only if the destination's configured interactive shell accepts POSIX syntax; this cannot be inferred from the current terminal.",
+			);
+			if (!confirmed) {
+				this.ctx.showWarning("Fork cancelled: POSIX shell compatibility was not confirmed for the destination.");
+				return;
+			}
+		}
+
+		try {
+			await this.ctx.sessionManager.flush();
+		} catch (error) {
+			logger.error("Failed to flush the session before opening a terminal fork", { error });
+			this.ctx.showError("Cannot open a fork in another terminal: failed to save the current session.");
+			return;
+		}
+
+		const sessionFile = this.ctx.sessionManager.getSessionFile();
+		if (!sessionFile) {
+			this.ctx.showError("Cannot open a fork in another terminal: the current session is no longer persisted.");
+			return;
+		}
+		const sourceSessionFile = path.resolve(sessionFile);
+		try {
+			await fs.access(sourceSessionFile);
+		} catch {
+			this.ctx.showError("Cannot open a fork in another terminal: the persisted session transcript is unavailable.");
+			return;
+		}
+
+		try {
+			const activeProfile = dependencies.getActiveProfile();
+			const activeModel = this.ctx.session.model;
+			const childArgs = stripForkLaunchOverrides(restartArgs);
+			if (activeProfile) childArgs.push("--profile", activeProfile);
+			if (activeModel) childArgs.push("--model", `${activeModel.provider}/${activeModel.id}`);
+			const activeThinkingLevel = this.ctx.session.configuredThinkingLevel();
+			if (activeThinkingLevel !== undefined) childArgs.push("--thinking", activeThinkingLevel);
+			childArgs.push("--fork", sourceSessionFile);
+			// Multiplexer servers keep stale environment snapshots; override only non-secret scope variables.
+			const command = [
+				"env",
+				`PI_CODING_AGENT_DIR=${this.ctx.settings.getAgentDir()}`,
+				`PI_CONFIG_DIR=${getConfigDirName()}`,
+				`OMP_PROFILE=${activeProfile ?? ""}`,
+				`PI_PROFILE=${activeProfile ?? ""}`,
+				`PI_CONFIG_FILES=${this.ctx.settings.getConfigFiles().join(path.delimiter)}`,
+				`XDG_DATA_HOME=${environment.XDG_DATA_HOME ?? ""}`,
+				`XDG_STATE_HOME=${environment.XDG_STATE_HOME ?? ""}`,
+				`XDG_CACHE_HOME=${environment.XDG_CACHE_HOME ?? ""}`,
+				...dependencies.resolveCliEntryCmd(),
+				...childArgs,
+			];
+			const launchPlan = createDefaultTerminalLaunchRequest(
+				multiplexer,
+				placement,
+				command,
+				this.ctx.sessionManager.getCwd(),
+				shellGrammar,
+			);
+			if ("error" in launchPlan) {
+				this.ctx.showError(launchPlan.error);
+				return;
+			}
+
+			await dependencies.launchTerminal(launchPlan.request);
+			this.ctx.showStatus(
+				`Opened a fork in ${placementInfo.displayName} (${placementInfo.placementLabel}); this session continues here.`,
+			);
+		} catch (error) {
+			logger.error("Failed to open a terminal fork", { multiplexer, error });
+			this.ctx.showError(
+				error instanceof TerminalLaunchError
+					? `Could not open a fork in ${placementInfo.displayName}: ${error.message}`
+					: `Could not open a fork in ${placementInfo.displayName}. See logs for details.`,
+			);
+		}
 	}
 
 	/**

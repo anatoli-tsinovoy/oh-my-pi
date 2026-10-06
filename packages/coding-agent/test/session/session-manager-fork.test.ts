@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
-import { collectPendingToolCalls } from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
+import {
+	collectPendingToolCalls,
+	TOOL_EXECUTION_START_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/session/exit-diagnostics";
 import {
 	CURRENT_SESSION_VERSION,
 	type SessionEntry,
@@ -393,10 +396,127 @@ describe("SessionManager.forkFrom", () => {
 		const result = repairedEntries.find(
 			(entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "toolResult",
 		);
-		if (!result || result.message.role !== "toolResult") throw new Error("expected a synthetic tool result");
+		if (!result || result.message.role !== "toolResult") throw new Error("expected an unknown tool result");
 		expect(result.message.toolCallId).toBe("toolu_live");
 		expect(result.message.isError).toBe(true);
-		expect(isSyntheticToolResultMessage(result.message)).toBe(true);
+		expect(result.message).not.toHaveProperty("details");
+		expect(
+			result.message.content.some(
+				block => block.type === "text" && block.text.includes("may still be running this tool"),
+			),
+		).toBe(true);
+	});
+
+	it("retains the length-stop guard only when a call has no start marker", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-length-repair-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		await fs.mkdir(sessionDir, { recursive: true });
+		const sourceFile = path.join(sessionDir, "source.jsonl");
+		const timestamp = new Date().toISOString();
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "length-limited-parent",
+			timestamp,
+			cwd,
+		};
+		const assistant = {
+			type: "message",
+			id: "m1",
+			parentId: null,
+			timestamp,
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "toolu_truncated",
+						name: "write",
+						arguments: { path: "partial.txt", content: "incomplete payload" },
+					},
+				],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude",
+				stopReason: "length",
+				timestamp: Date.now(),
+				usage: {
+					input: 10,
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 15,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			},
+		};
+		await Bun.write(sourceFile, `${JSON.stringify(header)}\n${JSON.stringify(assistant)}\n`);
+
+		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "fork"), undefined, {
+			suppressBreadcrumb: true,
+			repairInterruptedTail: true,
+		});
+		const branch = forked.getBranch();
+		expect(collectPendingToolCalls(branch)).toEqual([]);
+		const result = branch.find(
+			(entry): entry is SessionMessageEntry =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				isSyntheticToolResultMessage(entry.message),
+		);
+		if (!result || !isSyntheticToolResultMessage(result.message)) {
+			throw new Error("expected a synthetic tool result for the truncated call");
+		}
+		expect(result.message.toolCallId).toBe("toolu_truncated");
+		expect(result.message.details).toMatchObject({ source: "assistant_stop_length", executed: false });
+		expect(
+			result.message.content.some(
+				block => block.type === "text" && block.text.includes("truncated and unsafe to run"),
+			),
+		).toBe(true);
+		const startedSourceFile = path.join(sessionDir, "started-source.jsonl");
+		const startedHeader = { ...header, id: "length-started-parent" };
+		const startMarker = {
+			type: "custom",
+			id: "m2",
+			parentId: "m1",
+			timestamp,
+			customType: TOOL_EXECUTION_START_CUSTOM_TYPE,
+			data: { toolCallId: "toolu_truncated", toolName: "write", startedAt: timestamp },
+		};
+		await Bun.write(
+			startedSourceFile,
+			`${JSON.stringify(startedHeader)}\n${JSON.stringify(assistant)}\n${JSON.stringify(startMarker)}\n`,
+		);
+		const startedFork = await SessionManager.forkFrom(
+			startedSourceFile,
+			cwd,
+			path.join(tempDir.path(), "started-fork"),
+			undefined,
+			{
+				suppressBreadcrumb: true,
+				repairInterruptedTail: true,
+			},
+		);
+		const startedEntries = await loadHistory(startedFork.getSessionFile()!);
+		expect(collectPendingToolCalls(startedEntries)).toEqual([]);
+		const startedResult = startedEntries.find(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolCallId === "toolu_truncated",
+		);
+		if (startedResult?.type !== "message" || startedResult.message.role !== "toolResult") {
+			throw new Error("expected the started length-stopped call to be paired");
+		}
+		expect(isSyntheticToolResultMessage(startedResult.message)).toBe(false);
+		expect(startedResult.message).not.toHaveProperty("details");
+		expect(
+			startedResult.message.content.some(
+				block => block.type === "text" && block.text.includes("may still be running this tool"),
+			),
+		).toBe(true);
 	});
 
 	it("repairs only the active branch when sibling paths contain assistants and results", async () => {
@@ -485,14 +605,21 @@ describe("SessionManager.forkFrom", () => {
 		});
 		const branch = forked.getBranch();
 		expect(collectPendingToolCalls(branch)).toEqual([]);
-		const syntheticResults = branch.filter(
-			(entry): entry is SessionMessageEntry =>
-				entry.type === "message" && isSyntheticToolResultMessage(entry.message),
+		const result = branch.find(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "toolResult" &&
+				entry.message.toolCallId === "toolu_active",
 		);
-		expect(syntheticResults).toHaveLength(1);
-		const result = syntheticResults[0]!.message;
-		if (result.role !== "toolResult") throw new Error("expected a synthetic tool result");
-		expect(result.toolCallId).toBe("toolu_active");
+		if (result?.type !== "message" || result.message.role !== "toolResult") {
+			throw new Error("expected the active branch's unknown tool result");
+		}
+		expect(result.message).not.toHaveProperty("details");
+		expect(
+			result.message.content.some(
+				block => block.type === "text" && block.text.includes("may still be running this tool"),
+			),
+		).toBe(true);
 		expect(
 			(await loadHistory(forked.getSessionFile()!)).some(
 				entry =>
@@ -503,7 +630,7 @@ describe("SessionManager.forkFrom", () => {
 		).toBe(false);
 	});
 
-	it("leaves an already-terminal tail untouched when repair is requested", async () => {
+	it("leaves an already-terminal tail with a completed tool call untouched when repair is requested", async () => {
 		using tempDir = TempDir.createSync("@omp-session-fork-terminal-");
 		const cwd = path.join(tempDir.path(), "project");
 		const sessionDir = path.join(tempDir.path(), "sessions");

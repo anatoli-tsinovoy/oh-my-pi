@@ -92,7 +92,21 @@ function materializeTuiBuiltinSlashCommand(
 			materialized.getArgumentCompletions = buildEffortArgumentCompletions(runtime);
 			materialized.getInlineHint = buildEffortInlineHint(runtime);
 		} else {
-			materialized.getArgumentCompletions = buildArgumentCompletions(subcommands);
+			const getArgumentCompletions = buildArgumentCompletions(subcommands);
+			materialized.getArgumentCompletions =
+				cmd.name === "fork"
+					? prefix => {
+							const completions = getArgumentCompletions(prefix);
+							if (!completions) return null;
+							return completions.map(item => {
+								const remaining = item.label.slice(prefix.length);
+								return {
+									...item,
+									hint: remaining ? `${remaining}${item.hint ? ` ${item.hint}` : ""}` : item.hint,
+								};
+							});
+						}
+					: getArgumentCompletions;
 			materialized.getInlineHint = buildSubcommandInlineHint(subcommands);
 		}
 	} else if (cmd.name === "move") {
