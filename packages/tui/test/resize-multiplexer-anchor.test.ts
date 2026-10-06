@@ -83,7 +83,7 @@ class ResizeScheduler {
 }
 
 // Every signal isInsideTerminalMultiplexer() recognizes; the suite itself may
-// run under tmux, screen, Zellij, CMUX, or Herdr, so direct-terminal describes
+// run under tmux, screen, Zellij, CMUX, Herdr, or Orca, so direct-terminal tests
 // must clear them all (TERM prefixed tmux-/screen- also flags a multiplexer).
 const MUX_SIGNALS = [
 	"TMUX",
@@ -98,6 +98,8 @@ const MUX_SIGNALS = [
 	"CMUX_REMOTE_TRANSPORT",
 	"WMUX",
 	"WMUX_SURFACE_ID",
+	"ORCA_PANE_KEY",
+	"ORCA_WORKTREE_ID",
 	"TERM",
 	"TERM_PROGRAM",
 	"PI_TUI_RESIZE_IN_PLACE",

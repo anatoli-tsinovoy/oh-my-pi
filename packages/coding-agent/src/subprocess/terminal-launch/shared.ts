@@ -100,7 +100,7 @@ export function validateRequest(value: unknown): asserts value is TerminalLaunch
 		fail("validate", "A terminal launch requires a valid working directory.");
 	}
 	if (capabilities.cwdShellInput && typeof cwd === "string" && terminalControlBytes.test(cwd)) {
-		fail("cwd", "CMUX split working directories cannot contain terminal control bytes.");
+		fail("cwd", "Shell-input launch working directories cannot contain terminal control bytes.");
 	}
 
 	for (const option of ["target", "name", "label"] as const) {

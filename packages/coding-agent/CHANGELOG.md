@@ -40,6 +40,7 @@
 
 - Added capability-driven extension terminal launches for tmux, Zellij, Herdr, and CMUX, with consolidated multiplexer detection, provider/shell capability feedback, and required POSIX-shell confirmation for shell-input launches; CMUX shell input preserves non-ASCII arguments and pane working directories ([#13620](https://github.com/can1357/oh-my-pi/pull/13620) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Added `/fork pane|window|tab` to launch child sessions in the selected placement; inline hints expose the choices, Herdr and CMUX confirm POSIX-shell compatibility, and pending tools retain an unknown outcome ([#13](https://github.com/anatoli-tsinovoy/oh-my-pi/pull/13) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Added native Orca support for `/fork pane|window|tab`, with placement capability metadata and POSIX-shell confirmation ([#14](https://github.com/anatoli-tsinovoy/oh-my-pi/pull/14) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.6.3] - 2026-10-06
 

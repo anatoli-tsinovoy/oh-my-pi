@@ -61,6 +61,26 @@ describe("hasTerminalMultiplexerSession", () => {
 		expect(hasTerminalMultiplexerSession("wmux", { WMUX_CLI: "C:/wmux/wmux.exe" })).toBe(false);
 		expect(hasTerminalMultiplexerSession("wmux", { WMUX_PIPE: "\\\\.\\pipe\\wmux" })).toBe(false);
 	});
+
+	it("requires both nonempty Orca worktree identity markers", () => {
+		expect(
+			hasTerminalMultiplexerSession("orca", {
+				ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc",
+				ORCA_WORKTREE_ID: "worktree-1",
+			}),
+		).toBe(true);
+		for (const env of [
+			{ ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc" },
+			{ ORCA_WORKTREE_ID: "worktree-1" },
+			{ ORCA_PANE_KEY: "", ORCA_WORKTREE_ID: "worktree-1" },
+			{ ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc", ORCA_WORKTREE_ID: "" },
+			{ ORCA_PANE_KEY: " ", ORCA_WORKTREE_ID: "worktree-1" },
+			{ ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc", ORCA_WORKTREE_ID: " " },
+			{ TERM_PROGRAM: "orca" },
+		]) {
+			expect(hasTerminalMultiplexerSession("orca", env)).toBe(false);
+		}
+	});
 });
 
 describe("terminal multiplexer classification", () => {
@@ -69,6 +89,22 @@ describe("terminal multiplexer classification", () => {
 		expect(classifyTerminalMultiplexer({ TMUX: "session", STY: "screen" })).toBe("tmux");
 		expect(classifyTerminalMultiplexer({ STY: "screen", ZELLIJ: "session" })).toBe("screen");
 		expect(classifyTerminalMultiplexer({ TERM: "screen-256color" })).toBe("screen");
+	});
+
+	it("classifies Orca from paired identity markers after nested multiplexers", () => {
+		const orcaEnv = {
+			ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc",
+			ORCA_WORKTREE_ID: "worktree-1",
+		};
+		expect(classifyTerminalMultiplexer(orcaEnv)).toBe("orca");
+		expect(isInsideTerminalMultiplexer(orcaEnv)).toBe(true);
+		expect(classifyTerminalMultiplexer({ ...orcaEnv, TMUX: "session" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ ...orcaEnv, ZELLIJ: "session" })).toBe("zellij");
+		expect(classifyTerminalMultiplexer({ ...orcaEnv, TERM: "tmux-256color" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ ...orcaEnv, TERM: "screen-256color" })).toBe("screen");
+		expect(classifyTerminalMultiplexer({ TERM_PROGRAM: "orca" })).toBe(null);
+		expect(classifyTerminalMultiplexer({ ORCA_PANE_KEY: "tab-1:12345678-1234-1234-1234-123456789abc" })).toBe(null);
+		expect(classifyTerminalMultiplexer({ ORCA_WORKTREE_ID: "worktree-1" })).toBe(null);
 	});
 
 	it("recognizes session markers through the generic render-path gate", () => {

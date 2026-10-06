@@ -1,6 +1,7 @@
 import { assertNever, processCli, validateRequest } from "./terminal-launch/shared";
 import { launchCmux } from "./terminal-launch/cmux";
 import { launchHerdr } from "./terminal-launch/herdr";
+import { launchOrca } from "./terminal-launch/orca";
 import { launchTmux } from "./terminal-launch/tmux";
 import { launchZellij } from "./terminal-launch/zellij";
 import type { TerminalLaunchDependencies, TerminalLaunchRequest, TerminalLaunchResult } from "./terminal-launch/types";
@@ -28,6 +29,8 @@ export function createTerminalLauncher(dependencies: TerminalLaunchDependencies 
 				return launchHerdr(request, context);
 			case "cmux":
 				return launchCmux(request, context);
+			case "orca":
+				return launchOrca(request, context);
 			default:
 				return assertNever(request);
 		}
