@@ -3,7 +3,7 @@
 import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { embeddedAddonFiles } from "../../natives/scripts/embed-native";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
@@ -118,7 +118,7 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	try {
 		const docsPayload = await buildDocsIndexPayload();
 		const embeddedFiles = androidBundle
-			? await embeddedAddonFiles({ platform: "android", arch: process.arch })
+			? await embeddedAddonFiles({ platform: "android", arch: "arm64" })
 			: {};
 		// Build in-process: the docs embed payload is far larger than Linux's
 		// 128KiB per-argv-string cap, so it can never be passed as a CLI

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Linux cross-build support for a relocatable Termux Android ARM64 bundle via `CROSS_TARGET=android-arm64`, emitting the complete artifact directory at `dist/android`.
+
 ## [18.7.0] - 2026-10-06
 
 ### Added
