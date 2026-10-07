@@ -520,11 +520,18 @@ impl ControlLease {
 	}
 
 	fn background() -> CoreResult<Self> {
-		Ok(Self { _escape: None, _kernel: KernelOwner::acquire()?, running: AtomicBool::new(false) })
+		Ok(Self {
+			#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+			_escape: None,
+			_kernel: KernelOwner::acquire()?,
+			running: AtomicBool::new(false),
+		})
 	}
 
 	#[cfg(not(target_os = "macos"))]
 	fn acquire_takeover(source: &CancellationSource) -> CoreResult<Self> {
+		#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+		let _ = source;
 		let kernel = KernelOwner::acquire()?;
 		#[cfg(windows)]
 		let escape = windows::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
@@ -877,6 +884,7 @@ impl Drop for KernelLease {
 #[cfg(test)]
 pub(crate) fn grant_for_test(source: &CancellationSource) {
 	let owner = ControlLease {
+		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 		_escape: None,
 		_kernel: KernelOwner::acquire().expect("test kernel owner"),
 		running: AtomicBool::new(false),
