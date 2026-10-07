@@ -59,4 +59,12 @@ mod tests {
 	async fn accepts_a_signal_number() {
 		assert_eq!(u8::from(run("-9").await.exit_code), 1);
 	}
+
+	#[cfg(any(target_os = "android", target_os = "linux"))]
+	#[tokio::test]
+	async fn realtime_signal_bounds_reach_the_builtin_without_signalling() {
+		let max = libc::SIGRTMAX();
+		assert_eq!(u8::from(run(&format!("-{max}")).await.exit_code), 1);
+		assert_eq!(u8::from(run(&format!("-{}", max + 1)).await.exit_code), 2);
+	}
 }
