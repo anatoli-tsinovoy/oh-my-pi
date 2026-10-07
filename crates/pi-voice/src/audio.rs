@@ -106,7 +106,7 @@ impl PlaybackState {
 /// remote-audio decoder so it can feed the same speaker stream.
 #[derive(Clone)]
 pub struct PlaybackWriter {
-	tx: flume::Sender<Vec<f32>>,
+	tx:    flume::Sender<Vec<f32>>,
 	state: Arc<PlaybackState>,
 }
 
@@ -132,7 +132,7 @@ impl PlaybackWriter {
 pub struct PlaybackStream {
 	device: Option<PlaybackDevice>,
 	writer: Option<PlaybackWriter>,
-	state: Arc<PlaybackState>,
+	state:  Arc<PlaybackState>,
 }
 
 impl PlaybackStream {
