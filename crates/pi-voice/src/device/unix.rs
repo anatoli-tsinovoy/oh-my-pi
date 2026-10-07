@@ -1,8 +1,10 @@
 //! Unix default-device audio through runtime-loaded `PulseAudio`.
 //!
 //! Linux also retains the runtime-loaded ALSA fallback; Android intentionally
-//! reports the PulseAudio failure instead of probing a different audio stack.
+//! reports the `PulseAudio` failure instead of probing a different audio stack.
 
+#[cfg(target_os = "linux")]
+use std::ffi::{c_long, c_uint};
 use std::{
 	ffi::{CStr, c_char, c_int, c_void},
 	mem::{size_of, size_of_val},
@@ -15,9 +17,6 @@ use std::{
 	thread::{self, JoinHandle},
 	time::Duration,
 };
-
-#[cfg(target_os = "linux")]
-use std::ffi::{c_long, c_uint};
 
 use super::{CaptureSink, DeviceConfig, PlaybackFill};
 use crate::VoiceResult;
@@ -44,18 +43,18 @@ const SND_PCM_FORMAT_FLOAT_NATIVE: c_int = 15;
 
 #[repr(C)]
 struct PaSampleSpec {
-	format: c_int,
-	rate: u32,
+	format:   c_int,
+	rate:     u32,
 	channels: u8,
 }
 
 #[repr(C)]
 struct PaBufferAttr {
 	maxlength: u32,
-	tlength: u32,
-	prebuf: u32,
-	minreq: u32,
-	fragsize: u32,
+	tlength:   u32,
+	prebuf:    u32,
+	minreq:    u32,
+	fragsize:  u32,
 }
 
 type PaSimpleNew = unsafe extern "C" fn(
@@ -75,16 +74,16 @@ type PaSimpleRead = unsafe extern "C" fn(*mut c_void, *mut c_void, usize, *mut c
 type PaStrerror = unsafe extern "C" fn(c_int) -> *const c_char;
 
 struct PulseApi {
-	simple_new: PaSimpleNew,
-	simple_free: PaSimpleFree,
+	simple_new:   PaSimpleNew,
+	simple_free:  PaSimpleFree,
 	simple_write: PaSimpleWrite,
-	simple_read: PaSimpleRead,
-	strerror: PaStrerror,
+	simple_read:  PaSimpleRead,
+	strerror:     PaStrerror,
 }
 
 static PULSE_API: OnceLock<Result<&'static PulseApi, String>> = OnceLock::new();
 
-fn pulse_simple_library() -> &'static CStr {
+const fn pulse_simple_library() -> &'static CStr {
 	#[cfg(target_os = "android")]
 	{
 		c"libpulse-simple.so"
@@ -101,31 +100,23 @@ impl PulseApi {
 	}
 
 	fn load() -> Result<&'static Self, String> {
-		let simple = open_library(pulse_simple_library(), libc::RTLD_NOW | libc::RTLD_GLOBAL)
-			.map_err(|error| {
-				#[cfg(target_os = "android")]
-				{
-					format!(
-						"Android PulseAudio simple client library {} unavailable: {error}",
-						pulse_simple_library().to_string_lossy()
-					)
-				}
-				#[cfg(target_os = "linux")]
-				{
-					error
-				}
-			})?;
-		let pulse =
-			open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL).map_err(|error| {
-				#[cfg(target_os = "android")]
-				{
-					format!("Android PulseAudio client library libpulse.so.0 unavailable: {error}")
-				}
-				#[cfg(target_os = "linux")]
-				{
-					error
-				}
-			})?;
+		let simple_result = open_library(pulse_simple_library(), libc::RTLD_NOW | libc::RTLD_GLOBAL);
+		#[cfg(target_os = "android")]
+		let simple = simple_result.map_err(|error| {
+			format!(
+				"Android PulseAudio simple client library {} unavailable: {error}",
+				pulse_simple_library().to_string_lossy()
+			)
+		})?;
+		#[cfg(target_os = "linux")]
+		let simple = simple_result?;
+		let pulse_result = open_library(c"libpulse.so.0", libc::RTLD_NOW | libc::RTLD_GLOBAL);
+		#[cfg(target_os = "android")]
+		let pulse = pulse_result.map_err(|error| {
+			format!("Android PulseAudio client library libpulse.so.0 unavailable: {error}")
+		})?;
+		#[cfg(target_os = "linux")]
+		let pulse = pulse_result?;
 
 		// SAFETY: each symbol is resolved from the library defining this exact C
 		// API.
@@ -181,15 +172,15 @@ type SndStrerror = unsafe extern "C" fn(c_int) -> *const c_char;
 
 #[cfg(target_os = "linux")]
 struct AlsaApi {
-	pcm_open: SndPcmOpen,
+	pcm_open:       SndPcmOpen,
 	pcm_set_params: SndPcmSetParams,
-	pcm_writei: SndPcmIo,
-	pcm_readi: SndPcmIo,
-	pcm_recover: SndPcmRecover,
-	pcm_wait: SndPcmWait,
-	pcm_start: SndPcmControl,
-	pcm_close: SndPcmControl,
-	strerror: SndStrerror,
+	pcm_writei:     SndPcmIo,
+	pcm_readi:      SndPcmIo,
+	pcm_recover:    SndPcmRecover,
+	pcm_wait:       SndPcmWait,
+	pcm_start:      SndPcmControl,
+	pcm_close:      SndPcmControl,
+	strerror:       SndStrerror,
 }
 
 #[cfg(target_os = "linux")]
@@ -335,8 +326,11 @@ impl PulseStream {
 		direction: c_int,
 		attr: &PaBufferAttr,
 	) -> Result<Self, String> {
-		let spec =
-			PaSampleSpec { format: PA_SAMPLE_FLOAT32_NATIVE, rate: config.sample_rate, channels: 1 };
+		let spec = PaSampleSpec {
+			format:   PA_SAMPLE_FLOAT32_NATIVE,
+			rate:     config.sample_rate,
+			channels: 1,
+		};
 		let mut error = 0;
 		// SAFETY: all pointers reference valid values for the duration of
 		// pa_simple_new.
@@ -522,18 +516,18 @@ fn pulse_attr(
 	Ok(if direction == PA_STREAM_RECORD {
 		PaBufferAttr {
 			maxlength: backlog_bytes,
-			tlength: u32::MAX,
-			prebuf: u32::MAX,
-			minreq: u32::MAX,
-			fragsize: period_bytes,
+			tlength:   u32::MAX,
+			prebuf:    u32::MAX,
+			minreq:    u32::MAX,
+			fragsize:  period_bytes,
 		}
 	} else {
 		PaBufferAttr {
 			maxlength: backlog_bytes,
-			tlength: latency_bytes,
-			prebuf: u32::MAX,
-			minreq: u32::MAX,
-			fragsize: u32::MAX,
+			tlength:   latency_bytes,
+			prebuf:    u32::MAX,
+			minreq:    u32::MAX,
+			fragsize:  u32::MAX,
 		}
 	})
 }
@@ -837,10 +831,10 @@ impl Drop for ThreadDone {
 }
 
 struct RunningDevice {
-	stop: AtomicBool,
-	delivery: Arc<DeliveryGate>,
+	stop:      AtomicBool,
+	delivery:  Arc<DeliveryGate>,
 	worker_id: OnceLock<thread::ThreadId>,
-	error: Mutex<Option<String>>,
+	error:     Mutex<Option<String>>,
 }
 
 fn finish(
@@ -889,8 +883,8 @@ fn finish(
 		.map_or(Ok(()), Err)
 }
 
-/// The per-direction parts of a Unix worker: PulseAudio everywhere and ALSA on
-/// Linux.
+/// The per-direction parts of a Unix worker: `PulseAudio` everywhere and ALSA
+/// on Linux.
 struct Direction<C> {
 	name:       &'static str,
 	pulse:      c_int,
@@ -911,26 +905,26 @@ struct Direction<C> {
 }
 
 const PLAYBACK: Direction<PlaybackFill> = Direction {
-	name:       "playback",
-	pulse:      PA_STREAM_PLAYBACK,
+	name: "playback",
+	pulse: PA_STREAM_PLAYBACK,
 	#[cfg(target_os = "linux")]
-	alsa:       SND_PCM_STREAM_PLAYBACK,
+	alsa: SND_PCM_STREAM_PLAYBACK,
 	pulse_loop: pulse_playback_loop,
 	#[cfg(target_os = "linux")]
-	alsa_loop:  alsa_playback_loop,
+	alsa_loop: alsa_playback_loop,
 };
 
 const CAPTURE: Direction<CaptureSink> = Direction {
-	name:       "capture",
-	pulse:      PA_STREAM_RECORD,
+	name: "capture",
+	pulse: PA_STREAM_RECORD,
 	#[cfg(target_os = "linux")]
-	alsa:       SND_PCM_STREAM_CAPTURE,
+	alsa: SND_PCM_STREAM_CAPTURE,
 	pulse_loop: pulse_capture_loop,
 	#[cfg(target_os = "linux")]
-	alsa_loop:  alsa_capture_loop,
+	alsa_loop: alsa_capture_loop,
 };
 
-/// Running PulseAudio, with a Linux ALSA fallback, for either direction.
+/// Running `PulseAudio`, with a Linux ALSA fallback, for either direction.
 pub struct Device {
 	running: Arc<RunningDevice>,
 	thread:  Option<JoinHandle<()>>,
@@ -1027,8 +1021,8 @@ impl Device {
 				}
 				#[cfg(target_os = "android")]
 				let _ = opened_tx.send(Err(format!(
-					"Android PulseAudio {name} unavailable; ensure a PulseAudio server is running and reachable \
-					 (set PULSE_SERVER if needed): {pulse_error}"
+					"Android PulseAudio {name} unavailable; ensure a PulseAudio server is running and \
+					 reachable (set PULSE_SERVER if needed): {pulse_error}"
 				)));
 			})
 			.map_err(|error| format!("could not start {name} worker: {error}"))?;
