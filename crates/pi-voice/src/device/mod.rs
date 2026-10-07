@@ -70,7 +70,7 @@ pub struct DeviceConfig {
 	/// Logical client-side sample rate in Hz; the OS converts to hardware.
 	pub sample_rate: u32,
 	/// Target callback period in milliseconds.
-	pub period_ms: u32,
+	pub period_ms:   u32,
 }
 
 impl DeviceConfig {
