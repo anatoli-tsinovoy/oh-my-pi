@@ -64,6 +64,41 @@ bun run build
 bun run check
 ```
 
+Android ARM64 has an explicit experimental Bazel cross-target for the native
+addon; it is not part of the `all` native aggregate. From a Linux host with
+Bazel and Android NDK 25b or newer, build just the addon from the workspace
+root:
+
+```sh
+ANDROID_NDK_HOME=/path/to/android-ndk bun scripts/bazel-natives.ts android-arm64
+```
+
+The installer targets API level 24 and installs
+`packages/natives/native/pi_natives.android-arm64.node`. It only load-probes
+artifacts native to the current host, so a Linux builder never loads Android.
+
+To cross-build the complete coding-agent Android bundle, use the separate
+optional Linux-host command:
+
+```sh
+ANDROID_NDK_HOME=/path/to/android-ndk bun --cwd=packages/coding-agent run build:android
+```
+
+It uses the same Bazel target and writes `packages/coding-agent/dist/android`;
+the generic `build` and `CROSS_TARGET` paths remain for ordinary Bun
+host/cross-target builds. This is not a Termux source build. Termux source
+builds remain on the separate `backup/android-build-before-hybrid-20261007`
+escape hatch; the regular `build-bindings.ts` path does not set
+`RUSTC_BOOTSTRAP`.
+
+The Android addon omits the native desktop and clipboard modules. The desktop
+declarations remain available for type compatibility, but Android does not
+provide desktop sessions. The package root and
+`@oh-my-pi/pi-natives/desktop` can both be imported; calling
+`createDesktopSession()` from the subpath throws
+`Unsupported: desktop sessions are not supported on this platform.` No Android
+screen-capture or input support is provided.
+
 ## Architecture
 
 `@oh-my-pi/pi-natives` publishes a small core package plus generated

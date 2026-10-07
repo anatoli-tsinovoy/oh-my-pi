@@ -1,6 +1,27 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added an explicit Android ARM64 Bazel cross-target using the Android NDK
+  toolchain and API level 24; it remains outside the shipping native
+  aggregates. The optional Linux-host coding-agent `build:android` bundle
+  cross-build uses the same target and leaves generic `build`/`CROSS_TARGET` behavior unchanged.
+
+### Changed
+
+- Added Android ARM64 Bionic process-management support. Native source builds on
+  Termux remain in the separate `backup/android-build-before-hybrid-20261007`
+  escape hatch; this branch's `build-bindings.ts` does not set
+  `RUSTC_BOOTSTRAP`. Clipboard integration remains Termux API based.
+- Android omits the native desktop and clipboard modules. Desktop declarations
+  remain for type compatibility, but `createDesktopSession()` throws
+  `Unsupported: desktop sessions are not supported on this platform.` Android
+  does not provide desktop capture or input.
+
+### Fixed
+
+- Android native-load failures now report attempted addon paths and rebuild guidance instead of incorrectly reporting an unsupported platform.
 
 ## [18.7.0] - 2026-10-06
 

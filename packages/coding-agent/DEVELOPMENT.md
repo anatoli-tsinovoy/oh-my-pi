@@ -22,6 +22,16 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Autofix: lint + format prompts | `bun run fix` |
 | Build the `dist/omp` binary | `bun run build` |
 
+## Optional Android ARM64 bundle
+
+From a Linux build host, run:
+
+```sh
+bun --cwd=packages/coding-agent run build:android
+```
+
+Set `ANDROID_NDK_HOME` to an installed Android NDK. This optional Linux cross-build uses the canonical Bazel `android-arm64` native driver and the existing Android bundle generator, writing the complete relocatable bundle to `packages/coding-agent/dist/android`. It does not produce a Bun-compiled executable or provide a Termux-host build path.
+
 Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
 with `bun run gen:tool-views`.

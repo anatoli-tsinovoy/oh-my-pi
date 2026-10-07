@@ -538,6 +538,7 @@ mod tests {
 	/// not depend on an interactive desktop or Accessibility permissions.
 	fn grant_for_test(source: &CancellationSource) {
 		let owner = ControlLease {
+			#[cfg(target_os = "linux")]
 			_escape: None,
 			_kernel: KernelOwner::acquire().expect("test kernel owner"),
 			running: AtomicBool::new(false),

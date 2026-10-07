@@ -56,9 +56,10 @@ if (
 }
 const transformersVersion = transformersManifest.version;
 
-async function runCommand(command: string[]): Promise<void> {
+async function runCommand(command: string[], env?: Record<string, string | undefined>): Promise<void> {
 	const proc = Bun.spawn(command, {
 		cwd: packageDir,
+		env: env ?? Bun.env,
 		stdout: "inherit",
 		stderr: "inherit",
 	});
@@ -69,7 +70,8 @@ async function runCommand(command: string[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
+	const crossTarget = Bun.env.CROSS_TARGET;
+	const crossBuild = resolveCrossBuild(crossTarget);
 	const shouldAdhocSign =
 		process.platform === "darwin" &&
 		(!crossBuild || crossBuild.platform === "darwin") &&
