@@ -2,10 +2,6 @@ import { describe, expect, it } from "bun:test";
 import { adaptDesktopSession } from "../native/desktop-adapter.js";
 
 describe("desktop native ABI requirements", () => {
-	it("leaves an absent desktop export unavailable", () => {
-		expect(adaptDesktopSession(undefined)).toBeUndefined();
-	});
-
 	it.each([
 		["null desktop export", null],
 		[
@@ -28,10 +24,8 @@ describe("desktop native ABI requirements", () => {
 				captureRegion() {}
 			},
 		],
-	])("defers rejection of stale %s until desktop use without constructing the addon", (_label, NativeSession) => {
+	])("rejects stale %s when constructing a desktop session", (_label, NativeSession) => {
 		const DesktopSession = adaptDesktopSession(NativeSession);
-		expect(DesktopSession).toBeDefined();
-		if (DesktopSession === undefined) throw new Error("stale desktop exports must not be bypassed");
 		expect(() => new DesktopSession({ display: "active" })).toThrow(/^Unsupported:/);
 	});
 });

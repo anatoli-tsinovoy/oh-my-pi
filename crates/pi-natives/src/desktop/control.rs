@@ -324,6 +324,8 @@ struct ControlLease {
 
 impl ControlLease {
 	fn acquire(source: &CancellationSource) -> CoreResult<Self> {
+		#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+		let _ = source;
 		let kernel = KernelOwner::acquire()?;
 		#[cfg(target_os = "macos")]
 		let escape = macos::EscapeMonitor::start(EmergencyStop(Arc::downgrade(&source.0)))?;
@@ -538,6 +540,11 @@ mod tests {
 	/// not depend on an interactive desktop or Accessibility permissions.
 	fn grant_for_test(source: &CancellationSource) {
 		let owner = ControlLease {
+			#[cfg(target_os = "macos")]
+			_escape: None,
+			#[cfg(windows)]
+			_escape: None,
+			#[cfg(target_os = "linux")]
 			_escape: None,
 			_kernel: KernelOwner::acquire().expect("test kernel owner"),
 			running: AtomicBool::new(false),
