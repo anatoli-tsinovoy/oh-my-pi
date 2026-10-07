@@ -4,7 +4,12 @@
 
 ### Added
 
-- Added Linux cross-build support for a relocatable Termux Android ARM64 bundle via `CROSS_TARGET=android-arm64`, emitting the complete artifact directory at `dist/android`.
+- Added optional Linux-host `bun run build:android` for a relocatable Termux Android ARM64 bundle in `dist/android`; the generic `bun run build` remains the ordinary host/cross binary builder.
+
+### Changed
+
+- Android desktop-session requests now fail explicitly with `Unsupported: desktop sessions are not supported on this platform.`
+- Android clipboard routing no longer calls the native clipboard bridge: Termux uses its bounded clipboard helpers, while other Android environments retain OSC 52 copy and return empty/no-image reads.
 
 ## [18.7.0] - 2026-10-06
 
