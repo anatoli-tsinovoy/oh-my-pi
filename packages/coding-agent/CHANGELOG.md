@@ -4,11 +4,11 @@
 
 ### Breaking Changes
 
-- Replaced `SessionManager.onEntryAppended` with `subscribeToAppendedEntries(listener)`, which returns an unsubscribe function and allows independent session-entry observers.
+- Replaced `SessionManager.onEntryAppended` with `subscribeToAppendedEntries(listener)`, which returns an unsubscribe function and allows independent session-entry observers ([#14979](https://github.com/can1357/oh-my-pi/pull/14979) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Added
 
-- Added `/seance` and the `seance` task agent to consult prior-session forks over IRC with read/grep/glob-only access and a saved or one-off model. Original history is unchanged, and only new consultation usage counts toward the current session cost.
+- Added `/seance` and the `seance` task agent to consult prior-session forks over IRC with read/grep/glob-only access and a saved or one-off model. Original history is unchanged, and only new consultation usage counts toward the current session cost ([#14979](https://github.com/can1357/oh-my-pi/pull/14979) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Fixed
 

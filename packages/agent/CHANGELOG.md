@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added reported model-usage callbacks for compaction attempts so callers can include summary and fallback-generation costs in their estimates.
+- Added reported model-usage callbacks for compaction attempts so callers can include summary and fallback-generation costs in their estimates ([#14979](https://github.com/can1357/oh-my-pi/pull/14979) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.8.1] - 2026-10-07
 

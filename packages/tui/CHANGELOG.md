@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed the cost status-line segment accounting for new subagent and background-model usage without counting seance spend twice.
+- Fixed the cost status-line segment accounting for new subagent and background-model usage without counting seance spend twice ([#14979](https://github.com/can1357/oh-my-pi/pull/14979) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.8.4] - 2026-10-08
 
