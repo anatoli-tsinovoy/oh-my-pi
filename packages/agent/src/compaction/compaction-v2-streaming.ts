@@ -36,6 +36,12 @@ import {
 import { $env, isUnexpectedSocketCloseMessage, logger, ptree, stringifyJson } from "@oh-my-pi/pi-utils";
 import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
 import { prepareBedrockCompactionRequest } from "./bedrock";
+import {
+	type CompactionUsageCallback,
+	createCompactionUsageReport,
+	normalizeResponsesCompactionUsage,
+	reportCompactionUsage,
+} from "./usage";
 
 // ============================================================================
 // Types & Configuration
@@ -257,6 +263,7 @@ export async function requestCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		onUsage?: CompactionUsageCallback;
 	},
 ): Promise<CompactionV2Response> {
 	let fetchImpl: FetchImpl = options?.fetch ?? globalThis.fetch;
@@ -296,6 +303,7 @@ export async function requestCompactionV2Streaming(
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
+				onUsage: options?.onUsage,
 			});
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
@@ -332,6 +340,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		onUsage?: CompactionUsageCallback;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -361,7 +370,7 @@ async function attemptCompactionV2Streaming(
 				implementation: "responses_compaction_v2",
 			}),
 		});
-		return collectCompactionV2Events(eventStream, request);
+		return collectCompactionV2Events(eventStream, request, model, options.onUsage);
 	}
 
 	const response = await fetchImpl(endpoint, {
@@ -379,17 +388,15 @@ async function attemptCompactionV2Streaming(
 			statusText: response.statusText,
 			errorText: cause.captured.bodyText ?? "",
 		});
-		throw new AIError.ProviderHttpError(
-			`V2 remote compaction failed (${response.status} ${response.statusText})`,
-			response.status,
-			{
-				headers: response.headers,
-				cause,
-			},
-		);
+		const errorMessage = `V2 remote compaction failed (${response.status} ${response.statusText})`;
+		reportV2HttpErrorUsage(model, request.body.model, options.onUsage, cause.captured.bodyText, errorMessage);
+		throw new AIError.ProviderHttpError(errorMessage, response.status, {
+			headers: response.headers,
+			cause,
+		});
 	}
 
-	return collectCompactionV2Output(response, request);
+	return collectCompactionV2Output(response, request, model, options.onUsage);
 }
 
 function buildCompactionV2Headers(
@@ -445,22 +452,36 @@ interface CompactionV2CollectionState {
 	compactionItems: Array<Record<string, unknown>>;
 	sawCompleted: boolean;
 	usage: CompactionV2Usage | undefined;
+	model: Model;
+	requestModel: string;
+	onUsage?: CompactionUsageCallback;
+	usageReported: boolean;
 }
 
-function createCompactionV2CollectionState(): CompactionV2CollectionState {
+function createCompactionV2CollectionState(
+	model: Model,
+	request: CompactionV2Request,
+	onUsage: CompactionUsageCallback | undefined,
+): CompactionV2CollectionState {
 	return {
 		outputItemCount: 0,
 		compactionItems: [],
 		sawCompleted: false,
 		usage: undefined,
+		model,
+		requestModel: request.body.model,
+		onUsage,
+		usageReported: false,
 	};
 }
 
 async function collectCompactionV2Events(
 	events: AsyncIterable<Record<string, unknown>>,
 	request: CompactionV2Request,
+	model: Model,
+	onUsage: CompactionUsageCallback | undefined,
 ): Promise<CompactionV2Response> {
-	const state = createCompactionV2CollectionState();
+	const state = createCompactionV2CollectionState(model, request, onUsage);
 	for await (const event of events) {
 		handleCompactionV2Event(event, undefined, state);
 	}
@@ -470,13 +491,15 @@ async function collectCompactionV2Events(
 async function collectCompactionV2Output(
 	response: Response,
 	request: CompactionV2Request,
+	model: Model,
+	onUsage: CompactionUsageCallback | undefined,
 ): Promise<CompactionV2Response> {
 	const reader = response.body?.getReader();
 	if (!reader) {
 		throw new Error("No response body for V2 compaction streaming");
 	}
 
-	const state = createCompactionV2CollectionState();
+	const state = createCompactionV2CollectionState(model, request, onUsage);
 	try {
 		const decoder = new TextDecoder();
 		let buffer = "";
@@ -575,6 +598,39 @@ function handleCompactionV2Event(
 	state: CompactionV2CollectionState,
 ): void {
 	const type = typeof event.type === "string" ? event.type : eventName;
+	if (
+		!state.usageReported &&
+		state.onUsage &&
+		(type === "response.completed" ||
+			type === "response.done" ||
+			type === "response.failed" ||
+			type === "response.incomplete" ||
+			type === "error")
+	) {
+		const response = isRecord(event.response) ? event.response : undefined;
+		const rawUsage = response?.usage ?? event.usage;
+		const usage = normalizeResponsesCompactionUsage(state.model, rawUsage);
+		if (usage) {
+			state.usageReported = true;
+			const failed = type === "response.failed" || type === "response.incomplete" || type === "error";
+			const errorMessage = failed ? formatCompactionV2Failure(event, type) : undefined;
+			reportCompactionUsage(
+				state.onUsage,
+				createCompactionUsageReport(
+					state.model,
+					usage,
+					typeof response?.model === "string"
+						? response.model
+						: typeof event.model === "string"
+							? event.model
+							: state.requestModel,
+					failed ? "error" : undefined,
+					errorMessage,
+				),
+			);
+		}
+	}
+
 	if (type === "response.output_item.done") {
 		state.outputItemCount++;
 		const item = event.item;
@@ -601,6 +657,36 @@ function handleCompactionV2Event(
 		const status = numberField(event, "status");
 		throw status === undefined ? new Error(message) : new AIError.ProviderHttpError(message, status);
 	}
+}
+function reportV2HttpErrorUsage(
+	model: Model,
+	requestModel: string,
+	onUsage: CompactionUsageCallback | undefined,
+	bodyText: string | undefined,
+	errorMessage: string,
+): void {
+	if (!onUsage || !bodyText) return;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(bodyText);
+	} catch {
+		return;
+	}
+	if (!isRecord(parsed)) return;
+	const response = isRecord(parsed.response) ? parsed.response : parsed;
+	const rawUsage = response.usage ?? parsed.usage;
+	const usage = normalizeResponsesCompactionUsage(model, rawUsage);
+	if (!usage) return;
+	reportCompactionUsage(
+		onUsage,
+		createCompactionUsageReport(
+			model,
+			usage,
+			typeof response.model === "string" ? response.model : requestModel,
+			"error",
+			errorMessage,
+		),
+	);
 }
 
 function parseCompactionV2Usage(event: Record<string, unknown>): CompactionV2Usage | undefined {

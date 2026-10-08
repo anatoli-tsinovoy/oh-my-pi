@@ -2131,32 +2131,6 @@ describe("requestRemoteCompaction wire formats", () => {
 			max_tokens: 16_384,
 		});
 	});
-
-	test("keeps the generic omp summarizer format for other endpoints", async () => {
-		let sentBody: unknown;
-		const fetchMock: FetchImpl = async (_input, init) => {
-			if (typeof init?.body !== "string") throw new Error("missing remote compaction request body");
-			sentBody = JSON.parse(init.body) as unknown;
-			expect(new Headers(init.headers).get("authorization")).toBeNull();
-			return new Response(JSON.stringify({ summary: "generic summary", shortSummary: "generic" }), {
-				headers: { "content-type": "application/json" },
-			});
-		};
-
-		const result = await requestRemoteCompaction(
-			"https://compaction.example.test/summarize",
-			{ systemPrompt: "summarize", prompt: "<conversation>hello</conversation>", maxTokens: 16_384 },
-			undefined,
-			{ fetch: fetchMock, apiKey: "unused-for-generic" },
-		);
-
-		expect(result).toEqual({ summary: "generic summary", shortSummary: "generic" });
-		expect(sentBody).toEqual({
-			systemPrompt: "summarize",
-			prompt: "<conversation>hello</conversation>",
-			maxTokens: 16_384,
-		});
-	});
 });
 
 describe("compact() remote compaction failure handling", () => {

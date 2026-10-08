@@ -3275,6 +3275,10 @@ pub struct SessionStats {
 	pub cost: f64,
 	#[serde(rename = "sessionFile", default, skip_serializing_if = "Option::is_none")]
 	pub session_file: Option<String>,
+	#[serde(rename = "seanceLedgerCost", default, skip_serializing_if = "Option::is_none")]
+	pub seance_ledger_cost: Option<f64>,
+	#[serde(rename = "seanceTaskCost", default, skip_serializing_if = "Option::is_none")]
+	pub seance_task_cost: Option<f64>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub credits: Option<SessionCredits>,
 	#[serde(rename = "routedModels", default, skip_serializing_if = "Option::is_none")]

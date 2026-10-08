@@ -181,6 +181,7 @@ export class FooterComponent implements Component {
 		let cacheRead = 0;
 		let cacheWrite = 0;
 		let cost = 0;
+		const sessionCost = this.session.getSessionStats?.().cost;
 		let premiumRequests = 0;
 		for (const entry of this.session.sessionManager.getEntries()) {
 			if (entry.type === "message" && entry.message?.role === "assistant") {
@@ -188,7 +189,7 @@ export class FooterComponent implements Component {
 				output += entry.message.usage.output;
 				cacheRead += entry.message.usage.cacheRead;
 				cacheWrite += entry.message.usage.cacheWrite;
-				cost += entry.message.usage.cost.total;
+				if (sessionCost === undefined) cost += entry.message.usage.cost.total;
 				premiumRequests += entry.message.usage.premiumRequests ?? 0;
 			}
 		}
@@ -210,7 +211,10 @@ export class FooterComponent implements Component {
 			if (amount) seg(key, { side: "left", priority: 1, spans: [span(`${glyph}${formatNumber(amount)}`, "dim")] });
 		}
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
-		const billing = formatBillingSummary({ cost, usingSubscription, premiumRequests, fractionDigits: 3 }, theme);
+		const billing = formatBillingSummary(
+			{ cost: sessionCost ?? cost, usingSubscription, premiumRequests, fractionDigits: 3 },
+			theme,
+		);
 		if (billing) seg("cost", { side: "left", priority: 3, spans: [span(billing, "dim")] });
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
@@ -262,6 +266,7 @@ export class FooterComponent implements Component {
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 		let totalPremiumRequests = 0;
+		const sessionCost = this.session.getSessionStats?.().cost;
 
 		for (const entry of this.session.sessionManager.getEntries()) {
 			if (entry.type === "message" && entry.message?.role === "assistant") {
@@ -269,7 +274,7 @@ export class FooterComponent implements Component {
 				totalOutput += entry.message.usage.output;
 				totalCacheRead += entry.message.usage.cacheRead;
 				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
+				if (sessionCost === undefined) totalCost += entry.message.usage.cost.total;
 				totalPremiumRequests += entry.message.usage.premiumRequests ?? 0;
 			}
 		}
@@ -322,7 +327,12 @@ export class FooterComponent implements Component {
 		const usingSubscription = state.model ? this.session.modelRegistry.isUsingOAuth(state.model) : false;
 		const { auto: autoIcon } = theme.icon;
 		const billing = formatBillingSummary(
-			{ cost: totalCost, usingSubscription, premiumRequests: totalPremiumRequests, fractionDigits: 3 },
+			{
+				cost: sessionCost ?? totalCost,
+				usingSubscription,
+				premiumRequests: totalPremiumRequests,
+				fractionDigits: 3,
+			},
 			theme,
 		);
 		if (billing) statsParts.push(billing);

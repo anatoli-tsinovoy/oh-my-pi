@@ -180,6 +180,7 @@ export class SessionHandoff {
 						return stream.result();
 					},
 					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
+					onUsage: options?.onUsage,
 					// Honor the user's /model thinking selection on the handoff path.
 					// Clamped per-model inside generateHandoffFromContext via
 					// resolveCompactionEffort so unsupported-effort models don't trip

@@ -3028,6 +3028,12 @@
 				"sessionFile": {
 					"type": "string"
 				},
+				"seanceLedgerCost": {
+					"type": "number"
+				},
+				"seanceTaskCost": {
+					"type": "number"
+				},
 				"credits": {
 					"$ref": "#/$defs/SessionCredits"
 				},

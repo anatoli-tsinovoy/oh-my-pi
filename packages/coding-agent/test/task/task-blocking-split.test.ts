@@ -27,6 +27,8 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import * as path from "node:path";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const taskAgent: AgentDefinition = {
@@ -40,6 +42,14 @@ const scoutAgent: AgentDefinition = {
 	name: "scout",
 	description: "Read-only scout",
 	systemPrompt: "You are a scout.",
+	source: "bundled",
+	blocking: true,
+};
+
+const seanceAgent: AgentDefinition = {
+	name: "seance",
+	description: "Read-only source-session consultant",
+	systemPrompt: "You are a seance agent.",
 	source: "bundled",
 	blocking: true,
 };
@@ -77,7 +87,7 @@ function makeResult(id: string, agent: string, overrides: Partial<SingleResult> 
 
 function mockDiscovery(): void {
 	vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
-		agents: [taskAgent, scoutAgent],
+		agents: [taskAgent, scoutAgent, seanceAgent],
 		projectAgentsDir: null,
 	});
 }
@@ -220,6 +230,110 @@ describe("task per-item blocking split", () => {
 		// results included — never an empty-results skeleton, and exactly once.
 		const completionUpdates = updates.filter(u => u.text.includes("Background task WorkerTwo complete."));
 		expect(completionUpdates).toHaveLength(1);
+	});
+
+	it("keeps mixed task details limited to inline usage and seance cost", async () => {
+		mockDiscovery();
+		using tempDir = TempDir.createSync("@omp-task-mixed-seance-cost-");
+		const sourceSession = path.join(tempDir.path(), "source.jsonl");
+		await Bun.write(
+			sourceSession,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "mixed-seance-source",
+				timestamp: new Date().toISOString(),
+				cwd: tempDir.path(),
+			})}\n`,
+		);
+
+		const costByAgent: Record<string, number> = {
+			seance: 10,
+			scout: 20,
+			task: 70,
+		};
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options =>
+			makeResult(options.id ?? "?", options.agent.name, {
+				usage: {
+					input: 1,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1,
+					cost: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						total: costByAgent[options.agent.name] ?? 0,
+					},
+				},
+			}),
+		);
+
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const result = await tool.execute("tc-mixed-seance-task-cost", {
+			context: "ctx",
+			tasks: [
+				{ name: "SeanceInline", agent: "seance", sourceSession, task: "Consult the source." },
+				{ name: "ScoutInline", agent: "scout", task: "Inspect normally." },
+				{ name: "WorkerAsync", agent: "task", task: "Build in the background." },
+			],
+		} as TaskParams);
+
+		expect(result.details?.results.map(r => r.id)).toEqual(["SeanceInline", "ScoutInline"]);
+		expect(result.details?.usage?.cost.total).toBe(30);
+		expect(result.details?.seanceTaskCost).toBe(10);
+	});
+
+	it("tracks the direct seance portion of merged task usage by agent identity", async () => {
+		mockDiscovery();
+		using tempDir = TempDir.createSync("@omp-task-seance-cost-");
+		const sourceSession = path.join(tempDir.path(), "source.jsonl");
+		await Bun.write(
+			sourceSession,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "seance-source",
+				timestamp: new Date().toISOString(),
+				cwd: tempDir.path(),
+			})}\n`,
+		);
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const cost = options.agent.name === "seance" ? 10 : 30;
+			return makeResult(options.id ?? "?", options.agent.name, {
+				usage: {
+					input: 1,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+				},
+			});
+		});
+
+		const tool = await TaskTool.create(createSession({ settings: { "async.enabled": false, "task.batch": true } }));
+		const result = await tool.execute("tc-seance-task-cost", {
+			context: "ctx",
+			tasks: [
+				{ name: "SeanceA", agent: "seance", sourceSession, task: "Consult the source." },
+				{ name: "SeanceB", agent: "seance", sourceSession, task: "Consult the source again." },
+				{ name: "Scout", agent: "scout", task: "Inspect normally." },
+			],
+		} as TaskParams);
+
+		expect(result.details?.usage?.cost.total).toBe(50);
+		expect(result.details?.seanceTaskCost).toBe(20);
+		const singleResult = await tool.execute("tc-seance-single-cost", {
+			agent: "seance",
+			sourceSession,
+			task: "Consult the source.",
+		} as TaskParams);
+		expect(singleResult.details?.usage?.cost.total).toBe(10);
+		expect(singleResult.details?.seanceTaskCost).toBe(10);
 	});
 
 	it("keeps an all-blocking batch fully synchronous", async () => {

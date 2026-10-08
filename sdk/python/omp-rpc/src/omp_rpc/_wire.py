@@ -806,6 +806,8 @@ class SessionStats:
     premium_requests: float
     cost: float
     session_file: str | None = None
+    seance_ledger_cost: float | None = None
+    seance_task_cost: float | None = None
     credits: SessionCredits | None = None
     routed_models: dict[str, float] | None = None
     context_usage: ContextUsage | None = None
@@ -2100,6 +2102,8 @@ def parse_session_stats(value: object, path: str = "SessionStats") -> SessionSta
         premium_requests=required(payload, "premiumRequests", decode_float, path),
         cost=required(payload, "cost", decode_float, path),
         session_file=optional(payload, "sessionFile", decode_str, path),
+        seance_ledger_cost=optional(payload, "seanceLedgerCost", decode_float, path),
+        seance_task_cost=optional(payload, "seanceTaskCost", decode_float, path),
         credits=optional(payload, "credits", parse_session_credits, path),
         routed_models=optional(payload, "routedModels", record(decode_float), path),
         context_usage=optional(payload, "contextUsage", parse_context_usage, path),

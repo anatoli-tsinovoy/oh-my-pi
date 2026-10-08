@@ -24,6 +24,8 @@ import {
 	followMCPTools,
 	subagentRetryFallbackRole,
 } from "./executor";
+import { SEANCE_ACTIVE_TOOL_NAMES } from "./seance";
+import { createParentSubagentUsageRecorder, subscribeToSeanceAuxiliaryUsage } from "./subagent-usage";
 import { cfgTaskAgentAccountPools } from "./settings";
 import type { AgentDefinition } from "./types";
 
@@ -116,6 +118,7 @@ export function createPersistedSubagentReviverFactory(
 					`Cannot revive subagent "${ref.id}": session file "${sessionFile}" has no persisted session contract. The agent was not revived.`,
 				);
 			}
+			const isSeance = init.agent?.trim().toLowerCase() === "seance";
 			if (!hasConversationalHistory(entries)) {
 				await reopened.close();
 				throw new Error(
@@ -156,19 +159,26 @@ export function createPersistedSubagentReviverFactory(
 			// Older session files persisted the synthetic xd:// write transport in the
 			// enabled set. A read-only agent definition could never grant full write,
 			// so remove that transport name before replaying tools as explicit grants.
-			const revivedToolNames =
-				init.readOnly === true && init.tools.includes("write")
+			const revivedToolNames = isSeance
+				? [...SEANCE_ACTIVE_TOOL_NAMES]
+				: init.readOnly === true && init.tools.includes("write")
 					? init.tools.filter(name => name !== "write")
 					: init.tools;
 			const artifactManager = ctx.session.sessionManager.getArtifactManager();
-			if (artifactManager) reopened.adoptArtifactManager(artifactManager);
+			if (!isSeance && artifactManager) reopened.adoptArtifactManager(artifactManager);
 			// A restricted persisted contract must not consult process-global MCP
 			// state: same-name MCP tools are untrusted capability sources.
-			const restrictToolNames = init.restrictToolNames === true;
+			const restrictToolNames = init.restrictToolNames === true || isSeance;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const parentUsageRecorder = isSeance
+				? createParentSubagentUsageRecorder(ctx.session.sessionManager)
+				: undefined;
+			const unsubscribeAuxiliaryUsage = isSeance
+				? subscribeToSeanceAuxiliaryUsage(reopened, parentUsageRecorder)
+				: undefined;
 			let session: AgentSession;
 			try {
 				({ session } = await createAgentSession({
@@ -214,8 +224,8 @@ export function createPersistedSubagentReviverFactory(
 					requireYieldTool: true,
 					systemPrompt: () => [...init.systemPrompt],
 					// Inherit current owner policy, never extension authority from a transcript.
-					extensionRoots: () => ctx.session.effectiveExtensionRoots,
-					preloadedPreparedExtensions: ctx.session.preparedExtensions,
+					extensionRoots: isSeance ? undefined : () => ctx.session.effectiveExtensionRoots,
+					preloadedPreparedExtensions: isSeance ? [] : ctx.session.preparedExtensions,
 					// Old files predate persisted spawns: deny re-spawning rather than let
 					// createAgentSession default to wildcard ("*").
 					spawns: init.spawns ?? "",
@@ -235,9 +245,11 @@ export function createPersistedSubagentReviverFactory(
 							}),
 				}));
 			} catch (error) {
+				unsubscribeAuxiliaryUsage?.();
 				mcpFollower?.dispose();
 				throw error;
 			}
+			if (unsubscribeAuxiliaryUsage) session.addDisposer(unsubscribeAuxiliaryUsage);
 			mcpFollower?.bind(session);
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
@@ -245,17 +257,15 @@ export function createPersistedSubagentReviverFactory(
 			await session.setActiveToolsByName([...revivedToolNames, ...session.getMountedXdevToolNames()]);
 			// The yield tool's schema carries the last batch's items; the replayed prefix must match it.
 			if (init.workPoolYieldItems) await session.setWorkPoolYieldItems(init.workPoolYieldItems);
-			// Wire the extension runtime exactly as the live executor does. Without
-			// this the runner stays pre-init, every action method throws
-			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that
-			// touches a runtime action trips the fail-closed gate in `emitToolCall`,
-			// blocking every tool — including the hidden `yield` — in the revived
-			// agent. `session_start` also re-runs so extensions restore per-session
-			// state (issue #8824).
-			await initializeExtensions(session, {
-				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
-				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-			});
+			// Normal subagents must rebuild extension runtime state before tools run.
+			// Seance intentionally skips this owner-extension authority on every revival path.
+			if (!isSeance) {
+				await initializeExtensions(session, {
+					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+					reportRuntimeError: err =>
+						logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+				});
+			}
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// The internal run-state signal precedes deferrable public `agent_end`,
@@ -280,6 +290,7 @@ export function createPersistedSubagentReviverFactory(
 				// Anchor artifacts to the revived ref's own dir (its parent's children
 				// dir), not the live root session's, matching the spawn callers (#11563).
 				artifactsDir: path.dirname(sessionFile),
+				onAssistantUsage: parentUsageRecorder ? usage => parentUsageRecorder(usage, "seance-irc-wake") : undefined,
 			});
 			return session;
 		};

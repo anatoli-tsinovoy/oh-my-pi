@@ -77,6 +77,7 @@ export function sumSubagentTreeCost(args: {
 	const observedById = new Map<string, ObservableSession>();
 	for (const ref of args.refs) {
 		if (ref.id === MAIN_AGENT_ID) continue;
+		if (ref.history?.agent === "seance") continue;
 		if (ref.kind === "advisor" && (ref.parentId ?? MAIN_AGENT_ID) === MAIN_AGENT_ID) continue;
 		const observed = observers.getSession(ref.id);
 		const inTree = ref.sessionFile

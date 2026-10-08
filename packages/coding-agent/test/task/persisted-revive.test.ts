@@ -16,6 +16,7 @@ import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import * as runtimeInitModule from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import type { AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
@@ -385,6 +386,49 @@ describe("persisted subagent revival", () => {
 		} finally {
 			await revived?.dispose();
 			authStorage.close();
+		}
+	});
+	it("does not restore parent prepared extensions on a cold seance revive", async () => {
+		AgentRegistry.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-seance-extension-");
+		const sessionFile = await createPersistedSession(cwd, true, undefined, undefined, {
+			agent: "seance",
+			readOnly: true,
+			tools: ["read", "grep", "glob", "yield"],
+		});
+		const preparedExtensions: PreparedExtension[] = [
+			{
+				path: "<parent-extension>",
+				resolvedPath: "<parent-extension>",
+				factory: () => undefined,
+				error: null,
+			},
+		];
+		let captured: CreateAgentSessionOptions | undefined;
+		const activeToolNames: string[][] = [];
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(runtimeInitModule, "initializeExtensions").mockResolvedValue(undefined);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			captured = options;
+			handle = createRevivedSession(activeToolNames);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+
+		const ref = AgentRegistry.global().register(createRef(sessionFile));
+		const reviver = await createFactory(cwd, undefined, { preparedExtensions })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+
+		let revived: AgentSession | undefined;
+		try {
+			revived = await reviver(ref);
+			expect(captured?.restrictToolNames).toBe(true);
+			expect(captured?.extensionRoots).toBeUndefined();
+			expect(captured?.preloadedPreparedExtensions).toEqual([]);
+			expect(runtimeInitModule.initializeExtensions).not.toHaveBeenCalled();
+			expect(activeToolNames.at(-1)).toEqual(["read", "grep", "glob", "yield"]);
+		} finally {
+			await revived?.dispose();
+			AgentRegistry.resetGlobalForTests();
 		}
 	});
 

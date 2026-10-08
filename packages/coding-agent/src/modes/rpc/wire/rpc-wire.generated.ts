@@ -633,6 +633,8 @@ export interface SessionStats {
 	premiumRequests: number;
 	cost: number;
 	sessionFile?: string;
+	seanceLedgerCost?: number;
+	seanceTaskCost?: number;
 	credits?: SessionCredits;
 	routedModels?: Record<string, number>;
 	contextUsage?: ContextUsage;

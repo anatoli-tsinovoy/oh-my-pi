@@ -2216,6 +2216,10 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to this child. */
 	tools?: string[];
+	/** Prior persisted session forked by a seance child; accepted only with `agent: "seance"`. */
+	sourceSession?: string;
+	/** Per-invocation model selector; a string array represents ordered fallback candidates. */
+	model?: string | string[];
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
 }
@@ -2243,6 +2247,10 @@ export interface TaskParams {
 	schemaMode?: "permissive" | "strict";
 	/** Eval-defined tool names exposed to the flat-form child. */
 	tools?: string[];
+	/** Prior persisted session forked by a seance child; accepted only with `agent: "seance"`. */
+	sourceSession?: string;
+	/** Per-invocation model selector; a string array represents ordered fallback candidates. */
+	model?: string | string[];
 	/** Batch form (`task.batch`): one subagent per item. */
 	tasks?: TaskItem[];
 	/** Batch form: shared background prepended to every assignment; required by the batch schema. */
@@ -2369,6 +2377,8 @@ export interface AgentProgress {
 	resolvedModelIsFallback?: boolean;
 	/** Extension routing note (e.g. model-pools) explaining why {@link resolvedModel} was chosen. */
 	resolvedModelRoute?: string;
+	/** SDK notice when the source session's preferred model could not be restored. */
+	modelFallbackMessage?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
 	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */
@@ -2450,6 +2460,8 @@ export interface SingleResult {
 	resolvedModelIsFallback?: boolean;
 	/** Mirrors {@link AgentProgress.resolvedModelRoute} onto the settled result. */
 	resolvedModelRoute?: string;
+	/** SDK notice when the source session's preferred model could not be restored. */
+	modelFallbackMessage?: string;
 	/** Retains {@link AgentProgress.advisor} after the advised session is disposed. */
 	advisor?: boolean;
 	error?: string;
@@ -2512,6 +2524,8 @@ export interface TaskToolDetails {
 	totalDurationMs: number;
 	/** Aggregated usage across all subagents. */
 	usage?: Usage;
+	/** Direct spend from seance results, also included in `usage.cost`. */
+	seanceTaskCost?: number;
 	outputPaths?: string[];
 	progress?: AgentProgress[];
 	async?: {

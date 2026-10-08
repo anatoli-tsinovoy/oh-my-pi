@@ -1824,6 +1824,8 @@ export interface InstrumentedChatSpanOptions {
 	 * (3 attempts, 500ms base backoff, `retry-after` honored).
 	 */
 	readonly retry?: OneshotRetryOptions;
+	/** Receives every returned completion before retry classification or caller parsing. */
+	readonly onAttempt?: (message: AssistantMessage) => void;
 }
 
 /**
@@ -1889,11 +1891,23 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 			// oneshots. `getResponseHeaders` hands the failed attempt's headers to
 			// the retry layer — an AssistantMessage carries none, so this is what
 			// makes `retry-after` on a real 429/529 actually honored.
-			const runOnce = () => {
+			const runOnce = async () => {
 				// Clear first so a previous attempt's `retry-after` can never be
 				// reused for a later failure that arrived without headers.
 				capturedHeaders = undefined;
-				return complete(model, ctx, { ...options, onResponse: captureOnResponse });
+				if (!span.onAttempt) return complete(model, ctx, { ...options, onResponse: captureOnResponse });
+				let lastAttempt: AssistantMessage | undefined;
+				const onAttempt = (message: AssistantMessage): void => {
+					lastAttempt = message;
+					span.onAttempt?.(message);
+				};
+				const message = await complete(model, ctx, {
+					...options,
+					onResponse: captureOnResponse,
+					onAttempt,
+				});
+				if (lastAttempt !== message) onAttempt(message);
+				return message;
 			};
 			const message = span.retry
 				? await retryTransientCompletion(runOnce, {

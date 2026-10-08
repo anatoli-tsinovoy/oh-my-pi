@@ -14,6 +14,10 @@ interface CostCtxOptions {
 	cost?: number;
 	/** Task-result portion of `cost`. */
 	subagentCost?: number;
+	/** Seance task-result portion of `subagentCost`. */
+	seanceTaskCost?: number;
+	/** Seance ledger portion included in canonical `cost`. */
+	seanceLedgerCost?: number;
 	subagentTreeCost?: number;
 	advisorCost?: number;
 	model?: Model;
@@ -34,6 +38,8 @@ function costCtx(options: CostCtxOptions): SegmentContext {
 			premiumRequests: options.premiumRequests ?? 0,
 			cost: options.cost ?? 0,
 			subagentCost: options.subagentCost,
+			seanceTaskCost: options.seanceTaskCost,
+			seanceLedgerCost: options.seanceLedgerCost,
 			tokensPerSecond: null,
 		},
 		subagentTreeCost: options.subagentTreeCost,
@@ -136,6 +142,24 @@ describe("cost status-line segment", () => {
 		expect(render({ cost: 0.5, subagentCost: 0.12, subagentTreeCost: 0.4 })).toBe("$0.38 (+0.40)");
 		// A lagging tree total (roster not hydrated yet) never drops below task results.
 		expect(render({ cost: 0.5, subagentCost: 0.12, subagentTreeCost: 0.05 })).toBe("$0.38 (+0.12)");
+		// Seance-only lifetime spend comes from the active-branch ledger, not the latest tree turn.
+		expect(render({ cost: 180, seanceLedgerCost: 50 })).toBe("$130.00 (+50.00)");
+		// Normal async work remains visible even though its estimate is not in canonical spend.
+		expect(render({ cost: 130, subagentTreeCost: 30 })).toBe("$130.00 (+30.00)");
+		// Completed normal task results remain deduplicated against the normal tree.
+		expect(render({ cost: 210, subagentCost: 30, seanceLedgerCost: 50, subagentTreeCost: 30 })).toBe(
+			"$130.00 (+80.00)",
+		);
+		// Source sync task results are included in T; account for them once beside L.
+		expect(
+			render({
+				cost: 195,
+				subagentCost: 15,
+				seanceTaskCost: 10,
+				seanceLedgerCost: 50,
+				subagentTreeCost: 20,
+			}),
+		).toBe("$130.00 (+80.00)");
 		// Subscription spend keeps the icon only on the session's own amount.
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		expect(render({ cost: 0.38, subagentTreeCost: 0.2, usingSubscription: true, model })).toMatch(

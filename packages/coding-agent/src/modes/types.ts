@@ -28,6 +28,7 @@ import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
+import type { SessionInfo } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import type { DictationTarget } from "../stt";
@@ -113,6 +114,22 @@ export interface AgentHubOpenOptions {
 	armCloseTap?: boolean;
 	initialSection?: "agents" | "activity";
 }
+
+export interface ModelSelectionOnlyOptions {
+	onSelect(selector: string): void;
+	onCancel?(): void;
+	/** Preselected `provider/id`; defaults to the active session model. */
+	currentSelector?: string;
+}
+
+export interface ModelSelectorOptions {
+	temporaryOnly?: boolean;
+	/** Return a picked model without switching the session or changing Task defaults. */
+	selectOnly?: ModelSelectionOnlyOptions;
+}
+
+/** Returns the picked session without resuming or otherwise switching it. */
+export type SessionPickerSelection = (session: SessionInfo) => void | Promise<void>;
 
 export interface InteractiveModeContext {
 	// UI access
@@ -495,7 +512,7 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;
-	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	showModelSelector(options?: ModelSelectorOptions): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
@@ -504,7 +521,7 @@ export interface InteractiveModeContext {
 	showTreeSelector(): void;
 	/** Open the `/effort` picker over the levels the current model accepts. */
 	showThinkingSelector(): void;
-	showSessionSelector(source?: ForeignSessionSource): void;
+	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickerSelection): void;
 	/** Settle side requests before replacing the session or deleting its artifacts. */
 	prepareSessionSwitch(): Promise<void>;
 	handleResumeSession(sessionPath: string): Promise<void>;

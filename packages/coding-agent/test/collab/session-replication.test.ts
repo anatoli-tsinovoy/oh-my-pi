@@ -22,10 +22,10 @@ afterEach(async () => {
 const BIG_IMAGE_B64 = Buffer.alloc(1024, 7).toString("base64");
 
 describe("SessionManager collab replication", () => {
-	it("onEntryAppended receives the in-memory entry with inline image data while the persisted line externalizes it", async () => {
+	it("append subscribers receive the in-memory entry with inline image data while persistence externalizes it", async () => {
 		const { manager } = makeManager();
 		const captured: SessionEntry[] = [];
-		manager.onEntryAppended = entry => captured.push(entry);
+		const unsubscribe = manager.subscribeToAppendedEntries(entry => captured.push(entry));
 
 		manager.appendMessage({
 			role: "user",
@@ -52,15 +52,33 @@ describe("SessionManager collab replication", () => {
 		const persisted = lines.map(line => JSON.parse(line)).find(e => e.type === "message");
 		const persistedImage = persisted.message.content.find((c: { type: string; data?: string }) => c.type === "image");
 		expect(isBlobRef(persistedImage.data)).toBe(true);
+		unsubscribe();
 	});
 
-	it("swallows hook failures so persistence is never broken by a broadcast error", () => {
+	it("isolates append subscriber failures and unsubscribes each subscriber independently", () => {
 		const { manager } = makeManager();
-		manager.onEntryAppended = () => {
+		const captured: SessionEntry[] = [];
+		let failingCalls = 0;
+		const unsubscribeFailing = manager.subscribeToAppendedEntries(() => {
+			failingCalls++;
 			throw new Error("socket exploded");
-		};
-		const id = manager.appendMessage({ role: "user", content: "still works", timestamp: Date.now() });
-		expect(manager.getEntry(id)?.id).toBe(id);
+		});
+		const unsubscribeCapturing = manager.subscribeToAppendedEntries(entry => captured.push(entry));
+		const firstId = manager.appendMessage({ role: "user", content: "still works", timestamp: Date.now() });
+		expect(manager.getEntry(firstId)?.id).toBe(firstId);
+		expect(failingCalls).toBe(1);
+		expect(captured).toHaveLength(1);
+
+		unsubscribeCapturing();
+		const secondId = manager.appendMessage({ role: "user", content: "still works again", timestamp: Date.now() });
+		expect(manager.getEntry(secondId)?.id).toBe(secondId);
+		expect(failingCalls).toBe(2);
+		expect(captured).toHaveLength(1);
+
+		unsubscribeFailing();
+		const thirdId = manager.appendMessage({ role: "user", content: "no subscribers", timestamp: Date.now() });
+		expect(manager.getEntry(thirdId)?.id).toBe(thirdId);
+		expect(failingCalls).toBe(2);
 	});
 
 	it("ingestReplicatedEntry preserves foreign ids and advances the leaf", async () => {

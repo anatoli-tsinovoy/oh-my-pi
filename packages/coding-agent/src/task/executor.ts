@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
@@ -77,6 +77,13 @@ import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { getRestorableSessionModelsFromBranch } from "../session/session-context";
+import { SEANCE_READ_TOOL_NAMES, resolveSeanceSession } from "./seance";
+import {
+	type ParentSubagentUsage,
+	type ParentSubagentUsageRecorder,
+	subscribeToSeanceAuxiliaryUsage,
+} from "./subagent-usage";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	type ConfiguredThinkingLevel,
@@ -478,6 +485,10 @@ export interface ExecutorOptions {
 	 */
 	invokedAt?: number;
 	acquiredAt?: number;
+	/** Persisted session to fork into the child session before SDK startup. */
+	sourceSession?: string;
+	/** Active session directory used for an explicit source-session fork. */
+	sessionDir?: string;
 	sessionFile?: string | null;
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
@@ -531,12 +542,12 @@ export interface ExecutorOptions {
 	compactionThresholdOverride?: CompactionThresholdPair;
 	/** Exact-name `task.agentAccountPools` entry selected by dispatch; see `CreateAgentSessionOptions.oauthAccountPools`. */
 	oauthAccountPools?: OAuthAccountPools;
-	/** Override local:// protocol options so subagent shares parent's local:// root */
+	/** Override local:// options for ordinary subagents that share the parent's local root. */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
-	 * Parent session's ArtifactManager. Subagent adopts it so artifact IDs are
-	 * unique across the whole agent tree and all artifacts land in the parent's
-	 * artifacts directory (no per-subagent subdir).
+	 * Parent session's ArtifactManager, adopted by ordinary subagents so artifact
+	 * IDs are unique across the agent tree. Seance keeps the fork's own manager
+	 * so copied historical artifact:// and local:// references resolve there.
 	 */
 	parentArtifactManager?: ArtifactManager;
 	parentHindsightSessionState?: HindsightSessionState;
@@ -558,6 +569,8 @@ export interface ExecutorOptions {
 	 * passes its own `getAgentId()`).
 	 */
 	parentAgentId?: string;
+	/** Journals seance work that is delivered outside a parent task result. */
+	parentUsageRecorder?: ParentSubagentUsageRecorder;
 	/**
 	 * Keep the finished subagent addressable in the registry for IRC/revival.
 	 * Defaults to true. Eval bridge agents are programmatic one-shot helpers and
@@ -1167,6 +1180,8 @@ interface RunMonitorArgs {
 	subagentEventBus?: EventBus;
 	parentToolCallId?: string;
 	detached?: boolean;
+	/** Parent ledger callback for separately delivered assistant usage. */
+	onAssistantUsage?: (usage: ParentSubagentUsage) => void;
 	sessionFile?: string;
 	/** Soft assistant-request budget; 0 disables the guard. */
 	softRequestBudget: number;
@@ -2037,6 +2052,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 							accumulatedUsage.cost.total += getNumberField(costRecord, "total") ?? 0;
 							progress.cost = accumulatedUsage.cost.total;
 						}
+						if (args.onAssistantUsage && costRecord) {
+							const assistant = event.message as AssistantMessage;
+							args.onAssistantUsage({
+								api: assistant.api,
+								provider: assistant.provider,
+								model: assistant.model,
+								usage: messageUsage as unknown as Usage,
+								stopReason: assistant.stopReason,
+								...(assistant.errorMessage !== undefined ? { errorMessage: assistant.errorMessage } : {}),
+							});
+						}
 					}
 					// Accumulate tokens for progress display
 					progress.tokens += getUsageTokens(messageUsage);
@@ -2860,6 +2886,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		resolvedThinkingLevel: progress.resolvedThinkingLevel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
 		resolvedModelRoute: progress.resolvedModelRoute,
+		modelFallbackMessage: progress.modelFallbackMessage,
 		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
@@ -2892,6 +2919,8 @@ export interface IrcWakeTurnMonitorOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
+	/** Parent ledger callback for wake turns whose costs are not in its task result. */
+	onAssistantUsage?: (usage: ParentSubagentUsage) => void;
 }
 
 /** Sender + message id of one `irc:incoming` record that woke a turn. */
@@ -3141,6 +3170,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
 			// Autonomous wake turns answer a peer message; too short to probe.
+			onAssistantUsage: options.onAssistantUsage,
 			completionProbe: false,
 			signal: jobCancel.signal,
 			onYieldAccepted: registerWakeJob,
@@ -3761,6 +3791,8 @@ interface WarmReviveCapture {
 	/** Todos are parent-owned and stripped from subagents, except under prewalk (its todo gate needs them). */
 	keepTodo: boolean;
 	wake: IrcWakeTurnMonitorOptions;
+	/** Routes only newly appended hidden source model_usage entries to the root ledger. */
+	auxiliaryUsageRecorder?: ParentSubagentUsageRecorder;
 	/** Exact agent name the live `task.agentAccountPools` entry is looked up by on revive. */
 	agentName: string;
 }
@@ -3800,6 +3832,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile);
 		const mcpManager = capture.spec.options.mcpManager;
 		const mcpFollower = mcpManager ? followMCPTools(mcpManager, explicitSubagentToolNames(capture.spec)) : undefined;
+		const unsubscribeAuxiliaryUsage = subscribeToSeanceAuxiliaryUsage(reopened, capture.auxiliaryUsageRecorder);
 		let revived: AgentSession;
 		// Account pools are owner policy: take the live exact-name entry, as
 		// dispatch and persisted revival do, never the spawn-time copy.
@@ -3817,19 +3850,21 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 					: undefined,
 			}));
 		} catch (error) {
+			unsubscribeAuxiliaryUsage?.();
 			mcpFollower?.dispose();
 			throw error;
 		}
+		if (unsubscribeAuxiliaryUsage) revived.addDisposer(unsubscribeAuxiliaryUsage);
 		mcpFollower?.bind(revived);
 		trackSubagentSettings(revived, capture);
-		// Re-run the executor's extension wiring on the rebuilt session. Skipping it leaves the
-		// runner pre-init, so a `tool_call` handler touching a runtime action trips the
-		// fail-closed gate and blocks every tool (including `yield`) in the revived agent (issue #8824).
-		await initializeExtensions(revived, {
-			reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
-			reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-			filterActiveTools: toolNames => (capture.keepTodo ? toolNames : toolNames.filter(name => name !== "todo")),
-		});
+		// Rebind extensions for normal subagents; seance deliberately has no extension authority.
+		if (capture.agentName.toLowerCase() !== "seance") {
+			await initializeExtensions(revived, {
+				reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+				reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+				filterActiveTools: toolNames => (capture.keepTodo ? toolNames : toolNames.filter(name => name !== "todo")),
+			});
+		}
 		AgentRegistry.global().syncSessionStatus(id, revived);
 		attachIrcWakeTurnMonitor(revived, capture.wake);
 		return revived;
@@ -3842,7 +3877,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
 	const {
 		cwd,
-		agent,
+		agent: requestedAgent,
 		task,
 		assignment,
 		index,
@@ -3856,6 +3891,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	const isSeance = requestedAgent.name.toLowerCase() === "seance";
+	const hasExplicitModelOverride = normalizeModelPatterns(modelOverride).length > 0;
+	const usesSavedSourceModel = isSeance && options.sourceSession !== undefined && !hasExplicitModelOverride;
+	const agent = isSeance
+		? {
+				...requestedAgent,
+				tools: [...SEANCE_READ_TOOL_NAMES],
+				spawns: undefined,
+				...(usesSavedSourceModel ? { model: undefined } : {}),
+			}
+		: requestedAgent;
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
@@ -3887,10 +3933,44 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		};
 	}
 
-	// Set up artifact paths and write input file upfront if artifacts dir provided
+	// Set up artifact paths and write input file upfront if artifacts dir provided.
 	let subtaskSessionFile: string | undefined;
 	if (options.artifactsDir) {
 		subtaskSessionFile = path.join(options.artifactsDir, `${id}.jsonl`);
+	}
+	let sessionFile: string | null = subtaskSessionFile ?? null;
+	let forkedSessionManager: SessionManager | undefined;
+	let forkedSessionManagerAdopted = false;
+	let seanceContractEstablished = false;
+	if (options.sourceSession !== undefined) {
+		if (!isSeance) {
+			throw new Error("`sourceSession` is only valid with the `seance` agent.");
+		}
+		const sourcePath = await resolveSeanceSession(options.sourceSession, cwd, options.sessionDir);
+		if (subtaskSessionFile && path.resolve(subtaskSessionFile) === path.resolve(sourcePath)) {
+			throw new Error("The seance child session path must differ from its source session file.");
+		}
+		forkedSessionManager = await SessionManager.forkFrom(sourcePath, worktree ?? cwd, undefined, undefined, {
+			sessionFile: subtaskSessionFile,
+			resetInheritedCost: true,
+			repairInterruptedTail: true,
+			suppressBreadcrumb: true,
+			neutralizeInheritedSessionInit: true,
+		});
+		sessionFile = forkedSessionManager.getSessionFile() ?? null;
+		if (!sessionFile) {
+			try {
+				await forkedSessionManager.close();
+			} catch (error) {
+				logger.warn("Failed to close seance fork without a persisted path", {
+					id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			throw new Error("The seance child session fork did not produce a persisted JSONL file.");
+		}
+	} else if (isSeance) {
+		throw new Error("Agent `seance` requires a `sourceSession` ID prefix or JSONL path.");
 	}
 
 	const settings = options.settings ?? Settings.isolated();
@@ -3900,10 +3980,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// no advisor (createSubagentSettings forces `advisor.enabled` off); an
 	// explicit model pattern lands on the child's `modelRoles.advisor` so role
 	// aliases and `:level` suffixes resolve inside the spawned session.
-	const advisorSelection = resolveAgentAdvisorSelection({
-		settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
-		agentAdvisor: agent.advisor,
-	});
+	const advisorSelection = isSeance
+		? undefined
+		: resolveAgentAdvisorSelection({
+				settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
+				agentAdvisor: agent.advisor,
+			});
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
@@ -3950,6 +4032,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
+	if (isSeance) toolNames = agent.tools ?? [...SEANCE_READ_TOOL_NAMES];
 	// Agents that can start background work (`task`, `bash`) need `wait` to block on it;
 	// without it they `sleep`. Runs after `exec` expansion and the max-depth `task` strip.
 	// `createTools` still drops it when no wake source (async/IRC/services) is enabled.
@@ -3968,8 +4051,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		isIrcEnabled(subagentSettings, childDepth) &&
 		(toolNames === undefined || toolNames.includes("write"));
 
-	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
-	const sessionFile = subtaskSessionFile ?? null;
+	const modelPatterns = usesSavedSourceModel ? [] : normalizeModelPatterns(modelOverride ?? agent.model);
 	const spawnsEnv = atMaxDepth
 		? ""
 		: agent.spawns === undefined
@@ -3978,9 +4060,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				? "*"
 				: agent.spawns.join(",");
 
-	const lspEnabled = enableLsp ?? true;
+	const lspEnabled = isSeance ? false : (enableLsp ?? true);
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
 
+	const recordAsyncInitialUsage =
+		isSeance && options.detached && options.parentUsageRecorder
+			? (usage: ParentSubagentUsage) => options.parentUsageRecorder!(usage, "seance-async-initial")
+			: undefined;
+	const recordWakeUsage =
+		isSeance && options.parentUsageRecorder
+			? (usage: ParentSubagentUsage) => options.parentUsageRecorder!(usage, "seance-irc-wake")
+			: undefined;
 	const monitor = createSubagentRunMonitor({
 		index,
 		id,
@@ -3999,11 +4089,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
-		sessionFile: subtaskSessionFile,
+		sessionFile: sessionFile ?? undefined,
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
 		completionProbe: isCompletionProbeEnabled(settings, parentDepth),
+		onAssistantUsage: recordAsyncInitialUsage,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -4019,12 +4110,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		eventBus: options.eventBus,
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
-		sessionFile: subtaskSessionFile,
+		sessionFile: sessionFile ?? undefined,
 		maxRuntimeMs,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,
 		artifactsDir: options.artifactsDir,
+		onAssistantUsage: recordWakeUsage,
 	};
 
 	const runSubagent = async (): Promise<{
@@ -4035,6 +4127,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		durationMs: number;
 	}> => {
 		const sessionAbortController = new AbortController();
+		let pendingSessionStartupCleanup: Promise<void> | undefined;
+		let unsubscribeSeanceAuxiliaryUsage: (() => void) | undefined;
 		const abortSignal = monitor.abortSignal;
 		let exitCode = 0;
 		let error: string | undefined;
@@ -4073,6 +4167,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 		try {
 			checkAbort();
+			const sourceSessionManager = forkedSessionManager;
+			if (
+				usesSavedSourceModel &&
+				sourceSessionManager &&
+				getRestorableSessionModelsFromBranch(sourceSessionManager.getBranch()).length === 0
+			) {
+				throw new Error(
+					"The source session has no saved model to restore; retry with an explicit model override for this seance.",
+				);
+			}
 			// Pin authStorage to modelRegistry.authStorage — mirrors the createAgentSession invariant.
 			const registryFromParent = options.modelRegistry !== undefined;
 			const modelRegistry =
@@ -4189,13 +4293,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
-			const sessionManagerPromise = sessionFile
-				? SessionManager.open(sessionFile, undefined, undefined, {
-						initialCwd: effectiveCwd,
-						parentSession: options.sessionFile ?? undefined,
-						suppressBreadcrumb: true,
-					})
-				: Promise.resolve(SessionManager.inMemory(effectiveCwd));
+			const sessionManagerPromise = forkedSessionManager
+				? Promise.resolve(forkedSessionManager)
+				: sessionFile
+					? SessionManager.open(sessionFile, undefined, undefined, {
+							initialCwd: effectiveCwd,
+							parentSession: options.sessionFile ?? undefined,
+							suppressBreadcrumb: true,
+						})
+					: Promise.resolve(SessionManager.inMemory(effectiveCwd));
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
@@ -4206,10 +4312,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
 			// Resolution failures skip prewalk instead of failing the spawn.
 			let prewalk: Prewalk | undefined;
-			const prewalkPattern = resolveAgentPrewalkPattern({
-				settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
-			});
+			const prewalkPattern = isSeance
+				? undefined
+				: resolveAgentPrewalkPattern({
+						settingsOverride: cfgTaskAgentPrewalk.get(settings)[agent.name],
+						agentPrewalk: resolveAgentPrewalkDefault(agent, cfgTaskPrewalk.get(settings)),
+					});
 			if (prewalkPattern) {
 				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
 				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
@@ -4233,7 +4341,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			const restrictToolNames = options.restrictToolNames === true;
+			const restrictToolNames = options.restrictToolNames === true || isSeance;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 
@@ -4286,13 +4394,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
-					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+					modelPattern: model || modelOverride === undefined || usesSavedSourceModel ? undefined : modelPatterns,
 					modelPatternAuthFallback:
-						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+						model || modelOverride === undefined || usesSavedSourceModel
+							? undefined
+							: options.parentActiveModelPattern,
 					modelPatternFallbackRole:
-						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+						model || modelOverride === undefined || usesSavedSourceModel
+							? undefined
+							: subagentRetryFallbackRole(id),
 					modelPatternDefaultFallbackChain:
-						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+						model || modelOverride === undefined || usesSavedSourceModel
+							? undefined
+							: inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,
 					thinkingLevelCeiling: spawnEffortCeiling,
 					// Subagents are short-lived; never schedule background warm requests.
@@ -4300,16 +4414,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					toolNames,
 					outputSchema,
 					outputSchemaMode: options.outputSchemaMode,
-					restrictToolNames: options.restrictToolNames,
+					restrictToolNames,
 					requireYieldTool: true,
 					contextFiles: options.contextFiles,
 					skills: options.skills,
 					promptTemplates: options.promptTemplates,
 					workspaceTree: options.workspaceTree,
 					rules: options.rules,
-					extensionRoots: options.extensionRoots,
+					extensionRoots: isSeance ? undefined : options.extensionRoots,
 					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
+					preloadedPreparedExtensions: isSeance ? [] : options.preloadedPreparedExtensions,
 					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 					hasUI: false,
 					prewalk,
@@ -4332,8 +4446,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					enableMCP,
 					mcpManager,
 					// MCP proxies are minted per build as `mcpTools` in buildSubagentSessionOptions.
-					customTools: options.customTools,
-					localProtocolOptions: options.localProtocolOptions,
+					customTools: isSeance ? [] : options.customTools,
+					localProtocolOptions: isSeance ? undefined : options.localProtocolOptions,
 					telemetry: subagentTelemetry,
 				},
 				prompt: {
@@ -4351,7 +4465,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
-			if (options.parentArtifactManager) {
+			if (isSeance) {
+				unsubscribeSeanceAuxiliaryUsage = subscribeToSeanceAuxiliaryUsage(
+					sessionManager,
+					options.parentUsageRecorder,
+				);
+			}
+			if (!isSeance && options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
@@ -4365,6 +4485,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				: undefined;
 			let session: AgentSession;
 			let sessionPromise: Promise<CreateAgentSessionResult> | undefined;
+			let modelFallbackMessage: string | undefined;
 			try {
 				sessionPromise = createAgentSession(
 					buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, {
@@ -4378,16 +4499,42 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						},
 					}),
 				);
-				({ session } = await awaitAbortable(sessionPromise));
+				const created = await awaitAbortable(sessionPromise);
+				session = created.session;
+				modelFallbackMessage = created.modelFallbackMessage;
+				const fallbackModel =
+					created.session.servingModel?.modelIdentity ??
+					(created.session.model ? formatModelStringWithRouting(created.session.model) : undefined);
+				if (modelFallbackMessage && fallbackModel && !modelFallbackMessage.includes(fallbackModel)) {
+					modelFallbackMessage = `${modelFallbackMessage}. Using ${fallbackModel}`;
+				}
+				progress.modelFallbackMessage = modelFallbackMessage;
 			} catch (err) {
 				mcpFollower?.dispose();
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
 				// a cancelled subagent cannot leak them.
-				void sessionPromise?.then(created => created.session.dispose()).catch(() => {});
+				pendingSessionStartupCleanup = sessionPromise?.then(created => created.session.dispose()).catch(() => {});
+				if (usesSavedSourceModel && err instanceof Error && err.message.includes("Could not restore model ")) {
+					throw new Error(
+						`${err.message}. No saved model from the source session is available; retry with an explicit model override.`,
+						{ cause: err },
+					);
+				}
 				throw err;
 			}
+			if (unsubscribeSeanceAuxiliaryUsage) {
+				session.addDisposer(unsubscribeSeanceAuxiliaryUsage);
+			}
 			mcpFollower?.bind(session);
+			const servingModel = session.servingModel;
+			if (servingModel) {
+				progress.resolvedModel = servingModel.selector;
+				progress.resolvedModelIdentity = servingModel.modelIdentity;
+				progress.resolvedThinkingLevel = servingModel.thinkingLevel;
+				progress.resolvedModelIsFallback = servingModel.isFallback;
+				progress.contextWindow = servingModel.contextWindow ?? progress.contextWindow;
+			}
 			// The SDK records a new session's initial model as the default role.
 			// Pin the child's own chain so a parent default sharing that model
 			// cannot steal its fallback routing. Resumed history keeps its role.
@@ -4403,6 +4550,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
+			unsubscribeSeanceAuxiliaryUsage = undefined;
+			if (forkedSessionManager) forkedSessionManagerAdopted = true;
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			const registry = AgentRegistry.global();
@@ -4431,9 +4580,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					sessionFile,
 					spec: sessionSpec,
 					settings: captureSubagentSettings(settings, subagentSettings),
-					parentArtifactManager: options.parentArtifactManager,
+					parentArtifactManager: isSeance ? undefined : options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
 					wake: wakeOptions,
+					auxiliaryUsageRecorder: isSeance ? options.parentUsageRecorder : undefined,
 					agentName: agent.name,
 				};
 				trackSubagentSettings(session, reviveCapture);
@@ -4449,7 +4599,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentSource: agent.source,
 				description: options.description,
 				status: "started" as const,
-				sessionFile: subtaskSessionFile,
+				sessionFile: sessionFile ?? undefined,
 				index,
 			};
 			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
@@ -4496,6 +4646,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// even when the workspace was retained for recovery.
 				isolated: worktree !== undefined || undefined,
 			});
+			if (isSeance) seanceContractEstablished = true;
 
 			abortSignal.addEventListener(
 				"abort",
@@ -4515,19 +4666,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// block one shared scope object, so the lifecycle reviver built above would
 			// then pin the parked, disposed session for the life of the process.
 			const pendingExtensionMessages: Array<Promise<unknown>> = [];
-			await awaitAbortable(
-				initializeExtensions(session, {
-					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
-					reportRuntimeError: err =>
-						logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-					trackExtensionSend: task => {
-						pendingExtensionMessages.push(task.catch(() => {}));
-					},
-					filterActiveTools: toolNames => toolNames.filter(name => !isParentOwnedTool(name)),
-				}),
-			);
-			while (pendingExtensionMessages.length > 0) {
-				await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
+			if (!isSeance) {
+				await awaitAbortable(
+					initializeExtensions(session, {
+						reportSendError: (action, err) =>
+							logger.error("Extension send failed", { action, error: err.message }),
+						reportRuntimeError: err =>
+							logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+						trackExtensionSend: task => {
+							pendingExtensionMessages.push(task.catch(() => {}));
+						},
+						filterActiveTools: toolNames => toolNames.filter(name => !isParentOwnedTool(name)),
+					}),
+				);
+				while (pendingExtensionMessages.length > 0) {
+					await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
+				}
 			}
 
 			unsubscribe = monitor.attach(session);
@@ -4567,6 +4721,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				error = err instanceof Error ? err.stack || err.message : String(err);
 			}
 		} finally {
+			unsubscribeSeanceAuxiliaryUsage?.();
+			unsubscribeSeanceAuxiliaryUsage = undefined;
 			const cleanupDeadlineAt = Date.now() + cleanupGraceMs;
 			const cleanupChangeStatus =
 				worktree === undefined
@@ -4637,9 +4793,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 			const session = monitor.takeActiveSession();
+			const failedSeanceStartup = isSeance && !seanceContractEstablished;
 			if (session) {
 				monitor.captureSalvage(session);
-				if (options.keepAlive !== false) {
+				const keepAlive = options.keepAlive !== false && !failedSeanceStartup;
+				if (keepAlive) {
 					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
 				await finalizeSubagentLifecycle({
@@ -4647,7 +4805,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					session,
 					aborted,
 					abortKind: monitor.abortKind(),
-					keepAlive: options.keepAlive !== false,
+					keepAlive,
 					isolated: worktree !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
@@ -4658,6 +4816,37 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						deferCleanup(completion);
 					},
 				});
+			}
+			if (failedSeanceStartup && forkedSessionManager && sessionFile) {
+				const removeFailedFork = async (): Promise<void> => {
+					try {
+						// dropSession releases the child writer before deleting its JSONL and artifacts.
+						await forkedSessionManager!.dropSession(sessionFile!);
+					} catch (error) {
+						logger.warn("Failed to remove incomplete seance fork", {
+							id,
+							sessionFile,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				};
+				const shutdowns = [pendingSessionStartupCleanup, deferredSessionShutdown].filter(
+					(completion): completion is Promise<void> => completion !== undefined,
+				);
+				if (shutdowns.length > 0) {
+					lateCleanups.push(Promise.allSettled(shutdowns).then(removeFailedFork));
+				} else {
+					await removeFailedFork();
+				}
+			} else if (forkedSessionManager && !forkedSessionManagerAdopted) {
+				try {
+					await forkedSessionManager.close();
+				} catch (error) {
+					logger.warn("Failed to close unused seance fork session manager", {
+						id,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 			if (jobManager) {
 				if (deferredSessionShutdown) {
@@ -4745,7 +4934,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		subagentEventBus: options.subagentEventBus,
 		parentToolCallId: options.parentToolCallId,
 		detached: options.detached,
-		sessionFile: subtaskSessionFile,
+		sessionFile: sessionFile ?? undefined,
 		startTime,
 	});
 	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });

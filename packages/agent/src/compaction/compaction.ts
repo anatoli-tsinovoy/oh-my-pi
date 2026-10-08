@@ -80,6 +80,7 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 	withOpenAiRemoteCompactionPreserveData,
 } from "./openai";
+import { type CompactionUsageCallback, reportAssistantCompactionUsage } from "./usage";
 import autoHandoffThresholdFocusPrompt from "./prompts/auto-handoff-threshold-focus.md" with { type: "text" };
 import compactionShortSummaryPrompt from "./prompts/compaction-short-summary.md" with { type: "text" };
 import compactionSummaryPrompt from "./prompts/compaction-summary.md" with { type: "text" };
@@ -702,6 +703,8 @@ export interface SummaryOptions {
 	 * or `compaction_turn_prefix`). `undefined` keeps the call paths zero-cost.
 	 */
 	telemetry?: AgentTelemetry;
+	/** Usage reported by every completed provider generation, including rejected attempts. */
+	onUsage?: CompactionUsageCallback;
 	/**
 	 * Active session thinking level. Threaded from `agent-session.ts` so
 	 * compaction honors the user's `/model` thinking selection instead of
@@ -763,6 +766,12 @@ function summaryOneshotRetry(options: SummaryOptions | undefined): OneshotRetryO
 	const configured = options?.oneshotRetry;
 	if (configured === false) return undefined;
 	return configured ?? {};
+}
+function summaryAttemptCallback(
+	options: SummaryOptions | undefined,
+): ((message: AssistantMessage) => void) | undefined {
+	if (!options?.onUsage) return undefined;
+	return message => reportAssistantCompactionUsage(options.onUsage, message);
 }
 
 function localCodexCompaction(options: SummaryOptions | undefined) {
@@ -1003,7 +1012,7 @@ async function summarizeConversationWindow(
 					endpoint,
 					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 					signal,
-					{ fetch: options.fetch, model, apiKey: key },
+					{ fetch: options.fetch, model, apiKey: key, onUsage: options.onUsage },
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
@@ -1031,6 +1040,7 @@ async function summarizeConversationWindow(
 			oneshotKind: "compaction_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttempt: summaryAttemptCallback(options),
 		},
 	);
 
@@ -1099,6 +1109,7 @@ export interface HandoffFromContextOptions {
 	) => Promise<AssistantMessage>;
 	/** See {@link HandoffOptions.telemetry}. */
 	telemetry?: AgentTelemetry;
+	onUsage?: CompactionUsageCallback;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
 }
@@ -1121,6 +1132,9 @@ export async function generateHandoffFromContext(
 	model: Model,
 	options: HandoffFromContextOptions,
 ): Promise<string> {
+	const onAttempt = options.onUsage
+		? (message: AssistantMessage) => reportAssistantCompactionUsage(options.onUsage, message)
+		: undefined;
 	const requestOptions = {
 		...options.streamOptions,
 		reasoning: resolveCompactionEffort(model, options.thinkingLevel),
@@ -1131,13 +1145,20 @@ export async function generateHandoffFromContext(
 		oneshotKind: "handoff",
 		completeImpl: options.completeImpl,
 		retry: {},
+		onAttempt,
 	});
 	if (response.stopReason === "error" && shouldRetryHandoffWithAutoToolChoice(response)) {
 		response = await instrumentedCompleteSimple(
 			model,
 			context,
 			{ ...requestOptions, toolChoice: "auto" },
-			{ telemetry: options.telemetry, oneshotKind: "handoff", completeImpl: options.completeImpl, retry: {} },
+			{
+				telemetry: options.telemetry,
+				oneshotKind: "handoff",
+				completeImpl: options.completeImpl,
+				retry: {},
+				onAttempt,
+			},
 		);
 	}
 
@@ -1214,7 +1235,7 @@ async function generateShortSummary(
 					endpoint,
 					{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, prompt: promptText, maxTokens },
 					signal,
-					{ fetch: options?.fetch, model, apiKey: key },
+					{ fetch: options?.fetch, model, apiKey: key, onUsage: options?.onUsage },
 				),
 			{ signal, missingKeyMessage: "Remote compaction credentials unavailable" },
 		);
@@ -1245,6 +1266,7 @@ async function generateShortSummary(
 			oneshotKind: "compaction_short_summary",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttempt: summaryAttemptCallback(options),
 		},
 	);
 
@@ -1634,6 +1656,7 @@ export async function compact(
 		buildProviderContext: options?.buildProviderContext,
 		isUserAuthored: options?.isUserAuthored,
 		telemetry: options?.telemetry,
+		onUsage: options?.onUsage,
 		// Honor /model thinking selection on every fan-out summarizer.
 		// Without this propagation, generateSummary / generateTurnPrefixSummary
 		// see options?.thinkingLevel === undefined and resolveCompactionEffort
@@ -1813,6 +1836,7 @@ export async function compact(
 							providerSessionState: summaryOptions.providerSessionState,
 							preferWebsockets: summaryOptions.preferWebsockets,
 							codexCompaction: summaryOptions.codexCompaction,
+							onUsage: summaryOptions.onUsage,
 						}),
 					{ signal },
 				);
@@ -1870,6 +1894,7 @@ export async function compact(
 								sessionId: summaryOptions.sessionId,
 								providerSessionState: summaryOptions.providerSessionState,
 								codexCompaction: summaryOptions.codexCompaction,
+								onUsage: summaryOptions.onUsage,
 							},
 						),
 					{ signal },
@@ -2018,6 +2043,7 @@ export async function compact(
 					completeImpl: summaryOptions.completeImpl,
 					telemetry: summaryOptions.telemetry,
 					retry: summaryOneshotRetry(summaryOptions),
+					onAttempt: summaryAttemptCallback(summaryOptions),
 				},
 			);
 			nativeSummary = remote.content;
@@ -2194,6 +2220,7 @@ async function generateTurnPrefixSummary(
 			oneshotKind: "compaction_turn_prefix",
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
+			onAttempt: summaryAttemptCallback(options),
 		},
 	);
 

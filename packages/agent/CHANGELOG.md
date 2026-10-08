@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added reported model-usage callbacks for compaction attempts so callers can include summary and fallback-generation costs in their estimates.
+
 ## [18.8.1] - 2026-10-07
 
 ### Added

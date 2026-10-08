@@ -274,6 +274,7 @@ describe("createAgentSession session storage isolation", () => {
 				agentRegistry: registry,
 				agentId: "reused-worker",
 				agentDisplayName: "fresh generation",
+				agentName: "seance",
 				parentTaskPrefix: "reused-worker",
 				parentAgentId: "Main",
 				taskDepth: 1,
@@ -283,6 +284,7 @@ describe("createAgentSession session storage isolation", () => {
 			expect(replacement).toBeDefined();
 			expect(replacement).not.toBe(corpse);
 			expect(replacement?.session).toBe(session);
+			expect(replacement?.history?.agent).toBe("seance");
 		} finally {
 			await session?.dispose();
 			await lifecycle.dispose();
@@ -309,6 +311,11 @@ describe("createAgentSession session storage isolation", () => {
 			session: null,
 			sessionFile,
 			status: "parked",
+			history: {
+				modelRole: "prior-role",
+				resolvedModel: "prior-model",
+				metrics: { tokens: 12, requests: 1, tools: 2, cost: 0.5, durationMs: 3 },
+			},
 		});
 
 		const { session } = await createAgentSession({
@@ -326,6 +333,7 @@ describe("createAgentSession session storage isolation", () => {
 			agentRegistry: registry,
 			agentId: "revived-worker",
 			agentDisplayName: "revived worker",
+			agentName: "seance",
 			parentTaskPrefix: "revived-worker",
 			parentAgentId: "Main",
 			taskDepth: 1,
@@ -333,6 +341,12 @@ describe("createAgentSession session storage isolation", () => {
 		});
 		try {
 			expect(registry.get("revived-worker")).toBe(parked);
+			expect(parked.history).toMatchObject({
+				agent: "seance",
+				modelRole: "prior-role",
+				resolvedModel: "prior-model",
+				metrics: { tokens: 12, requests: 1, tools: 2, cost: 0.5, durationMs: 3 },
+			});
 			expect(parked).toMatchObject({ status: "running", session, sessionFile });
 		} finally {
 			await session.dispose();

@@ -221,7 +221,69 @@ describe("SessionManager.forkFrom", () => {
 				},
 			},
 		};
-		await Bun.write(sourceFile, `${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n`);
+		const taskUsage = {
+			input: 40,
+			output: 10,
+			cacheRead: 2,
+			cacheWrite: 1,
+			totalTokens: 53,
+			premiumRequests: 3,
+			credits: { cost: 10, committedCost: 10, acuCost: 2 },
+			cost: { input: 2, output: 7, cacheRead: 0.5, cacheWrite: 0.5, total: 10 },
+		};
+		const nestedUsage = {
+			input: 5,
+			output: 3,
+			cacheRead: 1,
+			cacheWrite: 0,
+			totalTokens: 9,
+			premiumRequests: 1,
+			credits: { cost: 4, committedCost: 4, acuCost: 1 },
+			cost: { input: 1, output: 2, cacheRead: 1, cacheWrite: 0, total: 4 },
+		};
+		const taskResultEntry = {
+			type: "message",
+			id: "task-result-1",
+			parentId: "assistant-1",
+			timestamp,
+			message: {
+				role: "toolResult",
+				toolCallId: "task-call-1",
+				toolName: "task",
+				content: [{ type: "text", text: "historical child result" }],
+				details: {
+					usage: taskUsage,
+					seanceTaskCost: 4,
+					results: [{ id: "nested-agent", usage: nestedUsage }],
+					progress: [{ id: "nested-agent", tokens: 9, cost: 4 }],
+				},
+				isError: false,
+				timestamp: Date.now(),
+			},
+		};
+		const modelUsageEntry = {
+			type: "model_usage",
+			id: "model-usage-1",
+			parentId: "task-result-1",
+			timestamp,
+			purpose: "judgment",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude",
+			stopReason: "stop",
+			usage: {
+				input: 20,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 25,
+				cost: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 },
+			},
+		};
+		await Bun.write(
+			sourceFile,
+			`${[sourceHeader, assistantEntry, taskResultEntry, modelUsageEntry].map(entry => JSON.stringify(entry)).join("\n")}\n`,
+		);
 		const sourceText = await Bun.file(sourceFile).text();
 		const sourceManager = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
 
@@ -240,6 +302,7 @@ describe("SessionManager.forkFrom", () => {
 		const preservedMessage = await findAssistant(preservedFile);
 		expect(preservedMessage.usage.cost.total).toBe(6);
 		expect(preservedMessage.usage.premiumRequests).toBe(2);
+		expect(preserved.getUsageStatistics().cost).toBe(31);
 
 		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
 			suppressBreadcrumb: true,
@@ -255,12 +318,33 @@ describe("SessionManager.forkFrom", () => {
 		expect(resetMessage.usage.input).toBe(100);
 		expect(resetMessage.usage.output).toBe(50);
 		expect(resetMessage.usage.totalTokens).toBe(165);
+		const resetEntries = await loadEntriesFromFile(resetFile);
+		const resetTaskEntry = resetEntries.find(
+			entry => entry.type === "message" && entry.message.role === "toolResult",
+		);
+		if (resetTaskEntry?.type !== "message" || resetTaskEntry.message.role !== "toolResult") {
+			throw new Error("expected copied task result");
+		}
+		const resetTaskDetails = resetTaskEntry.message.details as {
+			usage: typeof taskUsage;
+			results: Array<{ usage: typeof nestedUsage }>;
+			progress: Array<{ cost: number }>;
+			seanceTaskCost: number;
+		};
+		expect(resetTaskDetails.usage.cost.total).toBe(0);
+		expect(resetTaskDetails.usage.input).toBe(40);
+		expect(resetTaskDetails.results[0]?.usage.cost.total).toBe(0);
+		expect(resetTaskDetails.results[0]?.usage.input).toBe(5);
+		expect(resetTaskDetails.progress[0]?.cost).toBe(0);
+		expect(resetTaskDetails.seanceTaskCost).toBe(0);
+		expect(reset.getUsageStatistics().cost).toBe(0);
 		const sourceMessage = sourceManager.getEntries().find(entry => entry.type === "message");
 		if (sourceMessage?.type !== "message" || sourceMessage.message.role !== "assistant") {
 			throw new Error("expected source assistant message");
 		}
 		expect(sourceMessage.message.usage.cost.total).toBe(6);
 		expect(sourceMessage.message.usage.premiumRequests).toBe(2);
+		expect(sourceManager.getUsageStatistics().cost).toBe(31);
 		expect(await Bun.file(sourceFile).text()).toBe(sourceText);
 		await sourceManager.close();
 	});

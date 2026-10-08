@@ -935,6 +935,30 @@ function isSessionStorage(value: SessionStorage | ResolveResumableSessionOptions
 	return "listFilesSync" in value;
 }
 
+export async function findResumableSessions(
+	sessionArg: string,
+	cwd: string,
+	sessionDir?: string,
+	storage: SessionStorage = new FileSessionStorage(),
+	options: ResolveResumableSessionOptions = {},
+): Promise<ResolvedSessionMatch[]> {
+	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
+	const localMatches = (await listSessions(localSessionDir, storage))
+		.filter(session => sessionMatchesResumeArg(session, sessionArg))
+		.map(session => ({ session, scope: "local" as const }));
+	if (localMatches.length > 0) {
+		return localMatches;
+	}
+
+	if (sessionDir && options.allowGlobalFallback !== true) {
+		return [];
+	}
+
+	return (await listAllSessions(storage))
+		.filter(session => sessionMatchesResumeArg(session, sessionArg))
+		.map(session => ({ session, scope: "global" as const }));
+}
+
 export async function resolveResumableSession(
 	sessionArg: string,
 	cwd: string,
@@ -944,22 +968,5 @@ export async function resolveResumableSession(
 ): Promise<ResolvedSessionMatch | undefined> {
 	const storage = isSessionStorage(storageOrOptions) ? storageOrOptions : new FileSessionStorage();
 	const resolvedOptions = isSessionStorage(storageOrOptions) ? options : storageOrOptions;
-	const localSessionDir = sessionDir ?? computeDefaultSessionDir(cwd, storage);
-	const localSessions = await listSessions(localSessionDir, storage);
-	const localMatch = localSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
-	if (localMatch) {
-		return { session: localMatch, scope: "local" };
-	}
-
-	if (sessionDir && resolvedOptions.allowGlobalFallback !== true) {
-		return undefined;
-	}
-
-	const globalSessions = await listAllSessions(storage);
-	const globalMatch = globalSessions.find(session => sessionMatchesResumeArg(session, sessionArg));
-	if (!globalMatch) {
-		return undefined;
-	}
-
-	return { session: globalMatch, scope: "global" };
+	return (await findResumableSessions(sessionArg, cwd, sessionDir, storage, resolvedOptions))[0];
 }

@@ -2436,9 +2436,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Wire process-wide internal URL singletons owned by their real classes.
 		// Top-level sessions install the active snapshots; subagents inherit them.
 		// Artifact and agent-output URLs resolve via `AgentRegistry.global()` —
-		// the protocol handlers walk each ref's `sessionManager.getArtifactsDir()`,
-		// which collapses to the parent's dir for subagents (they adopt the
-		// parent's ArtifactManager) so one lookup hits everything.
+		// protocol handlers walk each ref's `sessionManager.getArtifactsDir()`.
+		// Ordinary subagents adopt the parent's manager; seance keeps its fork
+		// manager so copied source references resolve in their own namespace.
 		const getArtifactsDir = () => sessionManager.getArtifactsDir();
 		if (!options.parentTaskPrefix) {
 			setActiveSkills(skills);
@@ -4048,6 +4048,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running" as const,
+			history: { agent: resolvedAgentName },
 		};
 		registeredAgentRef =
 			options.expectedAgentRef === undefined
@@ -4069,6 +4070,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		if (!registeredAgentRef) {
 			throw new Error(`Agent "${resolvedAgentId}" is already owned by another session generation.`);
+		}
+		// A resumed ref is reused in place. Merge the live identity so its persisted
+		// telemetry remains intact if the parked record predates this field.
+		if (registeredAgentRef.history?.agent !== resolvedAgentName) {
+			agentRegistry.setHistory(resolvedAgentId, { agent: resolvedAgentName });
 		}
 		// A reused parked ref remains parked until the new AgentSession is fully
 		// constructed and attached. Startup failure therefore leaves it revivable.

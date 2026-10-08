@@ -48,6 +48,7 @@ import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SettingsGatedToolDelta } from "./session-tools";
 import type { SessionManager } from "./session-manager";
+import type { CompactionUsageCallback } from "@oh-my-pi/pi-agent-core/compaction";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
 export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
@@ -471,6 +472,7 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+	onUsage?: CompactionUsageCallback;
 }
 
 /** Result from cycleModel(). */
@@ -528,6 +530,10 @@ export interface SessionStats {
 	};
 	premiumRequests: number;
 	cost: number;
+	/** Lifetime active-branch model usage from seance calls only. */
+	seanceLedgerCost?: number;
+	/** Lifetime task-result subtotal attributable to synchronous seance runs. */
+	seanceTaskCost?: number;
 	credits?: {
 		cost: number;
 		committedCost: number;

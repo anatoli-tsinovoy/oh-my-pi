@@ -39,9 +39,11 @@ import {
 	type ShakeConfig,
 	type ShakeRegion,
 	type SummaryOptions,
+	type CompactionUsageCallback,
 	shouldCompact,
 	shouldUseProviderNativeCompaction,
 	upsertFileOperations,
+	reportCompactionUsage,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
@@ -2023,7 +2025,8 @@ export class SessionMaintenance {
 		const cleanup = Promise.withResolvers<void>();
 		this.#handoffCleanup = cleanup.promise;
 		try {
-			const result = await this.#host.generateHandoffDocument(customInstructions, options);
+			const onUsage = this.#newCompactionUsageCallback(options?.onUsage);
+			const result = await this.#host.generateHandoffDocument(customInstructions, { ...options, onUsage });
 			if (!result) return undefined;
 			const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
 			await this.#commitCompactionEntry({
@@ -2209,9 +2212,11 @@ export class SessionMaintenance {
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
+			const onUsage = this.#newCompactionUsageCallback();
 			const generated = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
 				autoTriggered: true,
 				signal,
+				onUsage,
 			});
 			if (!generated) return clear();
 			const { summary, details } = handoffSummaryFromDocument(generated.document, preparation);
@@ -3431,6 +3436,53 @@ export class SessionMaintenance {
 		);
 	}
 
+	#newCompactionUsageCallback(additional?: CompactionUsageCallback): CompactionUsageCallback {
+		const owner = {
+			sessionId: this.#host.sessionManager.getSessionId(),
+			parentId: this.#host.sessionManager.getLeafId(),
+		};
+		return report => {
+			const usage = report.usage;
+			if (
+				usage.input +
+					usage.output +
+					usage.cacheRead +
+					usage.cacheWrite +
+					usage.totalTokens +
+					(usage.orchestration?.input ?? 0) +
+					(usage.orchestration?.cacheRead ?? 0) +
+					(usage.orchestration?.output ?? 0) ===
+					0 &&
+				usage.cost.total === 0 &&
+				(usage.premiumRequests ?? 0) === 0 &&
+				(usage.credits?.cost ?? 0) === 0 &&
+				(usage.credits?.committedCost ?? 0) === 0 &&
+				(usage.credits?.acuCost ?? 0) === 0
+			) {
+				return;
+			}
+			try {
+				this.#host.sessionManager.appendModelUsage(
+					{
+						purpose: "compaction",
+						api: report.api,
+						provider: report.provider,
+						model: report.model,
+						usage,
+						stopReason: report.stopReason ?? "stop",
+						...(report.errorMessage ? { errorMessage: report.errorMessage } : {}),
+					},
+					owner,
+				);
+			} catch (error) {
+				logger.debug("Failed to persist compaction usage", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			reportCompactionUsage(additional, report);
+		};
+	}
+
 	async #compactWithFallbackModel(
 		preparation: CompactionPreparation,
 		customInstructions: string | undefined,
@@ -3441,6 +3493,7 @@ export class SessionMaintenance {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
+		const onUsage = this.#newCompactionUsageCallback(options?.onUsage);
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 
 		for (const candidate of candidates) {
@@ -3463,6 +3516,7 @@ export class SessionMaintenance {
 					signal,
 					{
 						...options,
+						onUsage,
 						metadata: this.#host.agent.metadataForProvider(candidate.provider),
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						buildProviderContext: (summarized, retained, signal) =>
@@ -4654,9 +4708,11 @@ export class SessionMaintenance {
 			// configured preference.
 			let handoffDocument: HandoffResult | undefined;
 			if (action === "handoff" && compactionPrep.kind !== "fromHook") {
+				const onUsage = this.#newCompactionUsageCallback();
 				handoffDocument = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
 					autoTriggered: true,
 					signal: autoCompactionSignal,
+					onUsage,
 				});
 				if (autoCompactionSignal.aborted) {
 					await this.#emitLifecycleEvent(
@@ -4863,6 +4919,7 @@ export class SessionMaintenance {
 				);
 				const retrySettings = cfgRetry.get(this.#host.settings);
 				const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
+				const onUsage = this.#newCompactionUsageCallback();
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
 				let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
@@ -4923,6 +4980,7 @@ export class SessionMaintenance {
 									// retry too — the budgets would multiply and each outer
 									// wait would stack on top of an inner backoff.
 									oneshotRetry: false,
+									onUsage,
 								},
 							);
 							break;

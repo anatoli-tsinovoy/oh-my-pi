@@ -25,6 +25,20 @@ function settledResult(output: string): SingleResult {
 }
 
 describe("formatTaskResultSummary", () => {
+	it("surfaces a saved-session model restoration fallback", () => {
+		const summary = formatTaskResultSummary(
+			{
+				...settledResult("prior-session report"),
+				resolvedModelIdentity: "mock/default-model",
+				modelFallbackMessage: "Could not restore model mock/reviewer-model. Using mock/default-model",
+			},
+			{ totalDurationMs: 1200 },
+		);
+
+		expect(summary).toContain("Model restoration notice:");
+		expect(summary).toContain("mock/reviewer-model");
+		expect(summary).toContain("mock/default-model");
+	});
 	it("previews a pretty-printed structured yield past its opening brace", () => {
 		// A schema-bearing subagent's artifact is `JSON.stringify(data, null, 2)`:
 		// the first line is `{` and the second is one multi-KB string. Cutting the

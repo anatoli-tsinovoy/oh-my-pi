@@ -52,7 +52,13 @@ import {
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
 import { getAvailableThemes, getSymbolTheme, previewTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { AgentHubOpenOptions, InteractiveModeContext } from "../../modes/types";
+import type {
+	AgentHubOpenOptions,
+	InteractiveModeContext,
+	ModelSelectionOnlyOptions,
+	ModelSelectorOptions,
+	SessionPickerSelection,
+} from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
@@ -186,7 +192,7 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 }
 
 /** Menus that open at most once: a repeat request focuses the open one. */
-type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub";
+type MenuKind = "settings" | "model-picker" | "seance-model-picker" | "model-hub" | "agents-dashboard" | "agent-hub";
 
 /** An open menu: registered when the request runs, filled once its component mounts. */
 interface OpenMenu {
@@ -712,7 +718,11 @@ export class SelectorController {
 		this.ctx.session.setThinkingLevel(level);
 	}
 
-	showModelSelector(options?: { temporaryOnly?: boolean }): void {
+	showModelSelector(options?: ModelSelectorOptions): void {
+		if (options?.selectOnly) {
+			this.#showModelPicker(options.selectOnly);
+			return;
+		}
 		if (options?.temporaryOnly) {
 			this.#showModelPicker();
 			return;
@@ -779,24 +789,31 @@ export class SelectorController {
 	 * bottom-anchored overlay over the transcript. The current model is
 	 * highlighted and preselected; a leading `@` searches ctrl+p quick roles.
 	 */
-	#showModelPicker(): void {
-		if (this.#focusOpenMenu("model-picker")) return;
+	#showModelPicker(selectOnly?: ModelSelectionOnlyOptions): void {
+		const menuKind = selectOnly ? "seance-model-picker" : "model-picker";
+		if (this.#focusOpenMenu(menuKind)) {
+			selectOnly?.onCancel?.();
+			return;
+		}
 		const { ModelPickerComponent } = loadModelOverlayComponents();
-		const currentContextTokens = this.ctx.session.getContextUsage()?.tokens ?? 0;
+		const currentContextTokens = selectOnly ? undefined : (this.ctx.session.getContextUsage()?.tokens ?? 0);
 		const current = this.ctx.session.model;
-		const quickRoleOrder = cfgCycleOrder.get(this.ctx.settings);
-		const quickRoleCycle = this.ctx.session.getRoleModelCycle(quickRoleOrder);
-		const currentSelector = current ? `${current.provider}/${current.id}` : undefined;
+		const quickRoleOrder = selectOnly ? [] : cfgCycleOrder.get(this.ctx.settings);
+		const quickRoleCycle = selectOnly ? undefined : this.ctx.session.getRoleModelCycle(quickRoleOrder);
+		const currentSelector =
+			selectOnly?.currentSelector ?? (current ? `${current.provider}/${current.id}` : undefined);
 		// Preselect the effective Task model in task mode: the configured override,
 		// else the session model (the bundled task agent inherits it by default).
-		const taskOverride = cfgTaskAgentModelOverrides.get(this.ctx.settings).task;
-		const taskSelector = (Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector;
+		const taskOverride = selectOnly ? undefined : cfgTaskAgentModelOverrides.get(this.ctx.settings).task;
+		const taskSelector = selectOnly
+			? undefined
+			: ((Array.isArray(taskOverride) ? taskOverride[0] : taskOverride) ?? currentSelector);
 		let closed = false;
 		const done = () => {
 			if (closed) return;
 			closed = true;
 			menu.handle?.hide();
-			this.#releaseMenu("model-picker", menu);
+			this.#releaseMenu(menuKind, menu);
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
@@ -807,6 +824,16 @@ export class SelectorController {
 			this.ctx.session.scopedModels,
 			{
 				onPick: async (model, selector, { overContext }) => {
+					if (selectOnly) {
+						try {
+							selectOnly.onSelect(selector);
+						} catch (error) {
+							this.ctx.showError(error instanceof Error ? error.message : String(error));
+						} finally {
+							done();
+						}
+						return;
+					}
 					try {
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
@@ -817,43 +844,56 @@ export class SelectorController {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
 					}
 				},
-				onPickRole: async entry => {
+				onPickRole: selectOnly
+					? undefined
+					: async entry => {
+							try {
+								await this.ctx.session.applyRoleModel(entry);
+								this.ctx.statusLine.invalidate();
+								this.ctx.updateEditorBorderColor();
+								this.ctx.showModelCycleTrack(
+									quickRoleOrder.map(role => ({ label: role })),
+									quickRoleOrder.indexOf(entry.role),
+								);
+								done();
+							} catch (error) {
+								this.ctx.showError(error instanceof Error ? error.message : String(error));
+							}
+						},
+				onPickTask: selectOnly
+					? undefined
+					: (_model, selector) => {
+							// Session-only: layer the Task override onto the runtime settings
+							// layer so it is never persisted, mirroring the session-model pick.
+							cfgTaskAgentModelOverrides.override(this.ctx.settings, {
+								...cfgTaskAgentModelOverrides.get(this.ctx.settings),
+								task: selector,
+							});
+							this.ctx.showStatus(`Task subagent model (session-only): ${selector}. Use /agents to persist.`);
+							done();
+						},
+				onCancel: () => {
 					try {
-						await this.ctx.session.applyRoleModel(entry);
-						this.ctx.statusLine.invalidate();
-						this.ctx.updateEditorBorderColor();
-						this.ctx.showModelCycleTrack(
-							quickRoleOrder.map(role => ({ label: role })),
-							quickRoleOrder.indexOf(entry.role),
-						);
-						done();
+						selectOnly?.onCancel?.();
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					} finally {
+						done();
 					}
 				},
-				onPickTask: (_model, selector) => {
-					// Session-only: layer the Task override onto the runtime settings
-					// layer so it is never persisted, mirroring the session-model pick.
-					cfgTaskAgentModelOverrides.override(this.ctx.settings, {
-						...cfgTaskAgentModelOverrides.get(this.ctx.settings),
-						task: selector,
-					});
-					this.ctx.showStatus(`Task subagent model (session-only): ${selector}. Use /agents to persist.`);
-					done();
-				},
-				onCancel: done,
 			},
 			{
 				currentContextTokens,
 				currentSelector,
-				taskModeKeys: this.ctx.keybindings.getKeys("app.model.selectTemporary"),
-				taskSelector,
-				quickRoles: quickRoleCycle?.models,
-				quickRoleOrder,
-				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
+				selectionTarget: selectOnly ? "seance" : "session",
+				taskModeKeys: selectOnly ? undefined : this.ctx.keybindings.getKeys("app.model.selectTemporary"),
+				taskSelector: selectOnly ? undefined : taskSelector,
+				quickRoles: selectOnly ? undefined : quickRoleCycle?.models,
+				quickRoleOrder: selectOnly ? undefined : quickRoleOrder,
+				currentQuickRole: selectOnly ? undefined : quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
 			},
 		);
-		const menu = this.#claimMenu("model-picker");
+		const menu = this.#claimMenu(menuKind);
 		this.#mountMenu(menu, picker, () => {
 			const handle = this.ctx.ui.showOverlay(picker, {
 				anchor: "bottom-center",
@@ -1680,7 +1720,7 @@ export class SelectorController {
 		return result;
 	}
 
-	async showSessionSelector(source?: ForeignSessionSource): Promise<void> {
+	async showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickerSelection): Promise<void> {
 		let sessions: SessionInfo[];
 		let onSelectSession: (session: SessionInfo) => Promise<boolean>;
 		let selectorOptions: SessionSelectorOptions<SessionInfo>;
@@ -1740,21 +1780,25 @@ export class SelectorController {
 				: undefined;
 			onSelectSession = session => this.handleResumeSession(session.path);
 			selectorOptions = {
-				onDelete: async (session: SessionInfo) => {
-					if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
-						return false;
-					}
-					const storage = new FileSessionStorage();
-					try {
-						await storage.deleteSessionWithArtifacts(session.path);
-						return true;
-					} catch (error) {
-						throw new Error(
-							`Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
-							{ cause: error },
-						);
-					}
-				},
+				...(!onSelect
+					? {
+							onDelete: async (session: SessionInfo) => {
+								if (!(await this.#detachActiveSessionBeforeDeletion(session.path))) {
+									return false;
+								}
+								const storage = new FileSessionStorage();
+								try {
+									await storage.deleteSessionWithArtifacts(session.path);
+									return true;
+								} catch (error) {
+									throw new Error(
+										`Failed to delete session: ${error instanceof Error ? error.message : String(error)}`,
+										{ cause: error },
+									);
+								}
+							},
+						}
+					: {}),
 				historyMatcher,
 				loadAllSessions: () => SessionManager.listAllForPicker(),
 				pinnedIds,
@@ -1774,6 +1818,16 @@ export class SelectorController {
 		const selector = new SessionSelectorComponent(
 			sessions,
 			async (session: SessionInfo) => {
+				if (onSelect) {
+					selector.lockInput();
+					done();
+					try {
+						await onSelect(session);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+					return;
+				}
 				selector.lockInput();
 				let keepOpen = false;
 				try {

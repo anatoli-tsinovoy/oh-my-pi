@@ -59,8 +59,12 @@ function isUsageWindowBoundary(entry: SessionEntry): boolean {
 	);
 }
 
-/** Model calls belonging to the same active transcript window as `agent.state.messages`. */
-function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage: Usage) => void): void {
+/** Includes parent-indexed off-transcript usage without advancing the active leaf. */
+function forEachActiveModelUsage(
+	branch: readonly SessionEntry[],
+	sessionManager: Pick<SessionManager, "forEachChildModelUsage">,
+	visit: (usage: Usage) => void,
+): void {
 	const latestCompaction = getLatestCompactionEntry(branch);
 	const compactionIndex = latestCompaction ? branch.lastIndexOf(latestCompaction) : -1;
 	let resetIndex = -1;
@@ -78,9 +82,24 @@ function forEachActiveModelUsage(branch: readonly SessionEntry[], visit: (usage:
 		startIndex = firstKeptIndex >= 0 ? firstKeptIndex : compactionIndex + 1;
 		while (startIndex > 0 && !isUsageWindowBoundary(branch[startIndex - 1])) startIndex--;
 	}
+	const usageWindowBoundaryIndex = resetIndex > compactionIndex ? resetIndex : compactionIndex;
+	const usageWindowBoundary = usageWindowBoundaryIndex >= 0 ? branch[usageWindowBoundaryIndex] : undefined;
+	const notBeforeTimestamp = usageWindowBoundary?.timestamp;
+	if (startIndex === 0 && !usageWindowBoundary) sessionManager.forEachChildModelUsage(null, visit);
+	if (usageWindowBoundary && usageWindowBoundaryIndex < startIndex) {
+		const firstWindowEntry = branch[startIndex];
+		const activeBoundaryUsageId =
+			firstWindowEntry?.type === "model_usage" && firstWindowEntry.parentId === usageWindowBoundary.id
+				? firstWindowEntry.id
+				: undefined;
+		sessionManager.forEachChildModelUsage(usageWindowBoundary.id, visit, notBeforeTimestamp, activeBoundaryUsageId);
+	}
 	for (let index = startIndex; index < branch.length; index++) {
-		const entry = branch[index];
-		if (entry.type === "model_usage") visit(entry.usage);
+		const entry = branch[index]!;
+		// A usage entry at the window boundary can be parented outside that
+		// window; retain it just as the old branch-only walk did.
+		if (index === startIndex && startIndex > 0 && entry.type === "model_usage") visit(entry.usage);
+		sessionManager.forEachChildModelUsage(entry.id, visit, notBeforeTimestamp);
 	}
 }
 
@@ -142,7 +161,7 @@ export class SessionStatsTracker {
 				if (usage) addUsage(usage);
 			}
 		}
-		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), addUsage);
+		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), this.#host.sessionManager, addUsage);
 		return tokens;
 	}
 
@@ -159,7 +178,6 @@ export class SessionStatsTracker {
 		let totalReasoning = 0;
 		let totalCacheWrite = 0;
 		let totalTokens = 0;
-		let totalCost = 0;
 		let totalPremiumRequests = 0;
 		let creditCost = 0;
 		let committedCreditCost = 0;
@@ -174,7 +192,6 @@ export class SessionStatsTracker {
 			totalCacheWrite += usage.cacheWrite;
 			totalTokens += usage.totalTokens;
 			totalPremiumRequests += usage.premiumRequests ?? 0;
-			totalCost += usage.cost.total;
 			const credits = usage.credits;
 			if (credits !== undefined) {
 				hasCredits = true;
@@ -206,7 +223,8 @@ export class SessionStatsTracker {
 				}
 			}
 		}
-		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), addUsage);
+		forEachActiveModelUsage(this.#host.sessionManager.getBranchView(), this.#host.sessionManager, addUsage);
+		const { cost, seanceLedgerCost, seanceTaskCost } = this.#host.sessionManager.getActiveBranchCostBreakdown();
 		return {
 			sessionFile: this.#host.sessionManager.getSessionFile(),
 			sessionId: this.#host.sessionId(),
@@ -223,7 +241,10 @@ export class SessionStatsTracker {
 				cacheWrite: totalCacheWrite,
 				total: totalTokens,
 			},
-			cost: totalCost,
+			// Billing is cumulative along the active branch; compaction only rebases context/token totals.
+			cost,
+			seanceLedgerCost,
+			seanceTaskCost,
 			premiumRequests: totalPremiumRequests,
 			...(hasCredits
 				? {

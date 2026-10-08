@@ -53,6 +53,8 @@ export interface StatusLineSession {
 		isUsingOAuth(model: Model): boolean;
 	};
 	getContextUsage(): { tokens: number; contextWindow: number; percent: number | null } | undefined;
+	/** Canonical current-session totals, including task results and active model usage. */
+	getSessionStats?(): { cost: number; seanceLedgerCost?: number; seanceTaskCost?: number };
 	autoResolvedThinkingLevel(): string | undefined;
 	isFastModeActive(): boolean;
 	/** Anthropic usage-limit label (`limit reached · wrapping up · resets 14:30`, `low priority until 14:30 · 62% left`). */
@@ -72,6 +74,7 @@ export interface FooterSession {
 	getContextUsage: StatusLineSession["getContextUsage"];
 	modelRegistry: Pick<StatusLineSession["modelRegistry"], "isUsingOAuth">;
 	sessionManager: { getEntries(): readonly { type: string; message?: AgentMessage }[] };
+	getSessionStats?: StatusLineSession["getSessionStats"];
 }
 
 /**

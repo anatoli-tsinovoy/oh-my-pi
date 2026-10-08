@@ -140,6 +140,10 @@ export interface SegmentContext {
 		cost: number;
 		/** Portion of `cost` carried by completed subagent task results. */
 		subagentCost?: number;
+		/** Source lifetime ledger cost included in canonical `cost`. */
+		seanceLedgerCost?: number;
+		/** Source task-result cost included in both `cost` and `subagentCost`. */
+		seanceTaskCost?: number;
 		tokensPerSecond: number | null;
 	};
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */

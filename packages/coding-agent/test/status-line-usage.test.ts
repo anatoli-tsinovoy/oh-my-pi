@@ -26,6 +26,14 @@ function makeComponent(
 		provider?: string;
 		modelId?: string;
 		activeIdentity?: { accountId?: string; email?: string; projectId?: string };
+		/** Aggregate assistant spend, which omits non-message child usage. */
+		assistantCost?: number;
+		/** Portion of canonical cost recorded as completed task results. */
+		subagentCost?: number;
+		/** Canonical session spend, including non-message child usage. */
+		sessionCost?: number;
+		seanceLedgerCost?: number;
+		seanceTaskCost?: number;
 	} = {},
 ): StatusLineComponent {
 	const component = statusLines.track(
@@ -44,11 +52,22 @@ function makeComponent(
 						orchestrationOutput: 0,
 						orchestrationCacheRead: 0,
 						premiumRequests: 0,
-						cost: 0,
+						cost: options.assistantCost ?? 0,
+						subagentCost: options.subagentCost,
 					}),
 				},
+				...(options.sessionCost === undefined
+					? {}
+					: {
+							getSessionStats: () => ({
+								cost: options.sessionCost!,
+								seanceLedgerCost: options.seanceLedgerCost,
+								seanceTaskCost: options.seanceTaskCost,
+							}),
+						}),
 				fetchUsageReports: async () => reports,
 				modelRegistry: {
+					isUsingOAuth: () => false,
 					authStorage: {
 						oauth: {
 							identity: (provider: string) =>
@@ -854,5 +873,58 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("5h");
 		expect(content).toContain("24%");
 		expect(content).not.toContain("7d");
+	});
+});
+describe("session cost status-line rendering", () => {
+	it("uses canonical session spend without double-counting and falls back to the provider estimate", () => {
+		const canonical = makeComponent([], { assistantCost: 0.25, sessionCost: 1.25 });
+		canonical.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["cost"],
+			sessionAccent: false,
+		});
+		const canonicalContent = stripVTControlCharacters(canonical.getTopBorder(200).content);
+		expect(canonicalContent).toContain("$1.25");
+		expect(canonicalContent).not.toContain("$0.25");
+
+		const standalone = makeComponent([], { assistantCost: 0.25 });
+		standalone.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["cost"],
+			sessionAccent: false,
+		});
+		const standaloneContent = stripVTControlCharacters(standalone.getTopBorder(200).content);
+		expect(standaloneContent).toContain("$0.25");
+	});
+	it("uses the canonical source lifetime ledger without tree duplication", () => {
+		const source = makeComponent([], { sessionCost: 180, seanceLedgerCost: 50 });
+		source.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["cost"],
+			sessionAccent: false,
+		});
+		const sourceContent = stripVTControlCharacters(source.getTopBorder(200).content);
+		expect(sourceContent).toContain("$130.00 (+50.00)");
+		expect(sourceContent).not.toContain("$180.00");
+	});
+
+	it("splits source sync task results out of the normal task-result floor", () => {
+		const sourceSync = makeComponent([], {
+			sessionCost: 195,
+			subagentCost: 15,
+			seanceLedgerCost: 50,
+			seanceTaskCost: 10,
+		});
+		sourceSync.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["cost"],
+			sessionAccent: false,
+		});
+		const content = stripVTControlCharacters(sourceSync.getTopBorder(200).content);
+		expect(content).toContain("$130.00 (+65.00)");
 	});
 });

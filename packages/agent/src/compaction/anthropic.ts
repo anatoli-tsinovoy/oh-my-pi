@@ -212,7 +212,7 @@ export interface AnthropicNativeCompactionOptions
 			| "providerSessionState"
 			| "maxInFlightRequests"
 		>,
-		Pick<InstrumentedChatSpanOptions, "completeImpl" | "telemetry" | "retry"> {}
+		Pick<InstrumentedChatSpanOptions, "completeImpl" | "telemetry" | "retry" | "onAttempt"> {}
 
 /**
  * Run one compaction request and return the summary and signature the API wrote. `completeSimple`
@@ -252,6 +252,7 @@ export async function requestAnthropicNativeCompaction(
 			oneshotKind: "compaction_native",
 			completeImpl: options.completeImpl,
 			retry: options.retry,
+			onAttempt: options.onAttempt,
 		},
 	);
 	if (response.stopReason === "aborted") {

@@ -5,6 +5,10 @@ import type { Component, OverlayHandle, OverlayOptions, TUI } from "@oh-my-pi/pi
 import { AgentsHubComponent } from "@oh-my-pi/pi-tui/overlays/agents-hub";
 import * as themeModule from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelPickerComponent } from "@oh-my-pi/pi-tui/overlays/model-picker";
+import { cfgTaskAgentModelOverrides } from "@oh-my-pi/pi-coding-agent/task/settings";
 
 /** The overlay members of `ui` the single-instance guard reads and drives. */
 interface OverlayUi {
@@ -131,6 +135,72 @@ describe("single-instance menus", () => {
 		controller.showModelSelector({ temporaryOnly: true });
 		expect(overlayStack).toHaveLength(2);
 		expect(overlayStack.at(-1)?.component).toBe(picker);
+	});
+	it("returns a one-off model without changing the parent session or Task defaults", () => {
+		const { ui, shown } = overlayUi();
+		const settings = Settings.isolated({});
+		cfgTaskAgentModelOverrides.override(settings, {
+			...cfgTaskAgentModelOverrides.get(settings),
+			task: "saved/task-default",
+		});
+		const savedTaskModel = structuredClone(cfgTaskAgentModelOverrides.get(settings));
+		const parentModel = buildModel({
+			id: "parent-model",
+			name: "parent-model",
+			api: "openai-completions",
+			provider: "fixture",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 1024,
+		});
+		const alternative = buildModel({
+			id: "alternative",
+			name: "alternative",
+			api: "openai-completions",
+			provider: "fixture",
+			baseUrl: "https://example.com",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 1024,
+		});
+		const setModelTemporary = vi.fn();
+		const models = [parentModel, alternative] satisfies Model[];
+		const ctx = createInteractiveModeContext({
+			settings,
+			session: {
+				model: parentModel,
+				scopedModels: [],
+				getContextUsage: () => undefined,
+				getRoleModelCycle: () => undefined,
+				effectiveServiceTier: () => undefined,
+				setModelTemporary,
+				modelRegistry: {
+					getError: () => undefined,
+					getAvailable: () => models,
+					getAll: () => models,
+					refreshIfStale: async () => false,
+				},
+			},
+			ui,
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
+		});
+		const controller = new SelectorController(ctx);
+		const onSelect = vi.fn();
+
+		controller.showModelSelector({ selectOnly: { onSelect } });
+		const picker = shown.at(-1);
+		if (!(picker instanceof ModelPickerComponent)) throw new Error("Expected model picker");
+		picker.handleInput("alternative");
+		picker.handleInput("\n");
+
+		expect(onSelect).toHaveBeenCalledWith("fixture/alternative");
+		expect(setModelTemporary).not.toHaveBeenCalled();
+		expect(cfgTaskAgentModelOverrides.get(settings)).toEqual(savedTaskModel);
 	});
 
 	it("opens one agents dashboard while it loads, and opens again after a failed load", async () => {

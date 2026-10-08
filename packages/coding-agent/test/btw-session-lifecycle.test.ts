@@ -16,6 +16,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -137,12 +138,15 @@ describe("BTW session boundaries", () => {
 		return file;
 	}
 
-	async function picker(file: string): Promise<SessionSelectorComponent> {
+	async function picker(
+		file: string,
+		onSelect?: (session: SessionInfo) => void | Promise<void>,
+	): Promise<SessionSelectorComponent> {
 		const list = await SessionManager.list(directory.path(), directory.path());
 		const selected = list.find(item => item.path === file);
 		if (!selected) throw new Error("Expected saved picker target");
 		vi.spyOn(SessionManager, "listForPicker").mockResolvedValue([selected]);
-		await new SelectorController(mode).showSessionSelector();
+		await new SelectorController(mode).showSessionSelector(undefined, onSelect);
 		const component = vi.spyOn(mode.ui, "showOverlay").mock.calls.at(-1)?.[0];
 		if (!(component instanceof SessionSelectorComponent)) throw new Error("Expected session selector");
 		return component;
@@ -188,6 +192,21 @@ describe("BTW session boundaries", () => {
 		panel.handleInput("\n");
 		return { finished: done.promise };
 	}
+	it("returns a selected source without resuming or changing the current session", async () => {
+		const target = await targetSession();
+		const original = await Bun.file(sourceFile).text();
+		const resume = vi.spyOn(SelectorController.prototype, "handleResumeSession");
+		const selected = Promise.withResolvers<SessionInfo>();
+		const panel = await picker(target, session => selected.resolve(session));
+
+		panel.handleInput("\n");
+
+		expect((await selected.promise).path).toBe(target);
+		expect(resume).not.toHaveBeenCalled();
+		expect(manager.getSessionFile()).toBe(sourceFile);
+		expect(await Bun.file(sourceFile).text()).toBe(original);
+		expect(await Bun.file(target).exists()).toBe(true);
+	});
 
 	it.each(["delete command", "picker delete", "picker resume"] as const)(
 		"%s waits for cancelled BTW persistence before changing the source session",

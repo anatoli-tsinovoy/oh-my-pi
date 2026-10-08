@@ -30,7 +30,7 @@
 
 ## Inputs
 
-The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default on).
+The wire schema is shape-swapped by `task.batch` (default on). One unit of work is `{ name?, agent?, sourceSession?, model?, task, solutionSpace, effort?, outputSchema?, schemaMode?, tools?, isolated? }`; `sourceSession` and `model` are seance-only. `isolated` exists only when `task.isolation.enabled` is true **and plan mode is disabled**; `effort` requires `task.enableEffort=true` (default off), and `tools` requires `eval.tools.enabled` (default on).
 
 - **Batch shape** (`task.batch` on): `{ context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules; there is no top-level agent field. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `agent`, `outputSchema`, and `schemaMode` are per item. `effort` is added only when its setting enables it; `isolated` additionally requires plan mode to be disabled.
 - **Flat shape** (`task.batch` off): `{ ...item }` — exactly one spawn per call. Shared background goes into a `local://` file (e.g. `local://ctx.md`) that each spawn's `task` references; subagents share the parent's `local://` root.
@@ -41,6 +41,8 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 | `tasks` | `array` | Yes (batch) | One task item per subagent. Provided names must be unique within the call (case-insensitive). Rejected when `task.batch` is off. |
 | `name` | `string` | No | Stable agent name — becomes the registry/IRC id. The prompt requests CamelCase, at most 32 characters; the wire schema only requires a string. Defaults to a generated AdjectiveNoun name and is uniquified per session by `AgentOutputManager`. Item field in batch shape, top-level in flat shape. |
 | `agent` | `string` | No | Agent type to run this item (e.g. `scout`). Defaults to the spawn policy's default agent (usually `task`); items in one batch call may use different agent types. Item field in batch shape, top-level in flat shape. |
+| `sourceSession` | `string` | Required with `agent: "seance"` | Session id prefix or JSONL path to fork as the seance agent's history. Rejected for every other agent. Item field in batch shape, top-level in flat shape. |
+| `model` | `string \| string[]` | No | Seance-only explicit model selector or ordered selectors; when omitted, restore the fork's saved active-role, then saved default model, bypassing inherited task/agent model defaults. If neither is recorded or neither recorded model can be restored, fail and advise an explicit model rather than sending history to an arbitrary model. Explicit selectors use normal task model priority/auth fallback. Item field in batch shape, top-level in flat shape. |
 | `task` | `string` | Yes | The work — complete, self-contained instructions. Empty-after-trim is rejected. Item field in batch shape, top-level in flat shape. |
 | `solutionSpace` | `string` | Yes | How open-ended the child's problem is: whether the fix or design is given, or which causes or designs remain open (e.g. `one fix: rename, names given`; `deadlock cause open, no repro`). Volume of work does not widen it. Rides the child's first prompt into the `auto` thinking classifier as its sole input — the judge sees this field, not the `task` text; ignored when the child's thinking selector is not `auto` or `effort` overrides it. Blank or missing values fall back to classifying the `task` text: the schema advertises it as required, but the tool's lenient argument validation still spawns a call that omits it. Item field in batch shape, top-level in flat shape. |
 | `effort` | `"lo" \| "med" \| "hi"` | No | Present only with `task.enableEffort=true`. Per-spawn thinking effort, mapped onto the resolved model's supported range (lowest/middle/highest level it tops out at, e.g. `high`/`xhigh`/`max`). Overrides the agent's default selector, including `auto`; omitting it keeps the agent's configured selector — automatic per-prompt classification only for agents configured `auto` (e.g. the bundled `task`); `scout`/`sonic` configure `medium`. Item field in batch shape, top-level in flat shape. |
@@ -52,6 +54,17 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 There is no wire label field: the one-line UI label shown in the TUI/registry is generated automatically from the `task` text by the tiny/title model (fire-and-forget), so callers never provide it.
 
 Users can tag models with `^` in the composer. The resulting session-local `m1`, `m2`, … pseudonyms are accepted as `agent` by task, eval `agent()`, and `workpool()`; each uses the bundled task template pinned to the tagged selector. See [user-tagged model agents](../task-agent-discovery.md#user-tagged-model-agents) for persistence, boundaries, and precedence.
+
+## Seance: consult a prior session
+
+Set `agent: "seance"` and `sourceSession` to an id prefix or JSONL path. The agent reads a fork of that session; it never writes to the source or switches the parent session. Without a source, the `/seance` command uses the existing `/resume` picker in selection-only mode. After an interactive selection, choose the saved model or use the existing model picker; `--model <selector>` overrides directly.
+
+The fork restores its saved active-role, then saved default model, instead of inheriting the parent's task/agent model defaults. If neither model is recorded or neither recorded model can be restored, seance fails with guidance to choose `--model`; it never sends the history to an arbitrary model. When restoration falls back from an unavailable active-role to the saved default, report that saved-model fallback. An explicit override follows normal task model selection and auth fallback; report the model actually used after fallback.
+
+Seance has only `read`, `grep`, `glob`, and `yield`. The prior transcript is historical context, not the prior system prompt, tool inventory, or agent identity. Small fork contexts use the existing session compaction behavior. The child remains a normal keepalive subagent: the main agent can message its `agent://<id>` through IRC, incoming messages wake it, and its yielded answers are relayed automatically. The parent session remains selected.
+Seance resolves unqualified `artifact://` and `local://` references in its fork-owned namespace, including artifacts copied with the fork; the same URLs in the main session address the main namespace. When relaying historical evidence, quote the relevant content or cite a known absolute copied-file path instead of forwarding those URLs. The copied artifacts are not a snapshot of the full original workspace.
+
+Seance's fork starts with zero inherited source-session cost, leaving the source's historical cost untouched. New seance generations and IRC follow-ups add cost to the current parent, and that accumulated cost survives parent compaction. Each child run's usage remains a per-run delta; historical nested-task, progress, and `model_usage` accounting is reset in the fork.
 
 Runtime stays permissive: the flat form is accepted even while `task.batch` is on (internal callers such as the commit flow's `analyze_files`, and stale transcripts). The model only ever sees one shape.
 
@@ -147,7 +160,7 @@ Artifacts and side channels:
   - Arms idle-TTL timers in `AgentLifecycleManager` (unref'd; they never hold the process open).
   - Emits `task:subagent:event`, `task:subagent:progress`, and `task:subagent:lifecycle` on the parent event bus.
   - Allocates session-scoped output ids through `AgentOutputManager` so `agent://` stays unique across invocations.
-  - Shares the parent `local://` root and `ArtifactManager` with subagents.
+- Ordinary subagents share the parent's `local://` root and `ArtifactManager`; seance uses its fork's own artifact/local namespace.
 - Background work / cancellation
   - `write proc://<jobId>/kill` (no `content` needed) or parent tool-call abort cancels background jobs; parent tool-call abort cancels sync runs through the call signal. A hard-aborted run lands `aborted` and is torn down. An owned running subagent without a job can be cancelled through `proc://<agentId>/kill`, which aborts and releases its session.
   - Missing-`yield` recovery sends up to three internal reminder prompts to the child session.

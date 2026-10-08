@@ -138,6 +138,7 @@ export {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	taskSchema,
 } from "./types";
+export { resolveSeanceSession } from "./seance";
 
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
@@ -284,7 +285,13 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	const item: TaskItem = {
+		name: params.name,
+		agent: params.agent,
+		task: params.task,
+		sourceSession: params.sourceSession,
+		model: params.model,
+	};
 	if ("solutionSpace" in params) item.solutionSpace = params.solutionSpace;
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
@@ -309,6 +316,8 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if (item.task !== undefined) spawn.task = item.task;
 	if (item.solutionSpace !== undefined) spawn.solutionSpace = item.solutionSpace;
 	if (params.context !== undefined) spawn.context = params.context;
+	if (item.sourceSession !== undefined) spawn.sourceSession = item.sourceSession;
+	if (item.model !== undefined) spawn.model = item.model;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
 	if ("tools" in item) spawn.tools = item.tools;
@@ -338,7 +347,23 @@ function planSpawns(rawParams: unknown, batchEnabled: boolean, defaultAgent: str
 	const error = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 	if (error) return error;
 	const items = resolveSpawnItems(params);
-	return { params, items, spawns: items.map(item => spawnParamsFor(params, item, defaultAgent)) };
+	const spawns = items.map(item => spawnParamsFor(params, item, defaultAgent));
+	for (const spawn of spawns) {
+		const agent = spawn.agent?.trim().toLowerCase() || defaultAgent.trim().toLowerCase();
+		if (spawn.sourceSession !== undefined && typeof spawn.sourceSession !== "string") {
+			return "`sourceSession` must be a session ID prefix or JSONL path.";
+		}
+		if (typeof spawn.sourceSession === "string" && spawn.sourceSession.trim().length === 0) {
+			return "`sourceSession` cannot be empty.";
+		}
+		if (spawn.sourceSession !== undefined && agent !== "seance") {
+			return '`sourceSession` is only valid with `agent: "seance"`.';
+		}
+		if (agent === "seance" && (typeof spawn.sourceSession !== "string" || !spawn.sourceSession.trim())) {
+			return "Agent `seance` requires a `sourceSession` ID prefix or JSONL path.";
+		}
+	}
+	return { params, items, spawns };
 }
 
 /**
@@ -357,6 +382,7 @@ interface MergedSyncPayloads {
 	contentParts: string[];
 	results: SingleResult[];
 	usage?: Usage;
+	seanceTaskCost: number;
 	outputPaths?: string[];
 	projectAgentsDir: string | null;
 	/** Some spawn returned an error result. */
@@ -379,6 +405,7 @@ function mergeSyncPayloads(
 	const outputPaths: string[] = [];
 	const usageTotals = createUsageTotals();
 	let hasUsage = false;
+	let seanceTaskCost = 0;
 	let projectAgentsDir: string | null = null;
 	let isError = false;
 	for (let position = 0; position < spawns.length; position++) {
@@ -394,6 +421,7 @@ function mergeSyncPayloads(
 		if (text) contentParts.push(text);
 		for (const result of payload.details?.results ?? []) {
 			results.push({ ...result, index });
+			if (result.agent === "seance" && result.usage) seanceTaskCost += result.usage.cost.total;
 			if (result.usage) {
 				addUsageTotals(usageTotals, result.usage);
 				hasUsage = true;
@@ -405,6 +433,7 @@ function mergeSyncPayloads(
 		contentParts,
 		results,
 		usage: hasUsage ? usageTotals : undefined,
+		seanceTaskCost,
 		outputPaths: outputPaths.length > 0 ? outputPaths : undefined,
 		projectAgentsDir,
 		isError,
@@ -806,6 +835,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			assignment: (params.task ?? "").trim(),
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
+			...(params.model !== undefined ? { model: params.model } : {}),
+			...(params.sourceSession !== undefined ? { sourceSession: params.sourceSession } : {}),
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
@@ -1053,17 +1084,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		let failedCount = 0;
 		let primaryJobId = asyncSpawns[0].agentId;
 		const syncResults: SingleResult[] = [];
-		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
-		let syncUsage: Usage | undefined;
-		// oxlint-disable-next-line prefer-const -- read by buildAsyncDetails before assignment
-		let syncOutputPaths: string[] | undefined;
+		const syncDetails: {
+			usage: Usage | undefined;
+			seanceTaskCost: number | undefined;
+			outputPaths: string[] | undefined;
+		} = { usage: undefined, seanceTaskCost: undefined, outputPaths: undefined };
 		let syncProjectAgentsDir: string | null = null;
 		const buildAsyncDetails = (): TaskToolDetails => ({
 			projectAgentsDir: syncProjectAgentsDir,
 			results: [...syncResults],
 			totalDurationMs: Date.now() - callStartedAt,
-			usage: syncUsage,
-			outputPaths: syncOutputPaths,
+			usage: syncDetails.usage,
+			outputPaths: syncDetails.outputPaths,
+			seanceTaskCost: syncDetails.seanceTaskCost,
 			progress: spawns.map(spawn => ({ ...spawn.progress })),
 			async: {
 				state: settledCount < asyncSpawns.length ? "running" : failedCount > 0 ? "failed" : "completed",
@@ -1212,8 +1245,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			payloads,
 		);
 		syncResults.push(...merged.results);
-		syncUsage = merged.usage;
-		syncOutputPaths = merged.outputPaths;
+		syncDetails.usage = merged.usage;
+		syncDetails.seanceTaskCost = merged.seanceTaskCost;
+		syncDetails.outputPaths = merged.outputPaths;
 		syncProjectAgentsDir = merged.projectAgentsDir;
 		// Settle the inline spawns' progress rows from their merged results so
 		// post-return job updates carry final statuses, not the last snapshot.
@@ -1314,6 +1348,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.advisor = nextProgress.advisor ?? progress.advisor;
 						progress.completionPercent = nextProgress.completionPercent ?? progress.completionPercent;
 						progress.resolvedModelRoute = nextProgress.resolvedModelRoute ?? progress.resolvedModelRoute;
+						progress.modelFallbackMessage = nextProgress.modelFallbackMessage;
 						progress.tokens = nextProgress.tokens;
 						progress.requests = nextProgress.requests;
 						progress.contextTokens = nextProgress.contextTokens;
@@ -1402,6 +1437,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.modelRole = singleResult?.modelRole ?? progress.modelRole;
 					progress.advisor = singleResult?.advisor ?? progress.advisor;
 					progress.resolvedModelRoute = singleResult?.resolvedModelRoute ?? progress.resolvedModelRoute;
+					progress.modelFallbackMessage = singleResult?.modelFallbackMessage;
 					if (singleResult?.resolvedModel) {
 						progress.resolvedModel = singleResult.resolvedModel;
 						progress.resolvedModelIdentity = singleResult.resolvedModelIdentity;
@@ -1520,6 +1556,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				results: merged.results,
 				totalDurationMs: Date.now() - startTime,
 				usage: merged.usage,
+				seanceTaskCost: merged.seanceTaskCost,
 				outputPaths: merged.outputPaths,
 			},
 		};
@@ -1618,6 +1655,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				agent: params.agent,
+				model: params.model,
+				sourceSession: params.sourceSession,
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
@@ -1686,6 +1725,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				details: {
 					projectAgentsDir: null,
 					results: salvaged ? [salvaged] : [],
+					...(salvaged?.agent === "seance" ? { seanceTaskCost: salvaged.usage?.cost.total ?? 0 } : {}),
 					totalDurationMs: Date.now() - startTime,
 					...(salvaged?.usage ? { usage: salvaged.usage } : {}),
 					...(salvaged?.outputPath ? { outputPaths: [salvaged.outputPath] } : {}),
@@ -1711,6 +1751,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				results: [result],
 				totalDurationMs,
 				usage: result.usage,
+				...(result.agent === "seance" ? { seanceTaskCost: result.usage?.cost.total ?? 0 } : {}),
 				outputPaths: result.outputPath ? [result.outputPath] : undefined,
 			},
 		};

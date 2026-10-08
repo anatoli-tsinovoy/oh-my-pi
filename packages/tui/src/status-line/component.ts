@@ -2410,6 +2410,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		previewTitle?: string,
 	): SegmentContext {
 		const state = this.session.state;
+		const settings = this.#resolveSettings();
+		const costSegmentConfigured = settings.leftSegments.includes("cost") || settings.rightSegments.includes("cost");
+		const canonicalStats = costSegmentConfigured ? this.session.getSessionStats?.() : undefined;
 
 		// Trigger background fetch (5-min TTL); render uses cached value
 		this.refreshUsageInBackground();
@@ -2429,6 +2432,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		};
 		const usageStats = {
 			...aggregateUsageStats,
+			cost: canonicalStats?.cost ?? aggregateUsageStats.cost,
+			seanceLedgerCost: canonicalStats?.seanceLedgerCost ?? 0,
+			seanceTaskCost: canonicalStats?.seanceTaskCost ?? 0,
 			tokensPerSecond: this.#getTokensPerSecond(),
 		};
 
@@ -2468,7 +2474,6 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
-		const settings = this.#resolveSettings();
 		const sessionAccentEnabled = settings.sessionAccent !== false;
 		const brandVisible = settings.leftSegments.includes("pi") || settings.rightSegments.includes("pi");
 		const turnElapsedMs = this.getTurnElapsedMs();

@@ -409,6 +409,32 @@ function entryUsage(entry: SessionEntry): Usage | undefined {
 	return undefined;
 }
 
+function isSeanceLedgerUsage(entry: SessionEntry): entry is ModelUsageEntry {
+	return (
+		entry.type === "model_usage" &&
+		(entry.purpose === "seance-command" ||
+			entry.purpose === "seance-async-initial" ||
+			entry.purpose === "seance-irc-wake" ||
+			entry.purpose === "seance-auxiliary")
+	);
+}
+
+function seanceTaskCostFromEntry(entry: SessionEntry): number {
+	if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "task") {
+		return 0;
+	}
+	const details = entry.message.details;
+	if (details === null || typeof details !== "object") return 0;
+	const cost = Reflect.get(details, "seanceTaskCost");
+	return typeof cost === "number" && Number.isFinite(cost) ? cost : 0;
+}
+
+interface ActiveBranchCostBreakdown {
+	cost: number;
+	seanceLedgerCost: number;
+	seanceTaskCost: number;
+}
+
 /** Complete incomplete assistant usage in loaded history; returns how many messages were repaired. */
 function normalizeLoadedUsage(entries: SessionEntry[]): number {
 	let repaired = 0;
@@ -447,6 +473,29 @@ function resetUsageCost(usage: Usage | undefined): void {
 	usage.premiumRequests = undefined;
 }
 
+function resetTaskResultBilling(details: unknown): void {
+	if (details === null || typeof details !== "object") return;
+	const results = Reflect.get(details, "results");
+	if (Array.isArray(results)) {
+		for (const result of results) {
+			if (result === null || typeof result !== "object") continue;
+			const usage = Reflect.get(result, "usage");
+			if (usage !== null && typeof usage === "object" && Reflect.get(usage, "cost") !== undefined) {
+				resetUsageCost(usage as Usage);
+			}
+		}
+	}
+	const seanceTaskCost = Reflect.get(details, "seanceTaskCost");
+	if (typeof seanceTaskCost === "number") Reflect.set(details, "seanceTaskCost", 0);
+	const progress = Reflect.get(details, "progress");
+	if (Array.isArray(progress)) {
+		for (const item of progress) {
+			if (item === null || typeof item !== "object") continue;
+			if (typeof Reflect.get(item, "cost") === "number") Reflect.set(item, "cost", 0);
+		}
+	}
+}
+
 function isAssistantEntry(entry: SessionEntry): boolean {
 	return entry.type === "message" && entry.message.role === "assistant";
 }
@@ -477,13 +526,14 @@ function orderedByTimestamp(a: SessionTreeNode, b: SessionTreeNode): number {
 
 /**
  * Maintains the derived views over a session's entry list: id lookup, the
- * parent→children adjacency, the resolved label map, the active leaf, and the
- * running usage totals. Kept in lockstep with the manager's `#entries` so reads
+ * parent→children and model-usage-sibling indexes, the resolved label map, the active leaf,
+ * and running usage totals. Kept in lockstep with manager `#entries` so reads
  * stay O(1)/O(children) instead of rescanning the whole journal.
  */
 class SessionEntryIndex {
 	#entriesById = new Map<string, SessionEntry>();
 	#children = new Map<string | null, SessionEntry[]>();
+	#modelUsageChildren = new Map<string | null, ModelUsageEntry[]>();
 	#labels = new Map<string, string>();
 	#leaf: string | null = null;
 	#usage = emptyUsageStatistics();
@@ -500,6 +550,7 @@ class SessionEntryIndex {
 	clear(): void {
 		this.#entriesById.clear();
 		this.#children.clear();
+		this.#modelUsageChildren.clear();
 		this.#labels.clear();
 		this.#leaf = null;
 		this.#usage = emptyUsageStatistics();
@@ -537,6 +588,11 @@ class SessionEntryIndex {
 		const bucket = this.#children.get(entry.parentId);
 		if (bucket) bucket.push(entry);
 		else this.#children.set(entry.parentId, [entry]);
+		if (isNew && entry.type === "model_usage") {
+			const usageSiblings = this.#modelUsageChildren.get(entry.parentId);
+			if (usageSiblings) usageSiblings.push(entry);
+			else this.#modelUsageChildren.set(entry.parentId, [entry]);
+		}
 
 		if (entry.type === "label") {
 			if (entry.label) this.#labels.set(entry.targetId, entry.label);
@@ -596,6 +652,24 @@ class SessionEntryIndex {
 		return [...(this.#children.get(parentId) ?? [])];
 	}
 
+	forEachChildModelUsage(
+		parentId: string | null,
+		visit: (usage: Usage) => void,
+		notBeforeTimestamp?: string,
+		excludeEntryId?: string,
+	): void {
+		const usageSiblings = this.#modelUsageChildren.get(parentId);
+		if (!usageSiblings) return;
+		for (const entry of usageSiblings) {
+			if (
+				entry.id !== excludeEntryId &&
+				(notBeforeTimestamp === undefined || entry.timestamp >= notBeforeTimestamp)
+			) {
+				visit(entry.usage);
+			}
+		}
+	}
+
 	labelFor(id: string): string | undefined {
 		return this.#labels.get(id);
 	}
@@ -606,6 +680,61 @@ class SessionEntryIndex {
 
 	usageSnapshot(): UsageStatistics {
 		return { ...this.#usage };
+	}
+
+	activeBranchCost(): number {
+		return this.#activeBranchCost();
+	}
+
+	activeBranchCostBreakdown(): ActiveBranchCostBreakdown {
+		const breakdown: ActiveBranchCostBreakdown = { cost: 0, seanceLedgerCost: 0, seanceTaskCost: 0 };
+		this.#activeBranchCost(breakdown);
+		return breakdown;
+	}
+
+	#activeBranchCost(breakdown?: ActiveBranchCostBreakdown): number {
+		const branch = this.branchView();
+		let cost = 0;
+		let seanceLedgerCost = 0;
+		let seanceTaskCost = 0;
+		const rootEntry = branch[0];
+		const rootUsageSiblings = this.#modelUsageChildren.get(null);
+		if (!rootEntry || rootEntry.parentId === null) {
+			if (rootUsageSiblings) {
+				for (const entry of rootUsageSiblings) {
+					if (entry.id !== rootEntry?.id) {
+						cost += entry.usage.cost.total;
+						if (breakdown && isSeanceLedgerUsage(entry)) seanceLedgerCost += entry.usage.cost.total;
+					}
+				}
+			}
+		}
+		for (let index = 0; index < branch.length; index++) {
+			const entry = branch[index]!;
+			const usage = entryUsage(entry);
+			if (usage) {
+				cost += usage.cost.total;
+				if (breakdown && isSeanceLedgerUsage(entry)) seanceLedgerCost += usage.cost.total;
+			}
+			if (breakdown) seanceTaskCost += seanceTaskCostFromEntry(entry);
+			const next = branch[index + 1];
+			const activeChildUsageId = next?.type === "model_usage" ? next.id : undefined;
+			const usageSiblings = this.#modelUsageChildren.get(entry.id);
+			if (usageSiblings) {
+				for (const sibling of usageSiblings) {
+					if (sibling.id !== activeChildUsageId) {
+						cost += sibling.usage.cost.total;
+						if (breakdown && isSeanceLedgerUsage(sibling)) seanceLedgerCost += sibling.usage.cost.total;
+					}
+				}
+			}
+		}
+		if (breakdown) {
+			breakdown.cost = cost;
+			breakdown.seanceLedgerCost = seanceLedgerCost;
+			breakdown.seanceTaskCost = seanceTaskCost;
+		}
+		return cost;
 	}
 
 	pathTo(id: string | null | undefined = this.#leaf): SessionEntry[] {
@@ -890,11 +1019,8 @@ export class SessionManager {
 	 */
 	#draftOnlySessionCleanupArmed = false;
 
-	/**
-	 * Collab replication tap: invoked for every appended entry with the
-	 * in-memory (pre-blob-externalization) entry, so inline images survive.
-	 */
-	onEntryAppended?: (entry: SessionEntry) => void;
+	/** Independent subscribers to append notifications; callbacks receive the in-memory entry. */
+	#appendedEntryListeners = new Set<(entry: SessionEntry) => void>();
 
 	#turnBudgetTotal: number | null = null;
 	#turnBudgetHard = false;
@@ -1921,13 +2047,24 @@ export class SessionManager {
 		);
 	}
 
+	/**
+	 * Subscribe to future entry appends (existing entries are not replayed).
+	 * Each listener receives the in-memory, pre-blob-externalization entry;
+	 * listener failures are isolated from other subscribers.
+	 */
+	subscribeToAppendedEntries(listener: (entry: SessionEntry) => void): () => void {
+		this.#appendedEntryListeners.add(listener);
+		return () => {
+			this.#appendedEntryListeners.delete(listener);
+		};
+	}
+
 	#notifyEntryAppended(entry: SessionEntry): void {
-		const callback = this.onEntryAppended;
-		if (callback) {
+		for (const listener of this.#appendedEntryListeners) {
 			try {
-				callback(entry);
-			} catch (err) {
-				logger.warn("collab entry hook failed", { error: String(err) });
+				listener(entry);
+			} catch (error) {
+				logger.warn("session entry append subscriber failed", { error: String(error) });
 			}
 		}
 	}
@@ -3678,6 +3815,25 @@ export class SessionManager {
 		return this.#index.branchView();
 	}
 
+	/** Visit indexed off-transcript usage siblings within the requested time window. */
+	forEachChildModelUsage(
+		parentId: string | null,
+		visit: (usage: Usage) => void,
+		notBeforeTimestamp?: string,
+		excludeEntryId?: string,
+	): void {
+		this.#index.forEachChildModelUsage(parentId, visit, notBeforeTimestamp, excludeEntryId);
+	}
+	/** Lifetime spend along the active branch, including off-transcript ledger siblings. */
+	getActiveBranchCost(): number {
+		return this.#index.activeBranchCost();
+	}
+
+	/** Active-branch lifetime spend, split by the exact seance-ledger purposes. */
+	getActiveBranchCostBreakdown(): ActiveBranchCostBreakdown {
+		return this.#index.activeBranchCostBreakdown();
+	}
+
 	/**
 	 * Build the session context (LLM messages), or — with `{ transcript: true }` —
 	 * the full-history display transcript, from the current leaf path.
@@ -3931,6 +4087,8 @@ export class SessionManager {
 			sessionFile?: string;
 			resetInheritedCost?: boolean;
 			repairInterruptedTail?: boolean;
+			/** Preserve inherited init as history without making it the fork's runtime contract. */
+			neutralizeInheritedSessionInit?: boolean;
 		},
 	): Promise<SessionManager> {
 		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
@@ -3953,6 +4111,23 @@ export class SessionManager {
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
 		normalizeLoadedUsage(history);
 		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
+		if (options?.neutralizeInheritedSessionInit) {
+			for (let index = 0; index < history.length; index++) {
+				const entry = history[index];
+				if (entry.type !== "session_init") continue;
+				// A source init is historical context only in this fork. Preserve
+				// its tree identity/payload, but keep it out of the executable
+				// session_init stream used by persisted revival.
+				history[index] = {
+					type: "custom",
+					customType: "source_session_init",
+					id: entry.id,
+					parentId: entry.parentId,
+					timestamp: entry.timestamp,
+					data: entry,
+				};
+			}
+		}
 		manager.#resetToNewSession(
 			{
 				parentSession: sourceHeader?.id,
@@ -3996,7 +4171,12 @@ export class SessionManager {
 	 * on them — since only billing attribution is inherited, not context size.
 	 */
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
-		for (const entry of history) resetUsageCost(entryUsage(entry));
+		for (const entry of history) {
+			resetUsageCost(entryUsage(entry));
+			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
+				resetTaskResultBilling(entry.message.details);
+			}
+		}
 	}
 
 	/**

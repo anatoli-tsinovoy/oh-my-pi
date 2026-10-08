@@ -17,10 +17,17 @@ describe("AgentSession session stats", () => {
 		if (!found) throw new Error("Expected a bundled model");
 		return found;
 	};
-	const appendUsage = (manager: SessionManager, target: Model, input: number, overrides: Partial<Usage> = {}) =>
+	const appendUsage = (
+		manager: SessionManager,
+		target: Model,
+		input: number,
+		overrides: Partial<Usage> = {},
+		parentId: string | null = manager.getLeafId(),
+		purpose = "auto-thinking",
+	) =>
 		manager.appendModelUsage(
 			{
-				purpose: "auto-thinking",
+				purpose,
 				role: "smol",
 				api: target.api,
 				provider: target.provider,
@@ -36,7 +43,7 @@ describe("AgentSession session stats", () => {
 					...overrides,
 				},
 			},
-			{ sessionId: manager.getSessionId(), parentId: manager.getLeafId() },
+			{ sessionId: manager.getSessionId(), parentId },
 		);
 	const createStatsSession = (manager: SessionManager, target: Model): AgentSession =>
 		new AgentSession({
@@ -90,8 +97,134 @@ describe("AgentSession session stats", () => {
 			total: 16,
 		});
 		expect(stats.cost).toBe(6);
+		expect(stats.seanceLedgerCost).toBe(0);
 		expect(stats.totalMessages).toBe(0);
 		expect(stats.assistantMessages).toBe(0);
+	});
+
+	it("accounts active-branch seance usage once without absorbing task or ordinary model usage", () => {
+		const target = model();
+		const manager = SessionManager.inMemory();
+		const root = manager.appendMessage({ role: "user", content: "active branch", timestamp: 1 });
+		const ordinaryUsage = appendUsage(
+			manager,
+			target,
+			1,
+			{ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 99 } },
+			root,
+			"cache-warm",
+		);
+		if (!ordinaryUsage) throw new Error("expected ordinary model usage entry");
+		appendUsage(
+			manager,
+			target,
+			1,
+			{ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 20 } },
+			undefined,
+			"seance-command",
+		);
+		appendUsage(
+			manager,
+			target,
+			1,
+			{ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 30 } },
+			root,
+			"seance-async-initial",
+		);
+		appendUsage(
+			manager,
+			target,
+			1,
+			{ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1 } },
+			root,
+			"seance-command-extra",
+		);
+		manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "task-result",
+			toolName: "task",
+			content: [{ type: "text", text: "completed" }],
+			details: {
+				seanceTaskCost: 5,
+				usage: {
+					input: 1,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 30 },
+				},
+			},
+			timestamp: 3,
+			isError: false,
+		});
+		appendUsage(
+			manager,
+			target,
+			1,
+			{ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 2 } },
+			root,
+			"seance-auxiliary",
+		);
+		const foreignAnchor = manager.appendMessageToBranch(
+			{ role: "user", content: "foreign branch", timestamp: 2 },
+			root,
+		);
+		appendUsage(
+			manager,
+			target,
+			1,
+			{ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 500 } },
+			foreignAnchor,
+			"seance-command",
+		);
+		session = createStatsSession(manager, target);
+
+		const stats = session.getSessionStats();
+		expect(stats.cost).toBe(182);
+		expect(stats.seanceLedgerCost).toBe(52);
+		expect(stats.seanceTaskCost).toBe(5);
+		expect(manager.getUsageStatistics().cost).toBe(682);
+		expect(manager.getActiveBranchCostBreakdown()).toEqual({
+			cost: 182,
+			seanceLedgerCost: 52,
+			seanceTaskCost: 5,
+		});
+	});
+
+	it("counts usage ledger siblings on the active branch once and excludes foreign branches", () => {
+		const target = model();
+		const manager = SessionManager.inMemory();
+		const activeAnchor = manager.appendMessage({ role: "user", content: "active branch", timestamp: 1 });
+		const activeUsage = appendUsage(manager, target, 7);
+		if (!activeUsage) throw new Error("expected active model usage entry");
+		const foreignAnchor = manager.appendMessageToBranch(
+			{ role: "user", content: "foreign branch", timestamp: 2 },
+			activeAnchor,
+		);
+		appendUsage(manager, target, 100, {}, foreignAnchor);
+		session = createStatsSession(manager, target);
+
+		expect(session.getSessionStats().cost).toBe(7);
+		expect(manager.getUsageStatistics().cost).toBe(107);
+
+		manager.branch(activeUsage);
+		session = createStatsSession(manager, target);
+		expect(session.getSessionStats().cost).toBe(7);
+	});
+
+	it("retains active-branch seance-ledger costs from before compaction", () => {
+		const target = model();
+		const manager = SessionManager.inMemory();
+		manager.appendMessage({ role: "user", content: "before compaction", timestamp: 1 });
+		appendUsage(manager, target, 4, {}, undefined, "seance-command");
+		const keptEntry = manager.appendMessage({ role: "user", content: "kept after compaction", timestamp: 2 });
+		manager.appendCompaction("summary", undefined, keptEntry, 100);
+		appendUsage(manager, target, 7, {}, undefined, "seance-irc-wake");
+		session = createStatsSession(manager, target);
+
+		expect(session.getSessionStats().cost).toBe(11);
+		expect(session.getSessionStats().seanceLedgerCost).toBe(11);
 	});
 
 	it("keeps mixed peak and off-peak charges in session and footer totals after resume", async () => {
@@ -168,7 +301,7 @@ describe("AgentSession session stats", () => {
 				manager.appendCompaction("summary", undefined, kept, 100);
 			},
 		],
-	] as const)("excludes model usage outside the latest %s window", (_name, boundary) => {
+	] as const)("keeps token totals scoped to the latest %s window", (_name, boundary) => {
 		const target = model();
 		const manager = SessionManager.inMemory();
 		appendUsage(manager, target, 100);
@@ -176,7 +309,7 @@ describe("AgentSession session stats", () => {
 		appendUsage(manager, target, 7);
 		session = createStatsSession(manager, target);
 
-		expect(session.getSessionStats()).toMatchObject({ tokens: { total: 7 }, cost: 7 });
+		expect(session.getSessionStats().tokens.total).toBe(7);
 	});
 
 	it("preserves authoritative provider occupancy above the local transcript estimate", () => {

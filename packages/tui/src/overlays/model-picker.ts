@@ -76,6 +76,8 @@ export interface ModelPickerOptions {
 	taskModeKeys?: readonly KeyId[];
 	/** `provider/id` highlighted and preselected in task mode (current Task subagent model). */
 	taskSelector?: string;
+	/** Destination for the picked model; `seance` is a one-off launch override, never a session switch. */
+	selectionTarget?: "session" | "seance";
 }
 
 /** Fixed chrome rows: top border, status row, footer, bottom border. */
@@ -90,9 +92,10 @@ const HEIGHT_FRACTION = 0.4;
 const STATUS_HINT = "Session-only switch — role models stay unchanged";
 const QUICK_ROLE_STATUS_HINT = "Quick role switch — applies its model and thinking for this session";
 const TASK_STATUS_HINT = "Task subagent switch — spawned task agents use this model (session-only)";
+const SEANCE_STATUS_HINT = "One-off seance model — current session unchanged";
 
 /** Footer hint for the active mode; keys resolve at render time so theme/keybinding changes apply. */
-function footerHint(mode: "session" | "role" | "task"): string {
+function footerHint(mode: "session" | "role" | "task", selectionTarget: "session" | "seance"): string {
 	const upDown = editorKeys("tui.select.up", "tui.select.down");
 	const enter = formatKeyHint("enter");
 	const close = `${editorKey("tui.select.cancel")} close`;
@@ -102,7 +105,9 @@ function footerHint(mode: "session" | "role" | "task"): string {
 		case "task":
 			return `${upDown} models · ${enter} use for Task subagents · type to search · ${close}`;
 		default:
-			return `${upDown} models · ${enter} use for this session · type to search · @ quick roles · ${close}`;
+			return `${upDown} models · ${enter} ${
+				selectionTarget === "seance" ? "use for seance" : "use for this session"
+			} · type to search${selectionTarget === "seance" ? "" : " · @ quick roles"} · ${close}`;
 	}
 }
 
@@ -119,6 +124,7 @@ export class ModelPickerComponent implements Component {
 	#browser: ModelBrowser;
 	#configError: string | undefined;
 	#currentSelector: string | undefined;
+	#selectionTarget: "session" | "seance";
 	#currentQuickRoleSelector: string | undefined;
 	#modelItems: ModelBrowserItem[] = [];
 	#quickRoleItems: ModelBrowserItem[] = [];
@@ -154,6 +160,7 @@ export class ModelPickerComponent implements Component {
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#taskSelector = options.taskSelector;
+		this.#selectionTarget = options.selectionTarget ?? "session";
 		if (callbacks.onPickTask) {
 			this.#taskModeKey = options.taskModeKeys?.[0];
 			for (const key of options.taskModeKeys ?? []) addKeyAliases(this.#taskMatchKeys, key);
@@ -299,20 +306,27 @@ export class ModelPickerComponent implements Component {
 		this.#browser.setMaxVisible(Math.max(MIN_VISIBLE, listBudget));
 
 		const inner = Math.max(1, width - 4);
+		const selectionStatusHint = this.#selectionTarget === "seance" ? SEANCE_STATUS_HINT : STATUS_HINT;
 		const status = this.#configError
 			? theme.fg("error", ` ${this.#configError}`)
 			: this.#taskMode
 				? theme.fg("error", ` ${TASK_STATUS_HINT}`)
-				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
+				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : selectionStatusHint}`);
 
 		const borderColor: ThemeColor | undefined = this.#taskMode ? "error" : undefined;
-		let footer = footerHint(this.#taskMode ? "task" : this.#roleMode ? "role" : "session");
+		let footer = footerHint(this.#taskMode ? "task" : this.#roleMode ? "role" : "session", this.#selectionTarget);
 		if (this.#taskModeKey !== undefined && !this.#roleMode) {
 			footer += ` · ${formatKeyHint(this.#taskModeKey)} ${this.#taskMode ? "session model" : "task model"}`;
 		}
 
 		const out: string[] = [];
-		out.push(topBorder(width, this.#taskMode ? "Switch Task Model" : "Switch Model", borderColor));
+		const title =
+			this.#selectionTarget === "seance"
+				? "Choose Seance Model"
+				: this.#taskMode
+					? "Switch Task Model"
+					: "Switch Model";
+		out.push(topBorder(width, title, borderColor));
 		out.push(row(status, width, borderColor));
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width, borderColor));
@@ -375,7 +389,7 @@ export class ModelPickerComponent implements Component {
 		const preview = this.#browser.pickerPreview("compact", current);
 		const selected = this.#browser.pickerSelected;
 		const cursor = this.#browser.cursor;
-		const memo = `${mode}\0${this.#configError ?? ""}\0${query}\0${cursor}\0${selected ?? ""}`;
+		const memo = `${mode}\0${this.#selectionTarget}\0${this.#configError ?? ""}\0${query}\0${cursor}\0${selected ?? ""}`;
 		const cached = this.#pickerRoot;
 		if (
 			cached !== undefined &&
@@ -386,17 +400,23 @@ export class ModelPickerComponent implements Component {
 		) {
 			return cached.node;
 		}
+		const selectionStatusHint = this.#selectionTarget === "seance" ? SEANCE_STATUS_HINT : STATUS_HINT;
 		const subtitle: TspPickerProps["subtitle"] = this.#configError
 			? [span(this.#configError, "error")]
 			: mode === "task"
 				? [span(TASK_STATUS_HINT, "warning")]
 				: mode === "role"
 					? QUICK_ROLE_STATUS_HINT
-					: STATUS_HINT;
+					: selectionStatusHint;
 		const cycleKey = editorKey("app.model.cycleForward") || formatKeyHint("ctrl+p");
 		const node = picker(
 			{
-				title: mode === "task" ? "Switch task model" : "Switch model",
+				title:
+					this.#selectionTarget === "seance"
+						? "Choose Seance Model"
+						: mode === "task"
+							? "Switch task model"
+							: "Switch model",
 				subtitle,
 				icon: "cpu",
 				noun: mode === "role" ? "roles" : "models",
@@ -405,7 +425,10 @@ export class ModelPickerComponent implements Component {
 				preview: "below",
 				query,
 				cursor,
-				placeholder: mode === "task" ? "Search models…" : "Search models, @ for quick roles…",
+				placeholder:
+					this.#selectionTarget === "seance" || mode === "task"
+						? "Search models…"
+						: "Search models, @ for quick roles…",
 				columns: MODEL_PICKER_COLUMNS,
 				...catalogue,
 				order: view.order,
@@ -417,7 +440,13 @@ export class ModelPickerComponent implements Component {
 				actions: compact([
 					pickerAction(
 						"use",
-						mode === "role" ? "Apply role" : mode === "task" ? "Use for Task subagents" : "Use for session",
+						mode === "role"
+							? "Apply role"
+							: mode === "task"
+								? "Use for Task subagents"
+								: this.#selectionTarget === "seance"
+									? "Use for seance"
+									: "Use for session",
 						"enter",
 						{ primary: true },
 					),
@@ -436,14 +465,15 @@ export class ModelPickerComponent implements Component {
 	/** Root card over the status line, the embedded browser, and the mode's key hints. */
 	#describeCard(): NativeNode {
 		const mode = this.#taskMode ? "task" : this.#roleMode ? "role" : "session";
-		const memo = `${mode}\0${this.#configError ?? ""}\0${this.#taskModeKey ?? ""}`;
+		const memo = `${mode}\0${this.#selectionTarget}\0${this.#configError ?? ""}\0${this.#taskModeKey ?? ""}`;
 		if (this.#nativeRoot?.memo === memo) return this.#nativeRoot.node;
 
+		const selectionStatusHint = this.#selectionTarget === "seance" ? SEANCE_STATUS_HINT : STATUS_HINT;
 		const status = this.#configError
 			? span(this.#configError, "error")
 			: this.#taskMode
 				? span(TASK_STATUS_HINT, "error")
-				: span(this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT, "muted");
+				: span(this.#roleMode ? QUICK_ROLE_STATUS_HINT : selectionStatusHint, "muted");
 		const hints: (NativeHint | undefined)[] = [
 			actionHint(["tui.select.up", "tui.select.down"], mode === "role" ? "roles" : "models"),
 			{
@@ -453,11 +483,13 @@ export class ModelPickerComponent implements Component {
 						? "apply role model"
 						: mode === "task"
 							? "use for Task subagents"
-							: "use for this session",
+							: this.#selectionTarget === "seance"
+								? "use for seance"
+								: "use for this session",
 			},
 			{ keys: [], label: "type to search" },
 		];
-		if (mode === "session") hints.push({ keys: ["@"], label: "quick roles" });
+		if (mode === "session" && this.#selectionTarget !== "seance") hints.push({ keys: ["@"], label: "quick roles" });
 		hints.push(actionHint("tui.select.cancel", "close"));
 		if (this.#taskModeKey !== undefined && !this.#roleMode) {
 			hints.push({ keys: [this.#taskModeKey], label: this.#taskMode ? "session model" : "task model" });
@@ -465,8 +497,12 @@ export class ModelPickerComponent implements Component {
 		// `card` directly: the task-mode tone is a common prop `overlayCard` doesn't take.
 		const node = card(
 			{
-				role: "omp.overlay.model-picker",
-				head: this.#taskMode ? "Switch Task Model" : "Switch Model",
+				head:
+					this.#selectionTarget === "seance"
+						? "Choose Seance Model"
+						: this.#taskMode
+							? "Switch Task Model"
+							: "Switch Model",
 				tone: this.#taskMode ? "error" : undefined,
 			},
 			[text([status], { wrap: "word" }), this.#browser, hintsRow(hints)],

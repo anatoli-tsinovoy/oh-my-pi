@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the cost status-line segment accounting for new subagent and background-model usage without counting seance spend twice.
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

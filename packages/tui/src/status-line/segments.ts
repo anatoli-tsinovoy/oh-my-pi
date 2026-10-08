@@ -784,13 +784,16 @@ const tokenRateSegment: StatusLineSegment = {
 /** Billing summary for the `cost` segment, or undefined when there is nothing to bill. */
 function costSummary(ctx: SegmentContext): string | undefined {
 	const { cost, premiumRequests } = ctx.usageStats;
-	// `cost` folds in completed task results; show the session's own spend and
-	// the subagent tree separately. The hub-projected tree total also covers
-	// grandchildren and running/async agents, but it lags persisted-roster
-	// hydration after resume, so the task-result sum is its floor.
+	// `cost` folds in completed task results. Keep source lifetime ledger spend
+	// and its task-result subset separate from the normal tree; only the latter
+	// is subject to the task-result floor when tree hydration lags.
 	const taskResultCost = ctx.usageStats.subagentCost ?? 0;
-	const ownCost = Math.max(0, cost - taskResultCost);
-	const subagentCost = Math.max(ctx.subagentTreeCost ?? 0, taskResultCost);
+	const seanceTaskCost = ctx.usageStats.seanceTaskCost ?? 0;
+	const seanceLedgerCost = ctx.usageStats.seanceLedgerCost ?? 0;
+	const nonSeanceTaskResultCost = Math.max(0, taskResultCost - seanceTaskCost);
+	const ownCost = Math.max(0, cost - taskResultCost - seanceLedgerCost);
+	const subagentCost =
+		seanceLedgerCost + seanceTaskCost + Math.max(ctx.subagentTreeCost ?? 0, nonSeanceTaskResultCost);
 	const advisorCost = ctx.session.getAdvisorCost?.() ?? 0;
 	const state = ctx.session.state;
 	const pricingPeriod = state.model?.cost

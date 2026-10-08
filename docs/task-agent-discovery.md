@@ -14,6 +14,8 @@ It covers runtime behavior as implemented today, including precedence, invalid-d
 - [`src/task/spawn-policy.ts`](../packages/coding-agent/src/task/spawn-policy.ts)
 - [`src/task/commands.ts`](../packages/coding-agent/src/task/commands.ts)
 - [`src/prompts/agents/task.md`](../packages/coding-agent/src/prompts/agents/task.md)
+- [`src/prompts/agents/seance.md`](../packages/coding-agent/src/prompts/agents/seance.md)
+- [`src/prompts/system/seance-assignment.md`](../packages/coding-agent/src/prompts/system/seance-assignment.md)
 - [`src/prompts/tools/task.md`](../packages/coding-agent/src/prompts/tools/task.md)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`src/discovery/omp-extension-roots.ts`](../packages/coding-agent/src/discovery/omp-extension-roots.ts)
@@ -131,7 +133,7 @@ Bundled agents are embedded at build time (`src/task/agents.ts`) using text impo
 
 `EMBEDDED_AGENT_DEFS` defines:
 
-- `scout`, `reviewer`, and `security-reviewer` from prompt files
+- `scout`, `reviewer`, `security-reviewer`, and `seance` from prompt files; `seance` is a read-only consultant with `read`, `grep`, `glob`, and `yield` only
 - `task` and `sonic` from the shared `task.md` body plus injected frontmatter; no bundled agent sets `prewalk` — the generic `task` agent's hand-off is armed by the `task.prewalk` setting (default off), or per agent via `/agents` / `task.agentPrewalk` / user agent frontmatter
 
 Loading path:
@@ -229,6 +231,16 @@ For task dispatch, model precedence is:
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
 After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
+
+### Seance model and source-session rules
+
+`seance` requires the task item's `sourceSession` (an id prefix or JSONL path) and forks that persisted session into a separate child history. The original file is never written; the parent remains on its current session. Historical entries provide context, but the previous session's system prompt, tool inventory, and agent identity are not restored. Small forks use the existing context-overflow compaction behavior.
+
+Before the first fork write, the inherited `session_init` is converted to historical `source_session_init`. This prevents interrupted startup from restoring the source agent's unrestricted tool contract; source `model_change` entries remain native for saved-model restoration.
+
+The bundled `seance` definition intentionally has no fixed model. If the task item omits `model`, it bypasses `task.agentModelOverrides`, agent model defaults, and the parent's model: the SDK restores the fork's saved active-role model, then its saved default model. If neither model is recorded or neither recorded model can be restored, dispatch fails with guidance to provide an explicit model; seance never sends the transcript to an arbitrary model. An explicit per-invocation `model` selector (string or ordered list) uses the normal task model priority and auth-fallback behavior. Progress/result details report the actual resolved model; when restoration falls back from an unavailable saved active-role to the saved default, they report that saved-model fallback.
+
+Seance's fork remains a normal keepalive subagent. Parent messages over IRC wake it, and its `yield` answer is relayed automatically; it needs no outbound `write` tool.
 
 The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions.
 

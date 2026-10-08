@@ -35,6 +35,7 @@ import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
+import { createParentSubagentUsageRecorder } from "./subagent-usage";
 import {
 	applyEligibleNestedPatches,
 	type IsolationContext,
@@ -72,6 +73,7 @@ import {
 	cfgTaskIsolationMerge,
 	cfgTaskMaxRecursionDepth,
 } from "./settings";
+import { resolveSeanceSession } from "./seance";
 
 /** Final structured completion metadata returned for a schema-bearing run. */
 export type StructuredSubagentSchemaResult = StructuredSubagentOutput;
@@ -118,6 +120,7 @@ export interface StructuredSubagentRequest {
 	/** Caller's description of how open-ended the work is; steers the child's `auto` thinking classification. */
 	solutionSpace?: string;
 	identity?: StructuredSubagentIdentity;
+	sourceSession?: string;
 	index?: number;
 	parentToolCallId?: string;
 	detached?: boolean;
@@ -177,6 +180,7 @@ export interface EffectiveSubagentPolicy {
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+	sourceSessionPath?: string;
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -335,6 +339,17 @@ export async function resolveEffectiveSubagentPolicy(
 	await request.session.settings.reloadFromDisk();
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
+	const isSeance = agentName.toLowerCase() === "seance";
+	if (request.sourceSession !== undefined && !isSeance) {
+		throw new StructuredSubagentError("preflight", '`sourceSession` is only valid with `agent: "seance"`.');
+	}
+	if (isSeance && !request.sourceSession?.trim()) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Agent `seance` requires a `sourceSession` ID prefix or JSONL path.",
+		);
+	}
+
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
@@ -361,7 +376,26 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	let sourceSessionPath: string | undefined;
+	if (isSeance) {
+		try {
+			sourceSessionPath = await resolveSeanceSession(
+				request.sourceSession!,
+				request.session.cwd,
+				request.session.sessionManager?.getSessionDir?.(),
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new StructuredSubagentError("preflight", message, { cause: error });
+		}
+	}
+
+	const hasExplicitRequestModel = Array.isArray(request.model)
+		? request.model.some(selector => selector.split(",").some(pattern => pattern.trim().length > 0))
+		: request.model?.split(",").some(pattern => pattern.trim().length > 0) === true;
+	const savedSessionModel = isSeance && !hasExplicitRequestModel;
+	const baseEffectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	const effectiveAgent = savedSessionModel ? { ...baseEffectiveAgent, model: undefined } : baseEffectiveAgent;
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -395,10 +429,11 @@ export async function resolveEffectiveSubagentPolicy(
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	};
-	// Role identity and patterns come from one call so they cannot be derived
-	// from different sources: the expansion below discards the alias, and the
-	// child's inherited retry-fallback chain is keyed off the role.
-	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	// Without a seance request override, the SDK must restore the saved role
+	// from the fork, rather than deriving a pattern from this parent session.
+	const modelSelection = savedSessionModel ? undefined : resolveAgentModelSelection(modelResolution);
+	const modelOverride = modelSelection?.patterns;
+	const modelRole = modelSelection?.role;
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
@@ -433,6 +468,7 @@ export async function resolveEffectiveSubagentPolicy(
 			(request.enableIrc ??
 				(request.session.enableIrc !== false &&
 					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+		sourceSessionPath,
 	};
 }
 
@@ -466,7 +502,13 @@ async function applySpawnHook(
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
 	}
-	if (spawnResult?.model === undefined) return policy;
+	if (
+		spawnResult === undefined ||
+		spawnResult.model === undefined ||
+		(policy.agentName.toLowerCase() === "seance" && policy.modelOverride === undefined)
+	) {
+		return policy;
+	}
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
 	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
@@ -525,10 +567,13 @@ function buildExecutorOptions(
 	const { session } = request;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
 	const localProtocolOptions = sessionLocalProtocolOptions(session);
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
+	const isSeance = policy.agentName.toLowerCase() === "seance";
+	const restrictToolNames = policy.planMode || session.restrictToolNames === true || isSeance;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const parentUsageRecorder = isSeance ? createParentSubagentUsageRecorder(session.sessionManager) : undefined;
 	return {
 		cwd: session.cwd,
+		sessionDir: session.sessionManager?.getSessionDir?.(),
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
@@ -554,6 +599,7 @@ function buildExecutorOptions(
 		compactionThresholdOverride: policy.compactionThresholdOverride,
 		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
+		sourceSession: policy.sourceSessionPath,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
@@ -568,12 +614,13 @@ function buildExecutorOptions(
 		sessionFile: lease.sessionFile,
 		persistArtifacts: !lease.temporary,
 		artifactsDir: lease.artifactsDir,
-		enableLsp: policy.enableLsp,
+		enableLsp: isSeance ? false : policy.enableLsp,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
 		restrictToolNames,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
+		parentUsageRecorder,
 		eventBus: session.eventBus,
 		subagentEventBus: session.subagentEventBus,
 		onProgress: request.onProgress,
@@ -583,7 +630,7 @@ function buildExecutorOptions(
 		inheritedSessionAgents: session.getSessionAgents?.(),
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		customTools: request.customTools,
+		customTools: isSeance ? [] : request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
 		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 		skills,
@@ -594,12 +641,12 @@ function buildExecutorOptions(
 		// Root policy and module paths have separate jobs: the live policy drives
 		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
 		// parent-bound extension instances while constructing the child.
-		extensionRoots: session.effectiveExtensionRoots?.bind(session),
+		extensionRoots: isSeance ? undefined : session.effectiveExtensionRoots?.bind(session),
 		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedPreparedExtensions: session.preparedExtensions,
+		preloadedPreparedExtensions: isSeance ? [] : session.preparedExtensions,
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
-		localProtocolOptions,
-		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
+		localProtocolOptions: isSeance ? undefined : localProtocolOptions,
+		parentArtifactManager: isSeance ? undefined : (session.getArtifactManager?.() ?? undefined),
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),

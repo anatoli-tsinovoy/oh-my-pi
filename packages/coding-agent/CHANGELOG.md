@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced `SessionManager.onEntryAppended` with `subscribeToAppendedEntries(listener)`, which returns an unsubscribe function and allows independent session-entry observers.
+
+### Added
+
+- Added `/seance` and the `seance` task agent to consult prior-session forks over IRC with read/grep/glob-only access and a saved or one-off model. Original history is unchanged, and only new consultation usage counts toward the current session cost.
+
 ### Fixed
 
 - Fixed `omp usage` reporting an account exactly at its reserve (e.g. 30% left with a 30% reserve) as eligible instead of inside reserve ([#14765](https://github.com/can1357/oh-my-pi/pull/14765) by [@will-bogusz](https://github.com/will-bogusz))

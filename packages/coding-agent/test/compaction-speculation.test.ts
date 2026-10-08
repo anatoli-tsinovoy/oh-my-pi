@@ -4,6 +4,7 @@ import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Model, UserMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -962,5 +963,75 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.tokensAfter : undefined).toBe(
 			agent.tokenizer.countMessages(convertToLlm(agent.state.messages), { excludeEncryptedReasoning: true }),
 		);
+	});
+	it("journals each priced native compaction attempt across V2-to-V1 fallback", async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch(request) {
+				const path = new URL(request.url).pathname;
+				if (path === "/v1/responses") {
+					return new Response(
+						`event: response.completed\ndata: ${JSON.stringify({
+							type: "response.completed",
+							response: {
+								model: "gpt-5-v2",
+								usage: {
+									input_tokens: 12,
+									output_tokens: 3,
+									total_tokens: 15,
+									input_tokens_details: { cached_tokens: 2 },
+								},
+							},
+						})}\n\n`,
+						{ headers: { "content-type": "text/event-stream" } },
+					);
+				}
+				if (path === "/v1/responses/compact") {
+					return Response.json({
+						model: "gpt-5-v1",
+						usage: { input_tokens: 8, output_tokens: 4, total_tokens: 12 },
+						output: [{ type: "compaction", encrypted_content: "encrypted-state" }],
+					});
+				}
+				return new Response("Unexpected compaction route", { status: 404 });
+			},
+		});
+		try {
+			authStorage.keys.setRuntime("openai", "loopback-key");
+			model = buildModel({
+				id: "gpt-5-compaction-test",
+				name: "GPT-5 compaction test",
+				api: "openai-responses",
+				provider: "openai",
+				baseUrl: `${server.url.origin}/v1`,
+				remoteCompaction: {
+					enabled: true,
+					api: "openai-responses",
+					v2StreamingEnabled: true,
+					v2Endpoint: `${server.url.origin}/v1/responses`,
+					endpoint: `${server.url.origin}/v1/responses/compact`,
+				},
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1_000_000, output: 1_000_000, cacheRead: 1_000_000, cacheWrite: 1_000_000 },
+				contextWindow: CONTEXT_WINDOW,
+				maxTokens: 4096,
+			});
+			maintenance = createMaintenance({ methodOrder: ["remote", "soft"] });
+			await maintenance.compact(undefined, { suppressContinuation: true });
+		} finally {
+			server.stop(true);
+			authStorage.keys.removeRuntime("openai");
+		}
+
+		const usageEntries = sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "model_usage" && entry.purpose === "compaction");
+		expect(usageEntries).toHaveLength(2);
+		expect(usageEntries.map(entry => (entry.type === "model_usage" ? entry.model : ""))).toEqual([
+			"gpt-5-v2",
+			"gpt-5-v1",
+		]);
+		expect(usageEntries.map(entry => (entry.type === "model_usage" ? entry.usage.cost.total : 0))).toEqual([15, 12]);
 	});
 });

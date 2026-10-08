@@ -68,9 +68,10 @@ export async function writeArtifact(path: string, content: string): Promise<numb
  * Artifacts are stored with sequential IDs in the session's artifact directory.
  * The directory is created lazily on first write.
  *
- * Subagents do not own their own `ArtifactManager`. The parent's instance is
- * adopted via `SessionManager.adoptArtifactManager`, so the whole parent +
- * subagent tree shares one ID space and one directory.
+ * Ordinary subagents adopt the parent's instance via
+ * `SessionManager.adoptArtifactManager`, sharing one ID space and directory
+ * across the task tree. Seance keeps its fork-owned manager so copied
+ * historical artifacts remain addressable in that consultation's namespace.
  */
 export class ArtifactManager {
 	#nextId = 0;

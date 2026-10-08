@@ -8,7 +8,7 @@ const root = path.resolve("sessions", "root.jsonl");
 const artifacts = path.resolve("sessions", "root");
 
 function ref(id: string, overrides: Partial<AgentRef> & { cost?: number } = {}): AgentRef {
-	const { cost, ...rest } = overrides;
+	const { cost, history, ...rest } = overrides;
 	const metrics: AgentMetricsSummary | undefined =
 		cost === undefined ? undefined : { tokens: 1, requests: 1, tools: 0, cost, durationMs: 0 };
 	return {
@@ -20,7 +20,7 @@ function ref(id: string, overrides: Partial<AgentRef> & { cost?: number } = {}):
 		sessionFile: path.join(artifacts, `${id}.jsonl`),
 		createdAt: 0,
 		lastActivity: 0,
-		history: metrics ? { metrics } : undefined,
+		history: metrics || history ? { ...(metrics ? { metrics } : {}), ...history } : undefined,
 		...rest,
 	};
 }
@@ -90,5 +90,41 @@ describe("sumSubagentTreeCost", () => {
 			sessionMetrics: new WeakMap(),
 		});
 		expect(cost).toBeCloseTo(0.25);
+	});
+	it("excludes source identity rows without dropping normal descendants or advisors", () => {
+		const observers = new SessionObserverRegistry();
+		const cost = sumSubagentTreeCost({
+			refs: [
+				ref("Source-live", {
+					displayName: "read-only viewer",
+					status: "running",
+					history: { agent: "seance" },
+					cost: 0.2,
+				}),
+				ref("Source-parked", {
+					displayName: "seance",
+					history: { agent: "seance" },
+					cost: 0.3,
+				}),
+				// Filter the classified row only: an ordinary descendant remains in the tree.
+				ref("Source-live.child", {
+					parentId: "Source-live",
+					sessionFile: path.join(artifacts, "Source-live", "Source-live.child.jsonl"),
+					cost: 0.04,
+				}),
+				// Display names are not a classification signal.
+				ref("Normal", { displayName: "seance", history: { agent: "task" }, cost: 0.1 }),
+				ref("Normal/advisor", {
+					kind: "advisor",
+					parentId: "Normal",
+					sessionFile: path.join(artifacts, "Normal", "__advisor.jsonl"),
+					cost: 0.003,
+				}),
+			],
+			observers,
+			rootSessionFile: root,
+			sessionMetrics: new WeakMap(),
+		});
+		expect(cost).toBeCloseTo(0.143);
 	});
 });

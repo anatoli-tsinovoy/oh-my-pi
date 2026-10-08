@@ -65,7 +65,7 @@ export function formatTaskResultSummary(
 	// "parked" status must not read as resumable.
 	const refStatus = AgentRegistry.global().get(result.id)?.status;
 	const resumable = result.aborted && !result.isolated && (refStatus === "idle" || refStatus === "parked");
-	return prompt.render(taskSummaryTemplate, {
+	const summary = prompt.render(taskSummaryTemplate, {
 		agentName: result.agent,
 		id: result.id,
 		status,
@@ -83,4 +83,8 @@ export function formatTaskResultSummary(
 			: undefined,
 		mergeSummary: options.mergeSummary === undefined ? "" : escapeHarnessTags(options.mergeSummary),
 	});
+	const modelFallbackNotice = result.modelFallbackMessage
+		? `\n\nModel restoration notice: ${escapeHarnessTags(result.modelFallbackMessage)}`
+		: "";
+	return `${summary}${modelFallbackNotice}`;
 }

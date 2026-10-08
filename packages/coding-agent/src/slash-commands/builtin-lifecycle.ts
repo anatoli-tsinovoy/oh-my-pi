@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { clearSubmittedText } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -7,6 +8,10 @@ import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { AgentSession, FreshSessionResult, HandoffResult } from "../session/agent-session";
+import { AgentRegistry } from "../registry/agent-registry";
+import type { TaskParams, TaskToolDetails } from "../task";
+import seanceAssignmentPrompt from "../prompts/system/seance-assignment.md" with { type: "text" };
+import { createParentSubagentUsageRecorder } from "../task/subagent-usage";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { buildReplanTitleContext, USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
@@ -22,6 +27,8 @@ import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { isLowSignalTitleInput } from "../tiny/text";
 import { resolveToCwd } from "../tools/path-utils";
+import { parseCommandArgs } from "../utils/command-args";
+import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -146,6 +153,123 @@ async function relocateHeadlessSession(
 	await runtime.notifyConfigChanged?.();
 	await runtime.notifyTitleChanged?.();
 	return undefined;
+}
+
+const SEANCE_USAGE = "Usage: /seance [session id|path] [--model selector]";
+
+type SeanceArgs = { ok: true; sourceSession?: string; model?: string } | { ok: false; error: string };
+
+function parseSeanceArgs(args: string): SeanceArgs {
+	if (/(?:^|[ \t])(?:""|'')(?=$|[ \t])/.test(args)) {
+		return { ok: false, error: `Empty argument. ${SEANCE_USAGE}` };
+	}
+	const tokens = parseCommandArgs(args);
+	let sourceSession: string | undefined;
+	let model: string | undefined;
+	let hasModel = false;
+	for (let index = 0; index < tokens.length; index++) {
+		const argument = tokens[index]!;
+		if (argument === "--model") {
+			if (hasModel) return { ok: false, error: `Specify --model only once. ${SEANCE_USAGE}` };
+			const selector = tokens[++index];
+			if (!selector || selector.startsWith("--")) {
+				return { ok: false, error: `--model requires a selector. ${SEANCE_USAGE}` };
+			}
+			model = selector;
+			hasModel = true;
+			continue;
+		}
+		if (argument.startsWith("-")) {
+			return { ok: false, error: `Unknown option "${argument}". ${SEANCE_USAGE}` };
+		}
+		if (argument.length === 0) {
+			return { ok: false, error: `Session source cannot be empty. ${SEANCE_USAGE}` };
+		}
+		if (sourceSession !== undefined) {
+			return { ok: false, error: `Specify only one session source. ${SEANCE_USAGE}` };
+		}
+		sourceSession = argument;
+	}
+	return {
+		ok: true,
+		...(sourceSession === undefined ? {} : { sourceSession }),
+		...(model === undefined ? {} : { model }),
+	};
+}
+
+type SeanceModelChoice = { kind: "saved" } | { kind: "override"; selector: string } | { kind: "cancel" };
+
+async function chooseSeanceModel(runtime: TuiSlashCommandRuntime): Promise<SeanceModelChoice> {
+	const choice = await runtime.ctx.showHookSelector("Choose the seance agent model", [
+		"Use saved model",
+		"Choose another model",
+	]);
+	if (choice === "Use saved model") return { kind: "saved" };
+	if (choice !== "Choose another model") return { kind: "cancel" };
+	const selectedModel = Promise.withResolvers<string | undefined>();
+	runtime.ctx.showModelSelector({
+		selectOnly: {
+			onSelect: selectedModel.resolve,
+			onCancel: () => selectedModel.resolve(undefined),
+		},
+	});
+	const selector = await selectedModel.promise;
+	return selector === undefined ? { kind: "cancel" } : { kind: "override", selector };
+}
+
+async function launchSeance(runtime: TuiSlashCommandRuntime, sourceSession: string, model?: string): Promise<void> {
+	const taskTool = runtime.ctx.session.getToolByName("task");
+	if (!taskTool) {
+		runtime.ctx.showError("Task tool is unavailable. Enable the task tool to start a seance.");
+		return;
+	}
+	const parentUsageRecorder = createParentSubagentUsageRecorder(runtime.ctx.session.sessionManager);
+	const params = {
+		agent: "seance",
+		sourceSession,
+		...(model === undefined ? {} : { model }),
+		task: seanceAssignmentPrompt,
+		solutionSpace: "Consult the prior session and await the parent agent's follow-up questions.",
+	} satisfies TaskParams;
+	const result = await taskTool.execute(randomUUID(), params);
+	const message = result.content
+		.flatMap(part => (part.type === "text" ? [part.text] : []))
+		.join("\n")
+		.trim();
+	const details = result.details as TaskToolDetails | undefined;
+	const progress = details?.progress?.find(item => item.agent === "seance") ?? details?.progress?.[0];
+	const resultItem = details?.results?.find(item => item.agent === "seance") ?? details?.results?.[0];
+	const agentId = progress?.id ?? resultItem?.id;
+	if (!agentId) {
+		runtime.ctx.showError(sanitizeErrorLine(message || "Task tool did not return the seance agent ID."));
+		return;
+	}
+	const usage = resultItem?.usage ?? details?.usage;
+	if (usage && parentUsageRecorder) {
+		const liveModel = AgentRegistry.global().get(agentId)?.session?.model;
+		const identity = resultItem?.resolvedModelIdentity ?? resultItem?.resolvedModel;
+		const separator = identity?.indexOf("/") ?? -1;
+		const provider = separator > 0 ? identity?.slice(0, separator) : undefined;
+		const modelId = separator > 0 ? identity?.slice(separator + 1).split(":", 1)[0] : undefined;
+		const catalogModel =
+			liveModel ?? (provider && modelId ? runtime.ctx.session.modelRegistry.find(provider, modelId) : undefined);
+		if (catalogModel) {
+			parentUsageRecorder(
+				{
+					api: catalogModel.api,
+					provider: catalogModel.provider,
+					model: catalogModel.id,
+					usage,
+					stopReason: resultItem?.aborted ? "aborted" : resultItem?.exitCode === 0 ? "toolUse" : "error",
+				},
+				"seance-command",
+			);
+		}
+	}
+	if (result.isError === true) {
+		runtime.ctx.showError(sanitizeErrorLine(message || "Failed to start the seance agent."));
+	}
+	runtime.ctx.showStatus(`Seance agent agent://${agentId} started.`);
 }
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -419,6 +543,46 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				// The picker reports a failed switch itself; `/resume <id>` has no picker.
 				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
 			}
+		},
+	},
+	{
+		name: "seance",
+		icon: "history",
+		description: "Consult a fork of a previous session without switching this session",
+		inlineHint: "[session id|path] [--model selector]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			clearSubmittedText(runtime);
+			const args = parseSeanceArgs(command.args);
+			if (!args.ok) {
+				runtime.ctx.showError(sanitizeErrorLine(args.error));
+				return;
+			}
+			if (!runtime.ctx.session.getToolByName("task")) {
+				runtime.ctx.showError("Task tool is unavailable. Enable the task tool to start a seance.");
+				return;
+			}
+			if (args.sourceSession !== undefined) {
+				try {
+					await launchSeance(runtime, args.sourceSession, args.model);
+				} catch (error) {
+					runtime.ctx.showError(sanitizeErrorLine(error));
+				}
+				return;
+			}
+			runtime.ctx.showSessionSelector(undefined, async session => {
+				let model = args.model;
+				if (model === undefined) {
+					const choice = await chooseSeanceModel(runtime);
+					if (choice.kind === "cancel") return;
+					if (choice.kind === "override") model = choice.selector;
+				}
+				try {
+					await launchSeance(runtime, session.path, model);
+				} catch (error) {
+					runtime.ctx.showError(sanitizeErrorLine(error));
+				}
+			});
 		},
 	},
 	{

@@ -62,7 +62,7 @@ function makeHostContext(snapshot: SizedSnapshot): InteractiveModeContext {
 			getSessionId: () => snapshot.header.id,
 			getCwd: () => snapshot.header.cwd,
 			snapshotForReplication: () => snapshot,
-			onEntryAppended: undefined,
+			subscribeToAppendedEntries: () => () => {},
 		},
 		session: {
 			isStreaming: false,

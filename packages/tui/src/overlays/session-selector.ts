@@ -1478,9 +1478,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 			onExit();
 		};
 		this.#sessionList.onRequestRender = () => this.#onRequestRender?.();
-		this.#sessionList.onDeleteRequest = (session: T) => {
-			this.#showDeleteConfirmation(session);
-		};
+		this.#sessionList.onDeleteRequest = this.#onDelete
+			? (session: T) => this.#showDeleteConfirmation(session)
+			: undefined;
 		if (this.#loadAllSessions || this.#globalSessions) {
 			this.#sessionList.onToggleScope = () => {
 				void this.#toggleScope();
@@ -1658,7 +1658,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		const cancel = interruptKey();
 		const hint = theme.fg(
 			"muted",
-			`[${formatKeyHints(["delete", "backspace"])} delete · ${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
+			`[${
+				this.#onDelete ? `${formatKeyHints(["delete", "backspace"])} delete · ` : ""
+			}${formatKeyHint("enter")} select · ${formatKeyHint("tab")} ${scopeHint} · ${cancel} cancel]`,
 		);
 		return [row("", width), row(hint, width), row("", width), bottomBorder(width)];
 	}
@@ -1706,10 +1708,9 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		} else {
 			children.push(this.#sessionList.searchInput, list);
 		}
-		const hints: (NativeHint | undefined)[] = [
-			{ keys: ["delete", "backspace"], label: "delete" },
-			{ keys: ["enter"], label: "select" },
-		];
+		const hints: NativeHint[] = [];
+		if (this.#onDelete) hints.push({ keys: ["delete", "backspace"], label: "delete" });
+		hints.push({ keys: ["enter"], label: "select" });
 		if (this.#sessionList.onToggleScope) {
 			hints.push({ keys: ["tab"], label: this.#scope === "all" ? "current folder" : "all projects" });
 		}

@@ -217,6 +217,8 @@ export const stateDefs = {
 		tokens: "TokenUsage",
 		premiumRequests: "number",
 		cost: "number",
+		"seanceLedgerCost?": "number",
+		"seanceTaskCost?": "number",
 		"credits?": "SessionCredits",
 		"routedModels?": "Record<string, number>",
 		"contextUsage?": "ContextUsage",

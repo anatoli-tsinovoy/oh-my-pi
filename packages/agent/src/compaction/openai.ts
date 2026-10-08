@@ -59,6 +59,13 @@ import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai
 import { prepareBedrockCompactionRequest } from "./bedrock";
 import { isOpenAiRemoteCompactionApi } from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
+import {
+	type CompactionUsageCallback,
+	createCompactionUsageReport,
+	normalizeRemoteCompactionUsage,
+	normalizeResponsesCompactionUsage,
+	reportCompactionUsage,
+} from "./usage";
 
 export * from "./compaction-v2-streaming";
 
@@ -333,6 +340,37 @@ export interface RemoteCompactionRequest {
 export interface RemoteCompactionResponse {
 	summary: string;
 	shortSummary?: string;
+	model?: string;
+	usage?: unknown;
+}
+function reportRemoteCompactionErrorUsage(
+	callback: CompactionUsageCallback | undefined,
+	model: Model | undefined,
+	requestModel: string | undefined,
+	bodyText: string | undefined,
+	errorMessage: string,
+): void {
+	if (!callback || !model || !bodyText) return;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(bodyText);
+	} catch {
+		return;
+	}
+	if (!isRecord(parsed)) return;
+	const response = isRecord(parsed.response) ? parsed.response : parsed;
+	const usage = normalizeRemoteCompactionUsage(model, response.usage ?? parsed.usage);
+	if (!usage) return;
+	reportCompactionUsage(
+		callback,
+		createCompactionUsageReport(
+			model,
+			usage,
+			typeof response.model === "string" ? response.model : requestModel,
+			"error",
+			errorMessage,
+		),
+	);
 }
 
 // ============================================================================
@@ -815,6 +853,7 @@ export async function requestOpenAiRemoteCompaction(
 		sessionId?: string;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
+		onUsage?: CompactionUsageCallback;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
 	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
@@ -920,17 +959,24 @@ export async function requestOpenAiRemoteCompaction(
 			statusText: response.statusText,
 			errorText: cause.captured.bodyText ?? "",
 		});
-		throw new ProviderHttpError(
-			`Remote compaction failed (${response.status} ${response.statusText})`,
-			response.status,
-			{
-				headers: response.headers,
-				cause,
-			},
-		);
+		const errorMessage = `Remote compaction failed (${response.status} ${response.statusText})`;
+		reportRemoteCompactionErrorUsage(opts?.onUsage, model, requestModel, cause.captured.bodyText, errorMessage);
+		throw new ProviderHttpError(errorMessage, response.status, {
+			headers: response.headers,
+			cause,
+		});
 	}
 
-	const data = (await response.json()) as { output?: unknown[] } | undefined;
+	const data = (await response.json()) as { output?: unknown[]; model?: unknown; usage?: unknown } | undefined;
+	if (opts?.onUsage) {
+		const usage = normalizeResponsesCompactionUsage(model, data?.usage);
+		reportCompactionUsage(
+			opts.onUsage,
+			usage
+				? createCompactionUsageReport(model, usage, typeof data?.model === "string" ? data.model : requestModel)
+				: undefined,
+		);
+	}
 	const rawOutput = data?.output ?? [];
 	const replacementHistory = rawOutput.filter(
 		(item): item is Record<string, unknown> =>
@@ -977,7 +1023,13 @@ export async function requestRemoteCompaction(
 	endpoint: string,
 	request: RemoteCompactionRequest,
 	signal?: AbortSignal,
-	opts?: { fetch?: FetchImpl; timeoutMs?: number; model?: Model; apiKey?: string },
+	opts?: {
+		fetch?: FetchImpl;
+		timeoutMs?: number;
+		model?: Model;
+		apiKey?: string;
+		onUsage?: CompactionUsageCallback;
+	},
 ): Promise<RemoteCompactionResponse> {
 	let endpointPath = endpoint;
 	try {
@@ -1019,17 +1071,23 @@ export async function requestRemoteCompaction(
 			statusText: response.statusText,
 			errorText,
 		});
-		throw new ProviderHttpError(
-			`Remote compaction failed (${response.status} ${response.statusText})`,
-			response.status,
-			{
-				headers: response.headers,
-			},
+		const errorMessage = `Remote compaction failed (${response.status} ${response.statusText})`;
+		reportRemoteCompactionErrorUsage(
+			opts?.onUsage,
+			opts?.model,
+			opts?.model?.remoteCompaction?.model ?? opts?.model?.requestModelId ?? opts?.model?.id,
+			errorText,
+			errorMessage,
 		);
+		throw new ProviderHttpError(errorMessage, response.status, {
+			headers: response.headers,
+		});
 	}
 
 	if (isChatCompletions) {
 		type ChatCompletionsResponse = {
+			model?: unknown;
+			usage?: unknown;
 			choices?: Array<{
 				message?: {
 					content?: string | Array<{ type?: string; text?: string }> | null;
@@ -1037,6 +1095,19 @@ export async function requestRemoteCompaction(
 			}>;
 		};
 		const data = (await response.json()) as ChatCompletionsResponse | undefined;
+		if (opts?.model && opts.onUsage) {
+			const usage = normalizeRemoteCompactionUsage(opts.model, data?.usage);
+			reportCompactionUsage(
+				opts.onUsage,
+				usage
+					? createCompactionUsageReport(
+							opts.model,
+							usage,
+							typeof data?.model === "string" ? data.model : undefined,
+						)
+					: undefined,
+			);
+		}
 		const choice = data?.choices?.[0]?.message?.content;
 		let summary: string | undefined;
 		if (typeof choice === "string") {
@@ -1054,6 +1125,13 @@ export async function requestRemoteCompaction(
 	}
 
 	const data = (await response.json()) as RemoteCompactionResponse | undefined;
+	if (opts?.model && opts.onUsage) {
+		const usage = normalizeRemoteCompactionUsage(opts.model, data?.usage);
+		reportCompactionUsage(
+			opts.onUsage,
+			usage ? createCompactionUsageReport(opts.model, usage, data?.model) : undefined,
+		);
+	}
 	if (!data || typeof data.summary !== "string") {
 		throw new Error("Remote compaction response missing summary");
 	}

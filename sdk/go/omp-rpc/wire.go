@@ -2956,6 +2956,8 @@ type SessionStats struct {
 	PremiumRequests   float64            `json:"premiumRequests"`
 	Cost              float64            `json:"cost"`
 	SessionFile       *string            `json:"sessionFile,omitempty"`
+	SeanceLedgerCost  *float64           `json:"seanceLedgerCost,omitempty"`
+	SeanceTaskCost    *float64           `json:"seanceTaskCost,omitempty"`
 	Credits           *SessionCredits    `json:"credits,omitempty"`
 	RoutedModels      map[string]float64 `json:"routedModels,omitempty"`
 	ContextUsage      *ContextUsage      `json:"contextUsage,omitempty"`
@@ -2978,6 +2980,8 @@ func (v *SessionStats) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("premiumRequests", &out.PremiumRequests)
 	d.required("cost", &out.Cost)
 	d.optional("sessionFile", &out.SessionFile)
+	d.optional("seanceLedgerCost", &out.SeanceLedgerCost)
+	d.optional("seanceTaskCost", &out.SeanceTaskCost)
 	d.optional("credits", &out.Credits)
 	d.optional("routedModels", &out.RoutedModels)
 	d.optional("contextUsage", &out.ContextUsage)

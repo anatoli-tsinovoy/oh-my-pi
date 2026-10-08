@@ -341,6 +341,22 @@ Startup `--fork` is resolved before normal session creation:
 
 Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explicitly and independently from both the OMP session id and `--provider-session-id`. `--provider-session-id` continues to control provider session/routing headers and sticky credential selection; `--prompt-cache-key` controls the OpenAI Responses `prompt_cache_key` payload where supported.
 
+## Seance: consult a previous session without switching
+
+`/seance [id|path] [--model selector]` starts a normal keepalive subagent from a fork of a persisted session. The original JSONL is never opened for writing, and the current main session stays selected. The source may be an id prefix or JSONL path; ids resolve current-scope first, then global sessions when allowed, following existing session-listing rules.
+
+- With no source, `/seance` opens the existing `/resume` picker in selection-only mode. Choosing a source does not resume or switch to it.
+- With a direct source, seance uses the source's saved model unless `--model` is supplied.
+- After an interactive source selection without `--model`, choose **Use saved model** or **Choose another model**. The latter opens the existing model picker in selection-only mode; it changes neither the parent model nor its settings.
+- Cancelling source or model selection creates no child.
+- The command launches through the task lifecycle and reports its `agent://<id>` status. Follow-up questions are delivered to that subagent over IRC; the inbound message wakes it and its yielded answer is relayed to the main agent automatically. Seance needs no outbound `write` tool.
+
+The fork restores the source's saved active-role model, then saved default model; it bypasses inherited task/agent model defaults. If no saved active-role/default model is recorded or none of the recorded models is available, startup fails with guidance to use `--model <selector>`—the transcript is never sent to an arbitrary model. When restoration falls back from an unavailable saved active-role to the saved default, report that saved-model fallback. An explicit per-invocation override follows normal task model priority and auth fallback; the status reports the model actually used after fallback.
+
+Seance receives the forked conversation as historical context, not the prior agent's system prompt, tool inventory, or identity. It has only `read`, `grep`, `glob`, and `yield`, and distinguishes prior intentions or observations from the present question and current inspection. Small forks use the existing session context-compaction behavior. See [task tool inputs](tools/task.md#seance-consult-a-prior-session) for the agent/task API.
+
+The fork does not inherit the source's historical cost; the source remains unchanged. New seance generations and IRC follow-ups add cost to the current parent, whose accumulated cost survives compaction. Child usage is reported as a per-run delta, while historical nested-task, progress, and `model_usage` accounting is reset.
+
 ## Resume and continue
 
 ## Interactive `/resume [value]`
