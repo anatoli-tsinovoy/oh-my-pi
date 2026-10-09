@@ -971,11 +971,24 @@ export class InputController {
 
 			if (!text && !hasPendingImages) return;
 
-			// Main-session retry shortcuts: "." or "c" use the same handler as F5.
+			// "." or "c" retry an error turn; otherwise they continue the current intent.
 			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
 			// so it is sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
-				await this.handleRetry();
+				if (!this.ctx.session.isStreaming && this.ctx.session.hasFailedAssistantTurn && !this.ctx.collabGuest) {
+					await this.handleRetry();
+					return;
+				}
+				if (this.ctx.onInputCallback) {
+					this.ctx.editor.clearDraft();
+					this.ctx.onInputCallback({
+						text: manualContinuePrompt,
+						cancelled: false,
+						started: true,
+						synthetic: true,
+						userInitiated: true,
+					});
+				}
 				return;
 			}
 

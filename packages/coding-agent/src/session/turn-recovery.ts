@@ -3013,6 +3013,27 @@ export class TurnRecovery {
 		return abortedToolCallTail(this.#host.sessionManager.buildSessionContext({ transcript: true }).messages);
 	}
 	/**
+	 * Whether the transcript tail is an assistant turn stopped due to an error.
+	 * Synthetic tool-result placeholders are skipped; an ordinary aborted turn
+	 * does not qualify. Restored sessions use the persisted display transcript
+	 * when active state no longer contains the assistant boundary.
+	 */
+	get hasFailedAssistantTurn(): boolean {
+		const active = this.#host.agent.state.messages;
+		const activeTurnEnd = retryableAssistantTurnEnd(active);
+		if (activeTurnEnd !== undefined) {
+			const message = active[activeTurnEnd - 1];
+			return message?.role === "assistant" && message.stopReason === "error";
+		}
+		// A trailing assistant message is authoritative for a live session: a
+		// settled successful turn leaves nothing to retry.
+		if (active.at(-1)?.role === "assistant") return false;
+		const persisted = this.#host.sessionManager.buildSessionContext({ transcript: true }).messages;
+		const persistedTurnEnd = retryableAssistantTurnEnd(persisted);
+		const message = persistedTurnEnd === undefined ? undefined : persisted[persistedTurnEnd - 1];
+		return message?.role === "assistant" && message.stopReason === "error";
+	}
+	/**
 	 * Manually retry the last failed assistant turn.
 	 * Removes the error message from active agent state when present and
 	 * re-attempts with a fresh retry budget.

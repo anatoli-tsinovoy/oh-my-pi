@@ -55,6 +55,7 @@ async function createHarness(factory: ExtensionFactory) {
 	const session = {
 		extensionRunner: runner,
 		isStreaming: true,
+		hasFailedAssistantTurn: false,
 		isCompacting: false,
 		queuedMessageCount: 0,
 		prompt,
@@ -647,7 +648,7 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.imageLinks).toBeUndefined();
 	});
 
-	it("Enter dispatches input once, while retry shortcuts bypass input handlers", async () => {
+	it("Enter dispatches input once, while shorthand continuations bypass input handlers", async () => {
 		const seen: InputEvent[] = [];
 		const h = await createHarness(pi => {
 			pi.on("input", event => {
@@ -662,12 +663,19 @@ describe("interactive native input ingress", () => {
 
 		const callback = vi.fn();
 		h.ctx.onInputCallback = callback;
-		for (const text of [".", "c"]) {
+		for (const [index, text] of [".", "c"].entries()) {
 			h.editor.setText(text);
 			await h.pressSubmit(ENTER);
+			expect(callback).toHaveBeenNthCalledWith(index + 1, {
+				text: manualContinuePrompt,
+				cancelled: false,
+				started: true,
+				synthetic: true,
+				userInitiated: true,
+			});
+			expect(h.editor.getText()).toBe("");
 		}
-		expect(callback).not.toHaveBeenCalled();
-		expect(h.session.retry).toHaveBeenCalledTimes(2);
+		expect(h.session.retry).not.toHaveBeenCalled();
 		expect(seen).toHaveLength(1);
 		expect(h.prompt).toHaveBeenCalledTimes(1);
 	});

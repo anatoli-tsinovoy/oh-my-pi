@@ -10833,6 +10833,10 @@ export class AgentSession implements SettingsScope {
 	get hasAbortedToolCallTail(): boolean {
 		return this.#recovery.hasAbortedToolCallTail;
 	}
+	/** Whether the latest assistant turn ended with an error (not an ordinary abort). */
+	get hasFailedAssistantTurn(): boolean {
+		return this.#recovery.hasFailedAssistantTurn;
+	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
 	retry(): Promise<boolean> {

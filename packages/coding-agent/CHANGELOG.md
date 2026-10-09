@@ -49,6 +49,7 @@
 - The startup update notice no longer appears when omp runs from a source checkout.
 - Sending `c` or `.` to the main agent now retries the last failed turn, like F5, instead of adding a continuation directive.
 - Sending `c` or `.` to the main agent now retries the last failed turn, like F5, instead of adding a continuation directive ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Sending `c` or `.` to the main agent immediately after an error now retries the failed turn like F5; otherwise, the shortcuts continue normally ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Fixed
 

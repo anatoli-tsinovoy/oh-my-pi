@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -23,6 +23,40 @@ function lastAgentMessage(session: AgentSession): AssistantMessage {
 		throw new Error("Expected trailing assistant message");
 	}
 	return message as AssistantMessage;
+}
+
+async function submitShortcut(session: AgentSession, sessionManager: SessionManager, shortcut: "." | "c") {
+	const editor = new CustomEditor(getEditorTheme());
+	let syntheticPrompt: Promise<unknown> | undefined;
+	const onInput = vi.fn((input: { text: string }) => {
+		syntheticPrompt = session.prompt(input.text, { synthetic: true, userInitiated: true });
+	});
+	const ctx = {
+		editor,
+		session,
+		viewSession: session,
+		sessionManager,
+		isGuidedGoalInterviewActive: () => false,
+		showStatus: () => undefined,
+		onInputCallback: onInput,
+	} as unknown as InteractiveModeContext;
+	const retry = vi.spyOn(session, "retry");
+	const controller = new InputController(ctx);
+	controller.setupEditorSubmitHandler();
+
+	let submitCompletion: Promise<void> | undefined;
+	const onSubmit = editor.onSubmit;
+	editor.onSubmit = text => {
+		submitCompletion = Promise.resolve(onSubmit?.(text));
+		return submitCompletion;
+	};
+	editor.setText(shortcut);
+	editor.handleInput("\r");
+	if (submitCompletion) await submitCompletion;
+	if (syntheticPrompt) await syntheticPrompt;
+	await session.waitForIdle();
+
+	return { editor, onInput, retry };
 }
 
 describe("AgentSession manual retry", () => {
@@ -92,7 +126,7 @@ describe("AgentSession manual retry", () => {
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
 	});
 
-	it("editor c retries a failed assistant/tool tail without adding a user directive", async () => {
+	it("editor c retries an errored tool-call tail without adding a user directive", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -129,45 +163,22 @@ describe("AgentSession manual retry", () => {
 
 		await session.prompt("write the plan");
 		await session.waitForIdle();
-		expect(session.agent.state.messages.at(-1)?.role).toBe("toolResult");
+		const beforeRetry = session.agent.state.messages;
+		expect(beforeRetry.at(-1)?.role).toBe("toolResult");
+		const failedAssistant = beforeRetry.findLast(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		expect(failedAssistant?.stopReason).toBe("error");
+		expect(session.hasAbortedToolCallTail).toBe(true);
+		expect(session.hasFailedAssistantTurn).toBe(true);
 
-		const editor = new CustomEditor(getEditorTheme());
-		let syntheticPrompt: Promise<unknown> | undefined;
-		let inputCallbackCalls = 0;
-		const onInput = (input: { text: string }) => {
-			inputCallbackCalls++;
-			syntheticPrompt = session!.prompt(input.text, { synthetic: true });
-		};
-		const ctx = {
-			editor,
-			session,
-			viewSession: session,
-			sessionManager,
-			isGuidedGoalInterviewActive: () => false,
-			showStatus: () => {},
-			onInputCallback: onInput,
-		} as unknown as InteractiveModeContext;
-		const controller = new InputController(ctx);
-		controller.setupEditorSubmitHandler();
-
-		let submitCompletion: Promise<void> | undefined;
-		const onSubmit = editor.onSubmit;
-		editor.onSubmit = text => {
-			submitCompletion = Promise.resolve(onSubmit?.(text));
-			return submitCompletion;
-		};
-		editor.setText("c");
-		editor.handleInput("\r");
-		if (submitCompletion) await submitCompletion;
-		if (syntheticPrompt) await syntheticPrompt;
-		await session.waitForIdle();
-
+		const { editor, onInput, retry } = await submitShortcut(session, sessionManager, "c");
 		const messages = session.agent.state.messages;
+		expect(retry).toHaveBeenCalledTimes(1);
 		expect(mock.calls).toHaveLength(2);
-		expect(inputCallbackCalls).toBe(0);
+		expect(onInput).not.toHaveBeenCalled();
 		expect(editor.getText()).toBe("");
 		expect(messages.map(message => message.role)).toEqual(["user", "assistant"]);
-		expect(messages.filter(message => message.role === "toolResult")).toHaveLength(0);
 		expect(messages.some(message => message.role === "assistant" && message.stopReason === "error")).toBe(false);
 		expect(JSON.stringify(messages)).toContain("write the plan");
 		expect(JSON.stringify(messages)).not.toContain(JSON.stringify(manualContinuePrompt).slice(1, -1));
@@ -176,6 +187,138 @@ describe("AgentSession manual retry", () => {
 			text: "recovered through editor retry",
 		});
 	});
+
+	it("editor . retries a plain provider error without adding a user directive", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{ throw: "plain provider failure" },
+				{ content: ["recovered through dot retry"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("fail without calling a tool");
+		await session.waitForIdle();
+		expect(session.agent.state.messages.at(-1)?.role).toBe("assistant");
+		expect(lastAgentMessage(session).stopReason).toBe("error");
+		expect(session.hasAbortedToolCallTail).toBe(false);
+		expect(session.hasFailedAssistantTurn).toBe(true);
+
+		const { editor, onInput, retry } = await submitShortcut(session, sessionManager, ".");
+		const messages = session.agent.state.messages;
+		expect(retry).toHaveBeenCalledTimes(1);
+		expect(mock.calls).toHaveLength(2);
+		expect(onInput).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("");
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant"]);
+		expect(JSON.stringify(messages)).not.toContain(JSON.stringify(manualContinuePrompt).slice(1, -1));
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "recovered through dot retry",
+		});
+	});
+
+	for (const scenario of [
+		{
+			label: "successful assistant stop",
+			shortcut: "." as const,
+			stopReason: "stop" as const,
+			firstText: "the first task is already complete",
+			continuedText: "continued after success",
+		},
+		{
+			label: "ordinary aborted assistant response",
+			shortcut: "c" as const,
+			stopReason: "aborted" as const,
+			firstText: "the first response was interrupted",
+			continuedText: "continued after abort",
+		},
+	]) {
+		it(`continues after a ${scenario.label} with ${scenario.shortcut}, not retry`, async () => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) {
+				throw new Error("Expected bundled Anthropic test model to exist");
+			}
+
+			const mock = createMockModel({
+				responses: [
+					{
+						content: [scenario.firstText],
+						stopReason: scenario.stopReason,
+						errorMessage: scenario.stopReason === "aborted" ? "Interrupted by user" : undefined,
+					},
+					{ content: [scenario.continuedText], stopReason: "stop" },
+				],
+			});
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+				streamFn: mock.stream,
+			});
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+				modelRegistry,
+			});
+			session.subscribe(() => {});
+
+			await session.prompt("start a task");
+			await session.waitForIdle();
+			expect(lastAgentMessage(session).stopReason).toBe(scenario.stopReason);
+			expect(session.hasFailedAssistantTurn).toBe(false);
+			expect(session.hasAbortedToolCallTail).toBe(false);
+
+			const { editor, retry } = await submitShortcut(session, sessionManager, scenario.shortcut);
+			const messages = session.agent.state.messages;
+			expect(retry).not.toHaveBeenCalled();
+			expect(mock.calls).toHaveLength(2);
+			expect(editor.getText()).toBe("");
+			expect(messages.filter(message => message.role === "user")).toHaveLength(1);
+			expect(
+				messages.some(message => message.role === "assistant" && message.stopReason === scenario.stopReason),
+			).toBe(true);
+			expect(messages.filter(message => message.role === "developer")).toEqual([
+				expect.objectContaining({
+					synthetic: true,
+					userInitiated: true,
+					content: [{ type: "text", text: manualContinuePrompt }],
+				}),
+			]);
+			expect(lastAgentMessage(session).content).toContainEqual({
+				type: "text",
+				text: scenario.continuedText,
+			});
+		});
+	}
 
 	it("returns false when the trailing assistant turn succeeded", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -520,9 +663,9 @@ describe("AgentSession manual retry", () => {
 		});
 		session.subscribe(() => {});
 
-		// Provider context dropped the failed turn, so the tail predicate must
-		// fall back to the persisted display transcript (mirrors retry()).
+		// Provider context dropped the failed turn, so both predicates use the persisted display transcript.
 		expect(session.hasAbortedToolCallTail).toBe(true);
+		expect(session.hasFailedAssistantTurn).toBe(true);
 		await expect(session.retry()).resolves.toBe(true);
 		await session.waitForIdle();
 		expect(session.agent.state.messages.map(message => message.role)).toEqual(["user", "assistant"]);
