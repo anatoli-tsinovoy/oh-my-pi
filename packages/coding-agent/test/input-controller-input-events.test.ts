@@ -18,7 +18,6 @@ import type { BlobPutOptions, BlobPutResult } from "@oh-my-pi/pi-coding-agent/se
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
 const ENTER = "\r";
 const FOLLOW_UP = "\x1b[13;5u";
@@ -591,36 +590,11 @@ describe("interactive native input ingress", () => {
 				streamingBehavior: key === ENTER ? "steer" : "followUp",
 				images: undefined,
 			});
-			const onInput = vi.fn();
-			h.ctx.onInputCallback = onInput;
-			if (key === ENTER) {
-				for (const text of [".", "c"]) {
-					h.editor.setText(text);
-					await h.pressSubmit(key);
-				}
-				expect(focusedPrompt).toHaveBeenNthCalledWith(2, manualContinuePrompt, {
-					synthetic: true,
-					userInitiated: true,
-				});
-				expect(focusedPrompt).toHaveBeenNthCalledWith(3, manualContinuePrompt, {
-					synthetic: true,
-					userInitiated: true,
-				});
-			} else {
-				h.editor.setText(".");
-				await h.pressSubmit(key);
-				expect(focusedPrompt).toHaveBeenNthCalledWith(2, ".", {
-					streamingBehavior: "followUp",
-					images: undefined,
-				});
-			}
-			expect(h.session.retry).not.toHaveBeenCalled();
-			expect(onInput).not.toHaveBeenCalled();
 			for (const text of ["/clear", "!echo blocked", "$ print('blocked')"]) {
 				h.editor.setText(text);
 				await h.pressSubmit(key);
 			}
-			expect(focusedPrompt).toHaveBeenCalledTimes(key === ENTER ? 3 : 2);
+			expect(focusedPrompt).toHaveBeenCalledTimes(1);
 			expect(input).not.toHaveBeenCalled();
 			expect(h.prompt).not.toHaveBeenCalled();
 			expect(h.ctx.handleClearCommand).not.toHaveBeenCalled();
@@ -648,7 +622,7 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.imageLinks).toBeUndefined();
 	});
 
-	it("Enter dispatches input once, while shorthand continuations bypass input handlers", async () => {
+	it("Enter dispatches input once, while continue shortcuts remain synthetic", async () => {
 		const seen: InputEvent[] = [];
 		const h = await createHarness(pi => {
 			pi.on("input", event => {
@@ -663,21 +637,36 @@ describe("interactive native input ingress", () => {
 
 		const callback = vi.fn();
 		h.ctx.onInputCallback = callback;
-		for (const [index, text] of [".", "c"].entries()) {
+		for (const text of [".", "c"]) {
 			h.editor.setText(text);
 			await h.pressSubmit(ENTER);
-			expect(callback).toHaveBeenNthCalledWith(index + 1, {
-				text: manualContinuePrompt,
-				cancelled: false,
-				started: true,
-				synthetic: true,
-				userInitiated: true,
-			});
-			expect(h.editor.getText()).toBe("");
 		}
-		expect(h.session.retry).not.toHaveBeenCalled();
+		expect(callback).toHaveBeenCalledTimes(2);
 		expect(seen).toHaveLength(1);
 		expect(h.prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("preserves newer text and attachments while shorthand retry is pending", async () => {
+		const h = await createHarness(() => undefined);
+		h.session.isStreaming = false;
+		h.session.hasFailedAssistantTurn = true;
+		const retryEntered = Promise.withResolvers<void>();
+		const pendingRetry = Promise.withResolvers<boolean>();
+		h.session.retry.mockImplementation(() => {
+			retryEntered.resolve();
+			return pendingRetry.promise;
+		});
+		h.editor.setText(".");
+
+		const submission = h.pressSubmit(ENTER);
+		await retryEntered.promise;
+		h.draftWithImage("newer draft", newerImage, "local://newer.jpg");
+		pendingRetry.resolve(true);
+		await submission;
+
+		expect(h.editor.getText()).toBe("newer draft");
+		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg"]);
 	});
 
 	it("Ctrl+Enter transforms before compacting a skill-shaped input without expanding it", async () => {

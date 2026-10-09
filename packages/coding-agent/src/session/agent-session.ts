@@ -10839,8 +10839,10 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
-	retry(): Promise<boolean> {
-		return this.#recovery.retry();
+	async retry(): Promise<boolean> {
+		const didRetry = await this.#recovery.retry();
+		if (didRetry) this.#advisors.autoResumeSuppressed = false;
+		return didRetry;
 	}
 
 	// =========================================================================

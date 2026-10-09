@@ -4,7 +4,7 @@
  * so they re-enter context when the user resumes. Internal (non-user) aborts keep
  * the prior behavior — advisor advice stays in the auto-continue path.
  *
- * Five seams:
+ * Six seams:
  *  1. A concern already steered into the agent queue when the user hits Esc is
  *     pulled out of the post-abort auto-continue path and re-recorded as advice.
  *  2. A concern parked hidden (#pendingNextTurnMessages) by the suppressed
@@ -16,6 +16,9 @@
  *  5. The same queued as a follow-up: continuing from the preserved advisor card
  *     (which converts to `developer`) would send an invalid provider tail, so the
  *     follow-up stays queued for the next explicit resume rather than auto-running.
+ *  6. An accepted manual retry releases the stopped-run latch so a later
+ *     blocker can resume.
+ *  7. A declined manual retry leaves the stop latch authoritative for later advice.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
@@ -170,14 +173,13 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	async function createCompletedAdvisorSession(
 		severity: "concern" | "blocker" = "concern",
 		extensionRunner?: AdvisorTestExtensionRunner,
+		primaryResponses: Array<MockResponse | (() => MockResponse)> = [
+			{ content: ["EXACT VERDICT"], stopReason: "stop" },
+			{ content: ["CHANGED VERDICT"], stopReason: "stop" },
+		],
 	): Promise<CompletedAdvisorHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({
-			responses: [
-				{ content: ["EXACT VERDICT"], stopReason: "stop" },
-				{ content: ["CHANGED VERDICT"], stopReason: "stop" },
-			],
-		});
+		const mock = createMockModel({ responses: primaryResponses });
 		const advisorMock = createMockModel({
 			responses: [
 				{
@@ -255,6 +257,57 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 		return persisted;
 	}
+	it("clears the stopped-run advisor latch after an accepted manual retry", async () => {
+		const { session, mock } = await createCompletedAdvisorSession("blocker", undefined, [
+			{ content: [], stopReason: "error", errorMessage: "provider failure" },
+			{ content: ["recovered after manual retry"], stopReason: "stop" },
+			{ content: ["resumed after advice"], stopReason: "stop" },
+		]);
+		const failedRun = session.prompt("do the thing");
+		await failedRun.catch(() => {});
+		await session.waitForIdle();
+
+		// Set suppression only after the provider failure, immediately before retry.
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		expect(await session.retry()).toBe(true);
+		await session.waitForIdle();
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("review the recovered run");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: expect.arrayContaining([{ type: "text", text: "resumed after advice" }]),
+		});
+	});
+
+	it("keeps stopped-run suppression after a declined manual retry", async () => {
+		const { session, sessionManager, mock, advisorMock } = await createCompletedAdvisorSession("blocker", undefined, [
+			{ content: ["completed run"], stopReason: "stop" },
+		]);
+		const persisted = capturePersistedAdvice(sessionManager);
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+		await session.abort({ reason: USER_INTERRUPT_LABEL });
+		await session.waitForIdle();
+
+		expect(await session.retry()).toBe(false);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+		await advisor.prompt("review the stopped run");
+		await session.waitForIdle();
+
+		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(advisorCards).toHaveLength(1);
+		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
+		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(1);
+		expect(mock.calls).toHaveLength(1);
+	});
 
 	it("preserves a final-yield blocker without starting a hidden post-yield turn", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;

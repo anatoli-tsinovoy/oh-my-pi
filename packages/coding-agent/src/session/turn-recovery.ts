@@ -3013,25 +3013,29 @@ export class TurnRecovery {
 		return abortedToolCallTail(this.#host.sessionManager.buildSessionContext({ transcript: true }).messages);
 	}
 	/**
-	 * Whether the transcript tail is an assistant turn stopped due to an error.
-	 * Synthetic tool-result placeholders are skipped; an ordinary aborted turn
-	 * does not qualify. Restored sessions use the persisted display transcript
-	 * when active state no longer contains the assistant boundary.
+	 * Whether the transcript tail is an assistant turn stopped due to an error or
+	 * a retryable reasonless provider abort. Synthetic tool-result placeholders
+	 * are skipped; user and silent aborts do not qualify. Restored sessions use
+	 * the persisted display transcript when active state no longer has the
+	 * assistant boundary.
 	 */
 	get hasFailedAssistantTurn(): boolean {
 		const active = this.#host.agent.state.messages;
-		const activeTurnEnd = retryableAssistantTurnEnd(active);
-		if (activeTurnEnd !== undefined) {
-			const message = active[activeTurnEnd - 1];
-			return message?.role === "assistant" && message.stopReason === "error";
+		let messages: readonly AgentMessage[] = active;
+		let turnEnd = retryableAssistantTurnEnd(messages);
+		if (turnEnd === undefined) {
+			// A trailing assistant message is authoritative for a live session: a
+			// settled successful turn leaves nothing to retry.
+			if (active.at(-1)?.role === "assistant") return false;
+			// Restored sessions omit the failed turn from provider context, so the
+			// persisted display transcript is the source of truth.
+			messages = this.#host.sessionManager.buildSessionContext({ transcript: true }).messages;
+			turnEnd = retryableAssistantTurnEnd(messages);
 		}
-		// A trailing assistant message is authoritative for a live session: a
-		// settled successful turn leaves nothing to retry.
-		if (active.at(-1)?.role === "assistant") return false;
-		const persisted = this.#host.sessionManager.buildSessionContext({ transcript: true }).messages;
-		const persistedTurnEnd = retryableAssistantTurnEnd(persisted);
-		const message = persistedTurnEnd === undefined ? undefined : persisted[persistedTurnEnd - 1];
-		return message?.role === "assistant" && message.stopReason === "error";
+		const message = turnEnd === undefined ? undefined : messages[turnEnd - 1];
+		return (
+			message?.role === "assistant" && (message.stopReason === "error" || this.isRetryableReasonlessAbort(message))
+		);
 	}
 	/**
 	 * Manually retry the last failed assistant turn.
