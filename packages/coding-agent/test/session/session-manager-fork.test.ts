@@ -203,11 +203,11 @@ describe("SessionManager.forkFrom", () => {
 			timestamp,
 			message: {
 				role: "assistant",
-				content: [],
+				content: [{ type: "toolCall", id: "task-call-1", name: "task", arguments: { task: "inspect" } }],
 				api: "anthropic-messages",
 				provider: "anthropic",
 				model: "claude",
-				stopReason: "stop",
+				stopReason: "toolUse",
 				timestamp: Date.now(),
 				usage: {
 					input: 100,
@@ -221,7 +221,81 @@ describe("SessionManager.forkFrom", () => {
 				},
 			},
 		};
-		await Bun.write(sourceFile, `${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n`);
+		const taskUsage = {
+			input: 40,
+			output: 10,
+			cacheRead: 2,
+			cacheWrite: 1,
+			totalTokens: 53,
+			premiumRequests: 3,
+			credits: { cost: 10, committedCost: 10, acuCost: 2 },
+			cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+		};
+		const nestedUsage = {
+			input: 5,
+			output: 3,
+			cacheRead: 1,
+			cacheWrite: 2,
+			totalTokens: 11,
+			premiumRequests: 1,
+			credits: { cost: 4, committedCost: 4, acuCost: 1 },
+			cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, total: 10 },
+		};
+		const taskResultEntry = {
+			type: "message",
+			id: "task-result-1",
+			parentId: "assistant-1",
+			timestamp,
+			message: {
+				role: "toolResult",
+				toolCallId: "task-call-1",
+				toolName: "task",
+				content: [{ type: "text", text: "completed worker" }],
+				isError: false,
+				timestamp: Date.now(),
+				details: {
+					usage: taskUsage,
+					results: [
+						{
+							index: 0,
+							id: "nested-agent",
+							agent: "worker",
+							agentSource: "bundled",
+							task: "inspect",
+							exitCode: 0,
+							output: "done",
+							stderr: "",
+							truncated: false,
+							durationMs: 1,
+							tokens: 11,
+							requests: 1,
+							usage: nestedUsage,
+						},
+					],
+					progress: [
+						{
+							index: 0,
+							id: "nested-agent",
+							agent: "worker",
+							agentSource: "bundled",
+							status: "completed",
+							task: "inspect",
+							recentTools: [],
+							recentOutput: [],
+							toolCount: 1,
+							requests: 1,
+							tokens: 11,
+							cost: 10,
+							durationMs: 1,
+						},
+					],
+				},
+			},
+		};
+		await Bun.write(
+			sourceFile,
+			`${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n${JSON.stringify(taskResultEntry)}\n`,
+		);
 		const sourceText = await Bun.file(sourceFile).text();
 		const sourceManager = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
 
@@ -230,6 +304,19 @@ describe("SessionManager.forkFrom", () => {
 			const entry = entries.find((e): e is SessionMessageEntry => e.type === "message");
 			if (entry?.message.role !== "assistant") throw new Error("expected assistant message");
 			return entry.message;
+		};
+		const findTaskDetails = async (file: string) => {
+			const entries = await loadEntriesFromFile(file);
+			const entry = entries.find(
+				(e): e is SessionMessageEntry =>
+					e.type === "message" && e.message.role === "toolResult" && e.message.toolName === "task",
+			);
+			if (!entry || entry.message.role !== "toolResult") throw new Error("expected task tool result");
+			return entry.message.details as {
+				usage: typeof taskUsage;
+				results: Array<{ usage: typeof nestedUsage }>;
+				progress: Array<{ tokens: number; cost: number }>;
+			};
 		};
 
 		const preserved = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "keep"), undefined, {
@@ -240,6 +327,15 @@ describe("SessionManager.forkFrom", () => {
 		const preservedMessage = await findAssistant(preservedFile);
 		expect(preservedMessage.usage.cost.total).toBe(6);
 		expect(preservedMessage.usage.premiumRequests).toBe(2);
+		const preservedTaskDetails = await findTaskDetails(preservedFile);
+		expect(preserved.getUsageStatistics().cost).toBe(16);
+		expect(preservedTaskDetails.usage.cost).toEqual(taskUsage.cost);
+		expect(preservedTaskDetails.usage.credits).toEqual(taskUsage.credits);
+		expect(preservedTaskDetails.usage.premiumRequests).toBe(taskUsage.premiumRequests);
+		expect(preservedTaskDetails.results[0]?.usage.cost).toEqual(nestedUsage.cost);
+		expect(preservedTaskDetails.results[0]?.usage.credits).toEqual(nestedUsage.credits);
+		expect(preservedTaskDetails.results[0]?.usage.premiumRequests).toBe(nestedUsage.premiumRequests);
+		expect(preservedTaskDetails.progress[0]?.cost).toBe(10);
 
 		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
 			suppressBreadcrumb: true,
@@ -255,6 +351,22 @@ describe("SessionManager.forkFrom", () => {
 		expect(resetMessage.usage.input).toBe(100);
 		expect(resetMessage.usage.output).toBe(50);
 		expect(resetMessage.usage.totalTokens).toBe(165);
+		const resetTaskDetails = await findTaskDetails(resetFile);
+		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		expect(resetTaskDetails.usage.cost).toEqual(zeroCost);
+		expect(resetTaskDetails.usage.credits).toBeUndefined();
+		expect(resetTaskDetails.usage.premiumRequests).toBeUndefined();
+		expect(resetTaskDetails.usage.input).toBe(40);
+		expect(resetTaskDetails.usage.cacheRead).toBe(2);
+		expect(resetTaskDetails.usage.totalTokens).toBe(53);
+		expect(resetTaskDetails.results[0]?.usage.cost).toEqual(zeroCost);
+		expect(resetTaskDetails.results[0]?.usage.credits).toBeUndefined();
+		expect(resetTaskDetails.results[0]?.usage.premiumRequests).toBeUndefined();
+		expect(resetTaskDetails.results[0]?.usage.input).toBe(5);
+		expect(resetTaskDetails.results[0]?.usage.cacheRead).toBe(1);
+		expect(resetTaskDetails.results[0]?.usage.totalTokens).toBe(11);
+		expect(resetTaskDetails.progress[0]?.cost).toBe(0);
+		expect(resetTaskDetails.progress[0]?.tokens).toBe(11);
 		const sourceMessage = sourceManager.getEntries().find(entry => entry.type === "message");
 		if (sourceMessage?.type !== "message" || sourceMessage.message.role !== "assistant") {
 			throw new Error("expected source assistant message");

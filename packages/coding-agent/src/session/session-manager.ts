@@ -449,6 +449,25 @@ function resetUsageCost(usage: Usage | undefined): void {
 	usage.premiumRequests = undefined;
 }
 
+/** Clear child billing kept in task results without discarding their token counts. */
+function resetTaskResultBilling(details: unknown): void {
+	if (details === null || typeof details !== "object") return;
+	const results = Reflect.get(details, "results");
+	if (Array.isArray(results)) {
+		for (const result of results) {
+			resetUsageCost(taskUsageFrom(result));
+		}
+	}
+	const progress = Reflect.get(details, "progress");
+	if (Array.isArray(progress)) {
+		for (const item of progress) {
+			if (item !== null && typeof item === "object" && typeof Reflect.get(item, "cost") === "number") {
+				Reflect.set(item, "cost", 0);
+			}
+		}
+	}
+}
+
 function isAssistantEntry(entry: SessionEntry): boolean {
 	return entry.type === "message" && entry.message.role === "assistant";
 }
@@ -4007,7 +4026,12 @@ export class SessionManager {
 	 * on them — since only billing attribution is inherited, not context size.
 	 */
 	static #resetInheritedUsageCost(history: SessionEntry[]): void {
-		for (const entry of history) resetUsageCost(entryUsage(entry));
+		for (const entry of history) {
+			resetUsageCost(entryUsage(entry));
+			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
+				resetTaskResultBilling(entry.message.details);
+			}
+		}
 	}
 
 	/**
