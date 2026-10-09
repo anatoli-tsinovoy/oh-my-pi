@@ -51,7 +51,13 @@ import type {
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
-import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
+import {
+	assistantTurnProducedOutput,
+	isEmptyAssistantStop,
+	isEmptyErrorTurn,
+	isSilentAbort,
+	isUserInterruptAbort,
+} from "./messages";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -1321,27 +1327,28 @@ export class TurnRecovery {
 		return message.errorMessage?.startsWith(USAGE_PREFLIGHT_BLOCKED_PREFIX) === true;
 	}
 	/**
-	 * Retry an empty, reason-less provider abort: a turn with no content that
-	 * carries the generic sentinel (bare `abort()`), whether the provider
-	 * finalized it as `stopReason: "aborted"` or leaked it as `stopReason:
-	 * "error"` (a stalled/dropped stream reported as an error rather than an
+	 * Classify provider-abort provenance independently of partial output;
+	 * automatic replay still requires empty content in
+	 * `isRetryableReasonlessAbort`. Accepts the generic sentinel whether the
+	 * provider finalized it as `stopReason: "aborted"` or leaked it as
+	 * `"error"` (a stalled/dropped stream reported as an error rather than an
 	 * abort — issue #5375). Only fires while the session is neither aborting nor
 	 * tearing down. A user/lifecycle abort (`#abortInProgress`), a dispose-driven
 	 * abort (`#isDisposed`), or a session-induced streaming-edit guard abort
-	 * (`StreamingEditGuard.abortTriggered` — failed-patch
-	 * preview) is deliberate and MUST settle the turn instead: routing it through
-	 * retry would orphan `#retryPromise` on a continuation the guard skips
-	 * (hanging the in-flight `prompt()`) or silently undo the guard's intended
-	 * abort. Deliberate user interrupts (`UserInterrupt`) and silent aborts carry
-	 * their own marker, not the generic sentinel, so they never match here.
+	 * (`StreamingEditGuard.abortTriggered` — failed-patch preview) is deliberate
+	 * and MUST settle the turn instead: routing it through retry would orphan
+	 * `#retryPromise` on a continuation the guard skips (hanging the in-flight
+	 * `prompt()`) or silently undo the guard's intended abort. Deliberate user
+	 * interrupts and silent aborts carry their own marker and never match here.
 	 */
-	isRetryableReasonlessAbort(message: AssistantMessage): boolean {
+	#isRetryableProviderAbort(message: AssistantMessage): boolean {
 		if (
 			(message.stopReason !== "aborted" && message.stopReason !== "error") ||
-			message.content.length !== 0 ||
 			this.#host.abortInProgress() ||
 			this.#host.isDisposed() ||
-			this.#host.streamingEditAbortTriggered()
+			this.#host.streamingEditAbortTriggered() ||
+			isSilentAbort(message) ||
+			isUserInterruptAbort(message)
 		) {
 			return false;
 		}
@@ -1354,6 +1361,10 @@ export class TurnRecovery {
 
 		message.errorId = AIError.create(AIError.Flag.Abort);
 		return true;
+	}
+
+	isRetryableReasonlessAbort(message: AssistantMessage): boolean {
+		return message.content.length === 0 && this.#isRetryableProviderAbort(message);
 	}
 
 	/**
@@ -3033,9 +3044,9 @@ export class TurnRecovery {
 			turnEnd = retryableAssistantTurnEnd(messages);
 		}
 		const message = turnEnd === undefined ? undefined : messages[turnEnd - 1];
-		return (
-			message?.role === "assistant" && (message.stopReason === "error" || this.isRetryableReasonlessAbort(message))
-		);
+		if (message?.role !== "assistant") return false;
+		if (message.stopReason === "error") return !isSilentAbort(message) && !isUserInterruptAbort(message);
+		return this.#isRetryableProviderAbort(message);
 	}
 	/**
 	 * Manually retry the last failed assistant turn.

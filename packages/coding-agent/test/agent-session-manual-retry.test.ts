@@ -88,6 +88,7 @@ describe("AgentSession manual retry", () => {
 		responses: MockResponse[];
 		output: string;
 		originalOutput?: string;
+		discardedOutput?: string;
 	}[] = [
 		{
 			name: "retries a plain provider error",
@@ -119,6 +120,20 @@ describe("AgentSession manual retry", () => {
 				{ content: ["recovered after reasonless abort"], stopReason: "stop" },
 			],
 			output: "recovered after reasonless abort",
+		},
+		{
+			name: "retries a partial generic provider abort",
+			shortcut: ".",
+			responses: [
+				{
+					content: ["partial output from failed attempt"],
+					stopReason: "aborted",
+					errorMessage: "Request was aborted",
+				},
+				{ content: ["recovered after partial abort"], stopReason: "stop" },
+			],
+			output: "recovered after partial abort",
+			discardedOutput: "partial output from failed attempt",
 		},
 		{
 			name: "continues after a successful stop",
@@ -154,6 +169,12 @@ describe("AgentSession manual retry", () => {
 
 			await submitShortcut(session, sessionManager, scenario.shortcut);
 			const messages = session.agent.state.messages;
+			if (scenario.discardedOutput) {
+				expect(lastAgentMessage(session).content).not.toContainEqual({
+					type: "text",
+					text: scenario.discardedOutput,
+				});
+			}
 			if (scenario.originalOutput) {
 				expect(messages.map(message => message.role)).toEqual(["user", "assistant", "developer", "assistant"]);
 				const assistants = messages.filter((message): message is AssistantMessage => message.role === "assistant");
