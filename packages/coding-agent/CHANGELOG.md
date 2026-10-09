@@ -48,6 +48,7 @@
 - `omp update` and the startup update notice leave an omp installed by another app (Tern) to that app instead of replacing its files.
 - The startup update notice no longer appears when omp runs from a source checkout.
 - Sending `c` or `.` to the main agent now retries the last failed turn, like F5, instead of adding a continuation directive.
+- Sending `c` or `.` to the main agent now retries the last failed turn, like F5, instead of adding a continuation directive ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Fixed
 
