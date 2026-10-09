@@ -22,6 +22,7 @@
 - Fixed `/omfg` save, overwrite, and validation prompts in Tern opening as a sheet over the candidate rule; they now sit in the composer slot like `ask`, so the rule stays readable while you choose ([#15058](https://github.com/can1357/oh-my-pi/pull/15058) by [@H4vC](https://github.com/H4vC))
 - Fixed hotkeys pressed in Tern while omp is still starting (such as Alt+P for the model selector) being ignored; like in other terminals, they now take effect once startup finishes ([#15120](https://github.com/can1357/oh-my-pi/pull/15120) by [@H4vC](https://github.com/H4vC))
 - Fixed a startup extension dialog (select, confirm, input) in Tern not receiving keys until it timed out ([#15122](https://github.com/can1357/oh-my-pi/pull/15122) by [@H4vC](https://github.com/H4vC))
+- Sending `c` or `.` to the main agent immediately after a provider failure now retries like F5; otherwise, the shortcuts continue normally ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ## [18.8.7] - 2026-10-09
 
@@ -47,11 +48,6 @@
 - Added `speech.speed` and `tts.localSpeed` settings (0.5–2.5, default 1) to speed up or slow down local Kokoro speech for live vocalization and the `tts` tool / `omp say`, plus an `omp say --speed` flag; ACP voice clients find both settings and their presets in `speech.models.list` ([#5868](https://github.com/can1357/oh-my-pi/issues/5868))
 - `omp update` and the startup update notice leave an omp installed by another app (Tern) to that app instead of replacing its files.
 - The startup update notice no longer appears when omp runs from a source checkout.
-- Sending `c` or `.` to the main agent now retries the last failed turn, like F5, instead of adding a continuation directive.
-- Sending `c` or `.` to the main agent now retries the last failed turn, like F5, instead of adding a continuation directive ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- Sending `c` or `.` to the main agent immediately after an error now retries the failed turn like F5; otherwise, the shortcuts continue normally ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- Sending `c` or `.` to the main agent immediately after a failed provider turn, including a reasonless provider abort, now retries like F5; otherwise, the shortcuts continue synthetically ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
-- Sending `c` or `.` to the main agent immediately after a provider failure now retries like F5; otherwise, the shortcuts continue normally ([#15032](https://github.com/can1357/oh-my-pi/pull/15032) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Fixed
 
