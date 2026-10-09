@@ -61,6 +61,46 @@ describe("task schema (single-spawn)", () => {
 	});
 });
 
+describe("task schema seance fields", () => {
+	it("accepts source and model selectors in every flat/batch isolation mode", () => {
+		for (const batchEnabled of [false, true]) {
+			for (const isolationEnabled of [false, true]) {
+				const schema = getTaskSchema({ batchEnabled, isolationEnabled, evalToolsEnabled: false });
+				const modelSelector = batchEnabled
+					? ["anthropic/claude-sonnet-4-6", "anthropic/claude-sonnet-4-5"]
+					: "anthropic/claude-sonnet-4-5";
+				const item = {
+					agent: "seance",
+					task: "Read historical context.",
+					solutionSpace: "focused read-only inspection",
+					sourceSession: "/sessions/source.jsonl",
+					model: modelSelector,
+					...(isolationEnabled ? { isolated: false } : {}),
+				};
+				const parsed = schema(batchEnabled ? { context: "shared context", tasks: [item] } : { ...item });
+				expect(parsed instanceof type.errors).toBe(false);
+				if (parsed instanceof type.errors) continue;
+				if (!parsed || typeof parsed !== "object") {
+					expect(parsed).toBeTruthy();
+					continue;
+				}
+				let parsedItem: unknown = parsed;
+				if (batchEnabled) {
+					if (!("tasks" in parsed) || !Array.isArray(parsed.tasks)) {
+						expect(parsed).toHaveProperty("tasks");
+						continue;
+					}
+					parsedItem = parsed.tasks[0];
+				}
+				expect(parsedItem).toMatchObject({
+					sourceSession: "/sessions/source.jsonl",
+					model: modelSelector,
+				});
+			}
+		}
+	});
+});
+
 describe("task spawn validation", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();

@@ -11,6 +11,7 @@ import {
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
@@ -138,6 +139,126 @@ describe("SessionManager.forkFrom", () => {
 		expect(await Bun.file(path.join(forkArtifactsDir, "1.read.log")).text()).toBe("tool output");
 		expect(await Bun.file(path.join(forkArtifactsDir, "nested", "result.txt")).text()).toBe("nested output");
 		expect(await Bun.file(path.join(sourceArtifactsDir, "1.read.log")).text()).toBe("tool output");
+	});
+
+	it("preserves historical context while neutralizing every inherited startup contract", async () => {
+		using tempDir = TempDir.createSync("@omp-session-seance-fork-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sourceFile = path.join(tempDir.path(), "sessions", "source.jsonl");
+		const timestamp = new Date().toISOString();
+		const sourceHeader: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "source-session",
+			timestamp,
+			cwd,
+		};
+		const inheritedInit = {
+			type: "session_init",
+			id: "inherited-init",
+			parentId: null,
+			timestamp,
+			systemPrompt: ["unrestricted source prompt"],
+			task: "unrestricted source task",
+			tools: ["read", "write", "task"],
+			agent: "task",
+			spawns: "*",
+		};
+		const witnessRequest = {
+			type: "message",
+			id: "witness-request",
+			parentId: "inherited-init",
+			timestamp,
+			message: { role: "user", content: "early request before resume", timestamp: 1 },
+		};
+		const witnessAssistant = {
+			type: "message",
+			id: "decision-witness",
+			parentId: "witness-request",
+			timestamp,
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "DECISION_WITNESS: preserve the migration boundary." }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 2,
+			},
+		};
+		const laterInit = {
+			type: "session_init",
+			id: "later-inherited-init",
+			parentId: "decision-witness",
+			timestamp,
+			systemPrompt: ["later unrestricted resume prompt"],
+			task: "later source task",
+			tools: ["read", "write", "task"],
+			agent: "task",
+			spawns: "*",
+		};
+		const laterMessage = {
+			type: "message",
+			id: "later-source-message",
+			parentId: "later-inherited-init",
+			timestamp,
+			message: { role: "user", content: "later source turn", timestamp: 3 },
+		};
+		const sourceText = [sourceHeader, inheritedInit, witnessRequest, witnessAssistant, laterInit, laterMessage]
+			.map(entry => JSON.stringify(entry))
+			.join("\n")
+			.concat("\n");
+		await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+		await Bun.write(sourceFile, sourceText);
+
+		const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "forks"), undefined, {
+			suppressBreadcrumb: true,
+			neutralizeInheritedSessionInit: true,
+		});
+		try {
+			const forkFile = forked.getSessionFile();
+			if (!forkFile) throw new Error("expected persisted seance fork");
+			const forkHeader = (await loadEntriesFromFile(forkFile)).find(
+				(entry): entry is SessionHeader => entry.type === "session",
+			);
+			expect(forkHeader).toMatchObject({ type: "session", seanceFork: true, parentSession: "source-session" });
+			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({ seanceFork: true, init: null });
+
+			const contextText = JSON.stringify(buildSessionContext(forked.getBranch()).messages);
+			expect(contextText).toContain("DECISION_WITNESS");
+			expect(contextText).toContain("later source turn");
+			expect(contextText).not.toContain("unrestricted source prompt");
+			expect(contextText).not.toContain("later unrestricted resume prompt");
+
+			forked.appendSessionInit({
+				systemPrompt: ["restricted seance prompt"],
+				task: "read historical context only",
+				tools: ["read", "grep", "glob", "yield"],
+				agent: "seance",
+				resolvedModel: "anthropic/claude-sonnet-4-5",
+				restrictToolNames: true,
+				spawns: "",
+			});
+			expect(await SessionManager.peekSessionInit(forkFile)).toMatchObject({
+				seanceFork: true,
+				init: {
+					agent: "seance",
+					restrictToolNames: true,
+					tools: ["read", "grep", "glob", "yield"],
+				},
+			});
+			expect(await fs.readFile(sourceFile, "utf8")).toBe(sourceText);
+		} finally {
+			await forked.close();
+		}
 	});
 
 	it("does not copy artifacts when the caller opts out", async () => {

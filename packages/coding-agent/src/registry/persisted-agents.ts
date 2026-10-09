@@ -9,6 +9,7 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
+import { isSeanceSessionFile } from "../task/seance";
 import { persistedVibeChildIds } from "../vibe/lifecycle";
 import {
 	type AgentHistorySummary,
@@ -546,6 +547,7 @@ export async function ensurePersistedRoster(
 		return undefined;
 	}
 	if (!root) return undefined;
+	if (await isSeanceSessionFile(root)) return root;
 
 	const taggedRegistry = registry as RegistryWithPersistedRosterLatches;
 	let latches = taggedRegistry[kPersistedRosterLatches];
@@ -643,6 +645,7 @@ export async function registerPersistedSubagents(
 	} = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
+	if (await isSeanceSessionFile(sessionFile)) return;
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
@@ -835,7 +838,7 @@ async function registerPersistedSubagentsFromDir(
 		}
 		// A transcript stem is not proof of a child directory: "." and ".."
 		// revisit ancestors, and symlinks can point back into the same tree.
-		if (childDirectories.has(id)) {
+		if (childDirectories.has(id) && !(await isSeanceSessionFile(sessionFile))) {
 			await registerPersistedSubagentsFromDir(
 				registry,
 				path.join(dir, id),

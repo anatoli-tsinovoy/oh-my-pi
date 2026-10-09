@@ -1,4 +1,8 @@
-import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+import type {
+	AgentSource,
+	TaskItem as SharedTaskItem,
+	TaskParams as SharedTaskParams,
+} from "@oh-my-pi/pi-tui/tools/task";
 export {
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
@@ -12,6 +16,16 @@ import { $env } from "@oh-my-pi/pi-utils";
 
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+export type TaskItem = Omit<SharedTaskItem, "model" | "sourceSession"> & {
+	model?: string | string[];
+	sourceSession?: string;
+};
+
+export type TaskParams = Omit<SharedTaskParams, "model" | "sourceSession" | "tasks"> & {
+	model?: string | string[];
+	sourceSession?: string;
+	tasks?: TaskItem[];
+};
 
 const parseNumber = (value: string | undefined, defaultValue: number): number => {
 	if (value) {
@@ -42,6 +56,8 @@ export interface SubagentEventPayload {
 
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
+const modelSelectorInputSchema = type("string | string[]");
+const seanceTaskFields = { "sourceSession?": "string", "model?": modelSelectorInputSchema };
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
 
@@ -53,6 +69,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	...seanceTaskFields,
 	"+": "delete",
 });
 const taskItemSchemaIsolated = type({
@@ -63,6 +80,7 @@ const taskItemSchemaIsolated = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	...seanceTaskFields,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -75,6 +93,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	...seanceTaskFields,
 	"isolated?": "boolean",
 	"+": "delete",
 });
@@ -86,6 +105,7 @@ const taskSchemaNoIsolation = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
+	...seanceTaskFields,
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -137,6 +157,7 @@ function createTaskSchema(options: {
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
 				...toolsField,
+				...seanceTaskFields,
 				"isolated?": "boolean",
 				"+": "delete",
 			});
@@ -155,6 +176,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			...seanceTaskFields,
 			"+": "delete",
 		});
 		return type.raw({
@@ -173,6 +195,7 @@ function createTaskSchema(options: {
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
 			...toolsField,
+			...seanceTaskFields,
 			"isolated?": "boolean",
 			"+": "delete",
 		});
@@ -186,6 +209,7 @@ function createTaskSchema(options: {
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		...toolsField,
+		...seanceTaskFields,
 		"+": "delete",
 	});
 }

@@ -341,6 +341,16 @@ Startup `--fork` is resolved before normal session creation:
 
 Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explicitly and independently from both the OMP session id and `--provider-session-id`. `--provider-session-id` continues to control provider session/routing headers and sticky credential selection; `--prompt-cache-key` controls the OpenAI Responses `prompt_cache_key` payload where supported.
 
+## Seance
+
+`/seance [id|path] [--model selector]` opens a source picker when no session is supplied; an id or path selects directly. Each consult forks the selected session JSONL and recursively copies its artifacts, leaving the original unchanged.
+
+The source's saved model is used when restorable; `--model selector` overrides it. If the saved model is absent or unavailable, supply an explicit selection.
+
+Seance reads the copied history with `read`, `grep`, and `glob`. Copied child and grandchild transcripts can be discovered and read through `history://`, but historical children are not revived as unrestricted agents. Existing IRC consults can ask follow-ups against this read-only history.
+
+Inherited aggregate source charges are excluded; new consultation turns use existing task/Agent Hub usage tracking.
+
 ## Resume and continue
 
 ## Interactive `/resume [value]`
