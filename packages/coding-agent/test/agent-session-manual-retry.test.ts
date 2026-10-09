@@ -6,16 +6,14 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { getEditorTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { submitShortcut } from "./helpers/submit-shortcut";
 
 function lastAgentMessage(session: AgentSession): AssistantMessage {
 	const message = session.agent.state.messages.at(-1);
@@ -23,39 +21,6 @@ function lastAgentMessage(session: AgentSession): AssistantMessage {
 		throw new Error("Expected trailing assistant message");
 	}
 	return message as AssistantMessage;
-}
-
-async function submitShortcut(session: AgentSession, sessionManager: SessionManager, shortcut: "." | "c") {
-	const editor = new CustomEditor(getEditorTheme());
-	let continuation: Promise<unknown> | undefined;
-	const ctx = {
-		editor,
-		session,
-		viewSession: session,
-		sessionManager,
-		isGuidedGoalInterviewActive: () => false,
-		showStatus: () => undefined,
-		onInputCallback: (input: SubmittedUserInput) => {
-			continuation = session.prompt(input.text, {
-				synthetic: input.synthetic,
-				userInitiated: input.userInitiated,
-			});
-		},
-	} as unknown as InteractiveModeContext;
-	const controller = new InputController(ctx);
-	controller.setupEditorSubmitHandler();
-
-	let submission: Promise<void> | undefined;
-	const onSubmit = editor.onSubmit;
-	editor.onSubmit = text => {
-		submission = Promise.resolve(onSubmit?.(text));
-		return submission;
-	};
-	editor.setText(shortcut);
-	editor.handleInput("\r");
-	if (submission) await submission;
-	if (continuation) await continuation;
-	await session.waitForIdle();
 }
 
 describe("AgentSession manual retry", () => {
@@ -85,6 +50,10 @@ describe("AgentSession manual retry", () => {
 
 	async function createManualRetrySession(
 		responses: MockResponse[],
+		options?: {
+			compactionKeepRecentTokens?: number;
+			extensionRunner?: ExtensionRunner;
+		},
 	): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic test model to exist");
@@ -98,8 +67,15 @@ describe("AgentSession manual retry", () => {
 		const manualSession = new AgentSession({
 			agent,
 			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				...(options?.compactionKeepRecentTokens === undefined
+					? {}
+					: { "compaction.keepRecentTokens": options.compactionKeepRecentTokens }),
+			}),
 			modelRegistry,
+			extensionRunner: options?.extensionRunner,
 		});
 		session = manualSession;
 		manualSession.subscribe(() => undefined);
@@ -196,6 +172,66 @@ describe("AgentSession manual retry", () => {
 			expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: scenario.output });
 		});
 	}
+
+	it("continues a failed-tail shortcut submitted during manual compaction", async () => {
+		const compactEntered = Promise.withResolvers<void>();
+		const releaseCompaction = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_compact",
+			emit: async (event: Parameters<ExtensionRunner["emit"]>[0]) => {
+				if (event.type !== "session_before_compact" || !("preparation" in event)) return undefined;
+				const preparation = event.preparation;
+				if (!preparation) return undefined;
+				compactEntered.resolve();
+				await releaseCompaction.promise;
+				return {
+					compaction: {
+						summary: "compacted",
+						shortSummary: undefined,
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						tokensBefore: preparation.tokensBefore,
+						details: {},
+					},
+				};
+			},
+			emitBeforeAgentStart: async () => undefined,
+		} as unknown as ExtensionRunner;
+		const { session, sessionManager } = await createManualRetrySession(
+			[
+				{ content: ["the first task is underway"], stopReason: "stop" },
+				{ throw: "provider failed" },
+				{ content: ["continued after compaction"], stopReason: "stop" },
+			],
+			{ compactionKeepRecentTokens: 1, extensionRunner },
+		);
+		await session.prompt("start a task");
+		await session.waitForIdle();
+		await session.prompt("continue the task");
+		await session.waitForIdle();
+		expect(session.hasFailedAssistantTurn).toBe(true);
+
+		const compaction = session.compact();
+		let shortcut: Promise<void> | undefined;
+		try {
+			await compactEntered.promise;
+			expect(session.isCompacting).toBe(true);
+			shortcut = submitShortcut(session, sessionManager, ".");
+		} finally {
+			releaseCompaction.resolve();
+			await compaction;
+		}
+
+		await shortcut;
+
+		expect(session.agent.state.messages.find(message => message.role === "developer")).toMatchObject({
+			synthetic: true,
+			userInitiated: true,
+		});
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "continued after compaction",
+		});
+	});
 
 	it("removes the failed assistant turn and continues with a fresh attempt", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");

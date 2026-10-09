@@ -978,7 +978,12 @@ export class InputController {
 			// During a /guided-goal interview "c" is a plausible answer (e.g. option C),
 			// so it is sent as a normal reply there.
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
-				if (!this.ctx.session.isStreaming && this.ctx.session.hasFailedAssistantTurn && !this.ctx.collabGuest) {
+				if (
+					!this.ctx.session.isStreaming &&
+					!this.ctx.session.isCompacting &&
+					this.ctx.session.hasFailedAssistantTurn &&
+					!this.ctx.collabGuest
+				) {
 					await this.handleRetry(false);
 					return;
 				}
