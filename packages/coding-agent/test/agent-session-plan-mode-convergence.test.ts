@@ -173,6 +173,7 @@ describe("AgentSession plan-mode convergence", () => {
 
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
+			getToolChoice: () => session?.nextToolChoiceDirective(),
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
@@ -298,6 +299,30 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(countReminders(harness.session.agent.state.messages)).toBe(3);
 		expect(harness.mock.calls.length).toBe(7);
 		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+	});
+
+	it("retries the plan decision reminder after a manual recovery", async () => {
+		const harness = await createPlanSession([
+			{ content: ["planning before reminder"] },
+			{ throw: "forced plan decision provider failure" },
+			{ content: ["recovered plaintext"] },
+			{ content: ["renewed reminder plaintext"] },
+		]);
+		harness.session.setTodoPhases([{ name: "Plan", tasks: [{ content: "draft the plan", status: "pending" }] }]);
+
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+		expect(harness.mock.calls.map(call => call.options?.toolChoice)).toEqual([undefined, "required"]);
+
+		expect(await harness.session.retry()).toBe(true);
+		await harness.session.waitForIdle();
+
+		expect(harness.mock.calls.map(call => call.options?.toolChoice)).toEqual([
+			undefined,
+			"required",
+			undefined,
+			"required",
+		]);
 	});
 
 	it("T3b: a propose write resets the convergence counter", async () => {

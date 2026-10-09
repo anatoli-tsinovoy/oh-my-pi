@@ -7195,6 +7195,14 @@ export class AgentSession implements SettingsScope {
 		return keywordNotices;
 	}
 
+	#resetUserResumeState(): void {
+		this.#advisors.autoResumeSuppressed = false;
+		this.#planModeReminderCount = 0;
+		this.#planModeReminderAwaitingProgress = false;
+		// The resumed user turn owns the next decision; discard a forced reminder choice.
+		this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+	}
+
 	/**
 	 * Send a prompt to the agent.
 	 * - Handles extension commands (registered via pi.registerCommand) immediately, even during streaming
@@ -7286,12 +7294,7 @@ export class AgentSession implements SettingsScope {
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
 		if (options?.userInitiated ?? !options?.synthetic) {
-			this.#advisors.autoResumeSuppressed = false;
-			this.#planModeReminderCount = 0;
-			this.#planModeReminderAwaitingProgress = false;
-			// A user turn owns the next decision; drop a queued forced choice from
-			// a reminder continuation this prompt just preempted.
-			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
+			this.#resetUserResumeState();
 		}
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
@@ -10841,7 +10844,7 @@ export class AgentSession implements SettingsScope {
 	/** Retry the last failed assistant turn when the session is idle. */
 	async retry(): Promise<boolean> {
 		const didRetry = await this.#recovery.retry();
-		if (didRetry) this.#advisors.autoResumeSuppressed = false;
+		if (didRetry) this.#resetUserResumeState();
 		return didRetry;
 	}
 
