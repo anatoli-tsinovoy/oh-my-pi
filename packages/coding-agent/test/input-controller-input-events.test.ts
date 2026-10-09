@@ -18,6 +18,7 @@ import type { BlobPutOptions, BlobPutResult } from "@oh-my-pi/pi-coding-agent/se
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
 const ENTER = "\r";
 const FOLLOW_UP = "\x1b[13;5u";
@@ -57,6 +58,7 @@ async function createHarness(factory: ExtensionFactory) {
 		isCompacting: false,
 		queuedMessageCount: 0,
 		prompt,
+		retry: vi.fn(async () => true),
 		followUp: vi.fn(async (_text: string, _images?: ImageContent[]) => {}),
 		promptCustomMessage: vi.fn(async () => true),
 		abort: vi.fn(async () => {}),
@@ -588,11 +590,36 @@ describe("interactive native input ingress", () => {
 				streamingBehavior: key === ENTER ? "steer" : "followUp",
 				images: undefined,
 			});
+			const onInput = vi.fn();
+			h.ctx.onInputCallback = onInput;
+			if (key === ENTER) {
+				for (const text of [".", "c"]) {
+					h.editor.setText(text);
+					await h.pressSubmit(key);
+				}
+				expect(focusedPrompt).toHaveBeenNthCalledWith(2, manualContinuePrompt, {
+					synthetic: true,
+					userInitiated: true,
+				});
+				expect(focusedPrompt).toHaveBeenNthCalledWith(3, manualContinuePrompt, {
+					synthetic: true,
+					userInitiated: true,
+				});
+			} else {
+				h.editor.setText(".");
+				await h.pressSubmit(key);
+				expect(focusedPrompt).toHaveBeenNthCalledWith(2, ".", {
+					streamingBehavior: "followUp",
+					images: undefined,
+				});
+			}
+			expect(h.session.retry).not.toHaveBeenCalled();
+			expect(onInput).not.toHaveBeenCalled();
 			for (const text of ["/clear", "!echo blocked", "$ print('blocked')"]) {
 				h.editor.setText(text);
 				await h.pressSubmit(key);
 			}
-			expect(focusedPrompt).toHaveBeenCalledTimes(1);
+			expect(focusedPrompt).toHaveBeenCalledTimes(key === ENTER ? 3 : 2);
 			expect(input).not.toHaveBeenCalled();
 			expect(h.prompt).not.toHaveBeenCalled();
 			expect(h.ctx.handleClearCommand).not.toHaveBeenCalled();
@@ -620,7 +647,7 @@ describe("interactive native input ingress", () => {
 		expect(h.editor.imageLinks).toBeUndefined();
 	});
 
-	it("Enter dispatches input once, while continue shortcuts remain synthetic", async () => {
+	it("Enter dispatches input once, while retry shortcuts bypass input handlers", async () => {
 		const seen: InputEvent[] = [];
 		const h = await createHarness(pi => {
 			pi.on("input", event => {
@@ -639,8 +666,8 @@ describe("interactive native input ingress", () => {
 			h.editor.setText(text);
 			await h.pressSubmit(ENTER);
 		}
-		expect(callback).toHaveBeenCalledTimes(2);
-		expect(callback.mock.calls[0][0]).toMatchObject({ synthetic: true, started: true, userInitiated: true });
+		expect(callback).not.toHaveBeenCalled();
+		expect(h.session.retry).toHaveBeenCalledTimes(2);
 		expect(seen).toHaveLength(1);
 		expect(h.prompt).toHaveBeenCalledTimes(1);
 	});

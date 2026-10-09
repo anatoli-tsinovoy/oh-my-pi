@@ -6,6 +6,11 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { getEditorTheme } from "@oh-my-pi/pi-tui/theme/tui-adapters";
+import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -85,6 +90,91 @@ describe("AgentSession manual retry", () => {
 		expect(mock.calls.length).toBe(2);
 		expect(lastAgentMessage(session).stopReason).toBe("stop");
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "recovered after manual retry" });
+	});
+
+	it("editor c retries a failed assistant/tool tail without adding a user directive", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "write", arguments: { path: "plan.md", content: "x" } }],
+					stopReason: "error",
+					errorMessage: "OpenAI completions stream stalled while waiting for the next event",
+				},
+				{ content: ["recovered through editor retry"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry,
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("write the plan");
+		await session.waitForIdle();
+		expect(session.agent.state.messages.at(-1)?.role).toBe("toolResult");
+
+		const editor = new CustomEditor(getEditorTheme());
+		let syntheticPrompt: Promise<unknown> | undefined;
+		let inputCallbackCalls = 0;
+		const onInput = (input: { text: string }) => {
+			inputCallbackCalls++;
+			syntheticPrompt = session!.prompt(input.text, { synthetic: true });
+		};
+		const ctx = {
+			editor,
+			session,
+			viewSession: session,
+			sessionManager,
+			isGuidedGoalInterviewActive: () => false,
+			showStatus: () => {},
+			onInputCallback: onInput,
+		} as unknown as InteractiveModeContext;
+		const controller = new InputController(ctx);
+		controller.setupEditorSubmitHandler();
+
+		let submitCompletion: Promise<void> | undefined;
+		const onSubmit = editor.onSubmit;
+		editor.onSubmit = text => {
+			submitCompletion = Promise.resolve(onSubmit?.(text));
+			return submitCompletion;
+		};
+		editor.setText("c");
+		editor.handleInput("\r");
+		if (submitCompletion) await submitCompletion;
+		if (syntheticPrompt) await syntheticPrompt;
+		await session.waitForIdle();
+
+		const messages = session.agent.state.messages;
+		expect(mock.calls).toHaveLength(2);
+		expect(inputCallbackCalls).toBe(0);
+		expect(editor.getText()).toBe("");
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant"]);
+		expect(messages.filter(message => message.role === "toolResult")).toHaveLength(0);
+		expect(messages.some(message => message.role === "assistant" && message.stopReason === "error")).toBe(false);
+		expect(JSON.stringify(messages)).toContain("write the plan");
+		expect(JSON.stringify(messages)).not.toContain(JSON.stringify(manualContinuePrompt).slice(1, -1));
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "recovered through editor retry",
+		});
 	});
 
 	it("returns false when the trailing assistant turn succeeded", async () => {
