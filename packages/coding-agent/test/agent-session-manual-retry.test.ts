@@ -13,8 +13,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { submitShortcut } from "./helpers/submit-shortcut";
 
 function lastAgentMessage(session: AgentSession): AssistantMessage {
@@ -55,7 +54,6 @@ describe("AgentSession manual retry", () => {
 		options?: {
 			compactionKeepRecentTokens?: number;
 			extensionRunner?: ExtensionRunner;
-			retryBackoffMs?: number;
 		},
 	): Promise<{ session: AgentSession; sessionManager: SessionManager }> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -73,12 +71,6 @@ describe("AgentSession manual retry", () => {
 			settings: Settings.isolated({
 				"compaction.enabled": false,
 				"retry.enabled": false,
-				...(options?.retryBackoffMs === undefined
-					? {}
-					: {
-							"retry.baseDelayMs": options.retryBackoffMs,
-							"retry.maxDelayMs": options.retryBackoffMs,
-						}),
 				...(options?.compactionKeepRecentTokens === undefined
 					? {}
 					: { "compaction.keepRecentTokens": options.compactionKeepRecentTokens }),
@@ -247,104 +239,6 @@ describe("AgentSession manual retry", () => {
 			synthetic: true,
 			userInitiated: true,
 		});
-	});
-
-	it("continues instead of retrying during automatic retry backoff", async () => {
-		const retryableFailure = "503 service unavailable: overloaded_error retry-after-ms=60000";
-		const retryStarted = Promise.withResolvers<void>();
-		const backoffReady = Promise.withResolvers<void>();
-		let retryDelayMs: number | undefined;
-		let manualRetryError: unknown;
-		let shortcutError: unknown;
-		let manualRetry: Promise<void> | undefined;
-		let shortcut: Promise<void> | undefined;
-		const { session, sessionManager } = await createManualRetrySession(
-			[
-				{ throw: "plain provider failure" },
-				{ throw: retryableFailure },
-				{ content: ["continued after backoff shortcut"], stopReason: "stop" },
-				{ content: ["continued after backoff shortcut"], stopReason: "stop" },
-			],
-			{ retryBackoffMs: 60_000 },
-		);
-
-		try {
-			await session.prompt("start a task");
-			await session.waitForIdle();
-			expect(session.hasFailedAssistantTurn).toBe(true);
-			session.setAutoRetryEnabled(true);
-
-			const resolveBackoffIfReady = () => {
-				if (!retryDelayMs || session.isStreaming || !session.isRetrying || !session.hasFailedAssistantTurn) return;
-				backoffReady.resolve();
-			};
-			session.subscribe(event => {
-				if (event.type !== "auto_retry_start" || event.errorMessage !== retryableFailure) return;
-				retryDelayMs = event.delayMs;
-				retryStarted.resolve();
-				resolveBackoffIfReady();
-			});
-			session.subscribeRunState(state => {
-				if (state === "idle") resolveBackoffIfReady();
-			});
-
-			manualRetry = submitShortcut(session, sessionManager, ".").catch(error => {
-				manualRetryError = error;
-			});
-			await withTimeout(retryStarted.promise, 2_000, "Automatic retry did not start");
-			if (manualRetryError !== undefined) throw manualRetryError;
-			await withTimeout(backoffReady.promise, 2_000, "Automatic retry backoff state was not reached");
-			expect(retryDelayMs).toBeGreaterThan(0);
-			expect(session.isStreaming).toBe(false);
-			expect(session.isRetrying).toBe(true);
-			expect(session.hasFailedAssistantTurn).toBe(true);
-
-			let shortcutInput: SubmittedUserInput | undefined;
-			let stateAtShortcut:
-				| { isStreaming: boolean; isRetrying: boolean; hasFailedAssistantTurn: boolean }
-				| undefined;
-			const shortcutSubmitted = Promise.withResolvers<void>();
-			shortcut = submitShortcut(session, sessionManager, "c", {
-				onInput: input => {
-					shortcutInput = input;
-					stateAtShortcut = {
-						isStreaming: session.isStreaming,
-						isRetrying: session.isRetrying,
-						hasFailedAssistantTurn: session.hasFailedAssistantTurn,
-					};
-				},
-				onSubmitComplete: () => shortcutSubmitted.resolve(),
-			}).catch(error => {
-				shortcutError = error;
-				shortcutSubmitted.resolve();
-			});
-			await withTimeout(shortcutSubmitted.promise, 2_000, "Shortcut submit handler did not finish");
-			if (shortcutError !== undefined) throw shortcutError;
-			session.abortRetry();
-			await withTimeout(shortcut, 10_000, "Synthetic shortcut continuation did not settle");
-			await withTimeout(manualRetry, 10_000, "Manual retry continuation did not settle");
-			if (manualRetryError !== undefined) throw manualRetryError;
-
-			expect(stateAtShortcut).toEqual({
-				isStreaming: false,
-				isRetrying: true,
-				hasFailedAssistantTurn: true,
-			});
-			expect(shortcutInput).toMatchObject({ synthetic: true, userInitiated: true });
-			expect(session.agent.state.messages.find(message => message.role === "developer")).toMatchObject({
-				synthetic: true,
-				userInitiated: true,
-			});
-			expect(lastAgentMessage(session).content).toContainEqual({
-				type: "text",
-				text: "continued after backoff shortcut",
-			});
-		} finally {
-			session.abortRetry();
-			await Promise.allSettled(
-				[manualRetry, shortcut].filter((promise): promise is Promise<void> => promise !== undefined),
-			);
-		}
 	});
 
 	it("continues a failed-tail shortcut submitted during manual compaction", async () => {

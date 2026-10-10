@@ -56,6 +56,7 @@ async function createHarness(factory: ExtensionFactory) {
 		isStreaming: true,
 		hasFailedAssistantTurn: false,
 		isCompacting: false,
+		isRetrying: false,
 		queuedMessageCount: 0,
 		prompt,
 		retry: vi.fn(async () => true),
@@ -644,6 +645,30 @@ describe("interactive native input ingress", () => {
 		expect(callback).toHaveBeenCalledTimes(2);
 		expect(seen).toHaveLength(1);
 		expect(h.prompt).toHaveBeenCalledTimes(1);
+	});
+
+	it("delivers a synthetic continuation while a failed tail is retrying", async () => {
+		const h = await createHarness(() => undefined);
+		h.session.isStreaming = false;
+		h.session.isRetrying = true;
+		h.session.hasFailedAssistantTurn = true;
+		let continuation: Promise<boolean> | undefined;
+		h.ctx.onInputCallback = input => {
+			continuation = h.session.prompt(input.text, {
+				synthetic: input.synthetic,
+				userInitiated: input.userInitiated,
+			});
+		};
+		h.editor.setText("c");
+		await h.pressSubmit(ENTER);
+		await continuation;
+
+		expect(h.session.retry).not.toHaveBeenCalled();
+		expect(h.prompt).toHaveBeenCalledTimes(1);
+		expect(h.prompt.mock.calls[0]?.[1]).toMatchObject({
+			synthetic: true,
+			userInitiated: true,
+		});
 	});
 
 	it("preserves newer text and attachments while shorthand retry is pending", async () => {

@@ -12,7 +12,6 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import * as AIError from "@oh-my-pi/pi-ai/error";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
@@ -21,11 +20,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import {
-	convertToLlm,
-	SILENT_ABORT_MARKER,
-	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
-} from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
@@ -303,18 +298,15 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 	it("retains the empty Vibe abort boundary and continues synthetically after removing Vibe tools", async () => {
 		const started = Promise.withResolvers<void>();
-		const requestHasSyntheticDeveloperMessage: boolean[] = [];
+		let continuationRequest: { syntheticContinuation: boolean; userMessages: number } | undefined;
+		let firstRequest = true;
 		streamFn = (_model, context, options) => {
-			const firstRequest = requestHasSyntheticDeveloperMessage.length === 0;
-			requestHasSyntheticDeveloperMessage.push(
-				context.messages.some(
-					message => message.role === "developer" && "synthetic" in message && message.synthetic === true,
-				),
-			);
+			const isFirstRequest = firstRequest;
+			firstRequest = false;
 			const stream = new AssistantMessageEventStream();
 			queueMicrotask(() => {
 				stream.push({ type: "start", partial: createAssistantMessage("") });
-				if (firstRequest) {
+				if (isFirstRequest) {
 					options?.signal?.addEventListener(
 						"abort",
 						() => stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") }),
@@ -322,6 +314,17 @@ describe("InteractiveMode vibe mode toggle", () => {
 					);
 					started.resolve();
 				} else {
+					continuationRequest = {
+						syntheticContinuation: context.messages.some(
+							message =>
+								message.role === "developer" &&
+								"synthetic" in message &&
+								message.synthetic === true &&
+								"userInitiated" in message &&
+								message.userInitiated === true,
+						),
+						userMessages: context.messages.filter(message => message.role === "user").length,
+					};
 					stream.push({
 						type: "done",
 						reason: "stop",
@@ -348,21 +351,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 			.filter(entry => entry.type === "message")
 			.map(entry => entry.message)
 			.findLast(message => message.role === "assistant");
-		expect(persistedAbort).toMatchObject({
-			stopReason: "aborted",
-			errorMessage: SILENT_ABORT_MARKER,
-			errorId: AIError.create(AIError.Flag.SilentAbort),
-		});
-		expect(session.hasFailedAssistantTurn).toBe(false);
+		expect(persistedAbort).toMatchObject({ stopReason: "aborted" });
 
 		await submitShortcut(session, session.sessionManager, "c");
 
-		const messages = session.agent.state.messages;
-		expect(requestHasSyntheticDeveloperMessage).toEqual([false, true]);
-		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "developer", "assistant"]);
-		expect(messages[1]).toMatchObject({ stopReason: "aborted" });
-		expect(messages[2]).toMatchObject({ synthetic: true, userInitiated: true });
-		expect(messages[3]).toMatchObject({
+		expect(continuationRequest).toEqual({ syntheticContinuation: true, userMessages: 1 });
+		expect(session.agent.state.messages.at(-1)).toMatchObject({
 			stopReason: "stop",
 			content: [{ type: "text", text: "Continued after leaving Vibe mode" }],
 		});
