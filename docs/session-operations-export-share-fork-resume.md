@@ -349,6 +349,8 @@ The source's saved model is used when restorable; `--model selector` overrides i
 
 Consult the inherited source conversation first; it is already in the fork. Use `history://` only to discover/read copied child and grandchild transcripts; NEVER use the source session UUID as an agent ID. An empty listing means no nested histories, not missing source context. Archive is unnecessary, and Eval remains unavailable. Historical children are not revived as unrestricted agents. Existing IRC consults can ask follow-ups against this read-only history.
 
+Parking and process restarts revive the consult's own fork with its full persisted prompt and read-only tool contract. Parent extensions and source startup contracts are not activated.
+
 Inherited aggregate source charges are excluded; new consultation turns use existing task/Agent Hub usage tracking.
 
 ## Resume and continue

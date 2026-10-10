@@ -2277,7 +2277,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			},
 			restrictToolNames,
-			agentName: options.agentName,
+			historyScope: sessionManager.getHeader()?.seanceFork === true ? "fork" : undefined,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames

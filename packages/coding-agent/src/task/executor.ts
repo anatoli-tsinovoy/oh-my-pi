@@ -106,6 +106,7 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { seanceIsolationOptions } from "./seance-policy";
 import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
@@ -3676,6 +3677,8 @@ interface SubagentSessionSpec {
 		| "resolveServiceTierByFamily"
 		| "onFirstChatDispatch"
 	>;
+	/** Explicit source-fork capability; independent of the optional prompt label. */
+	seanceFork: boolean;
 	prompt: SubagentPromptInputs;
 }
 
@@ -3699,10 +3702,11 @@ function buildSubagentSessionOptions(
 	launch?: SubagentLaunchInputs,
 ): CreateAgentSessionOptions {
 	const inputs = spec.prompt;
+	const seance = spec.seanceFork;
 	// MCP proxies are minted per build, not captured in the spec: a kept-alive
 	// subagent revived after `/mcp reload` must see the manager's current tools.
-	const mcpTools = spec.options.mcpManager ? createMCPProxyTools(spec.options.mcpManager) : [];
-	const customTools = spec.options.customTools ?? [];
+	const mcpTools = !seance && spec.options.mcpManager ? createMCPProxyTools(spec.options.mcpManager) : [];
+	const customTools = seance ? [] : (spec.options.customTools ?? []);
 	return {
 		...spec.options,
 		mcpTools: mcpTools.length > 0 ? mcpTools : undefined,
@@ -3712,6 +3716,7 @@ function buildSubagentSessionOptions(
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
+		...(seance ? seanceIsolationOptions() : undefined),
 		systemPrompt: defaultPrompt => {
 			const ircRoster = inputs.ircEnabled
 				? collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile)
@@ -4340,16 +4345,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionSpec: SubagentSessionSpec = {
 				options: {
 					cwd: worktree ?? cwd,
-					additionalDirectories:
-						worktree !== undefined || options.sourceSession !== undefined
-							? undefined
-							: options.additionalDirectories,
+					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 					authStorage,
 					modelRegistry,
 					getApiKey: options.getApiKey,
 					credentialSourceSessionId: options.credentialSourceSessionId,
 					oauthAccountPools: options.oauthAccountPools,
-					inheritedSessionAgents: options.sourceSession ? undefined : options.inheritedSessionAgents,
+					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 					modelPatternAuthFallback:
@@ -4367,14 +4369,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					outputSchemaMode: options.outputSchemaMode,
 					restrictToolNames,
 					requireYieldTool: true,
-					contextFiles: options.sourceSession ? [] : options.contextFiles,
-					skills: options.sourceSession ? [] : options.skills,
-					promptTemplates: options.sourceSession ? [] : options.promptTemplates,
-					workspaceTree: options.sourceSession ? undefined : options.workspaceTree,
-					rules: options.sourceSession ? [] : options.rules,
-					extensionRoots: options.sourceSession ? undefined : options.extensionRoots,
+					contextFiles: options.contextFiles,
+					skills: options.skills,
+					promptTemplates: options.promptTemplates,
+					workspaceTree: options.workspaceTree,
+					rules: options.rules,
+					extensionRoots: options.extensionRoots,
 					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-					preloadedPreparedExtensions: options.sourceSession ? [] : options.preloadedPreparedExtensions,
+					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
 					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 					hasUI: false,
 					prewalk,
@@ -4384,8 +4386,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					// so nested lifecycle/progress/event frames reach its surfaces
 					// without leaking into another root session's traffic.
 					subagentEventBus: options.subagentEventBus,
-					parentHindsightSessionState: options.sourceSession ? undefined : options.parentHindsightSessionState,
-					parentMnemopiSessionState: options.sourceSession ? undefined : options.parentMnemopiSessionState,
+					parentHindsightSessionState: options.parentHindsightSessionState,
+					parentMnemopiSessionState: options.parentMnemopiSessionState,
 					parentTaskPrefix: id,
 					parentAgentId: options.parentAgentId,
 					agentId: id,
@@ -4397,10 +4399,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					enableMCP,
 					mcpManager,
 					// MCP proxies are minted per build as `mcpTools` in buildSubagentSessionOptions.
-					customTools: options.sourceSession ? undefined : options.customTools,
-					localProtocolOptions: options.sourceSession ? undefined : options.localProtocolOptions,
+					customTools: options.customTools,
+					localProtocolOptions: options.localProtocolOptions,
 					telemetry: subagentTelemetry,
 				},
+				seanceFork: options.sourceSession !== undefined,
 				prompt: {
 					id,
 					sourceSession: options.sourceSessionLabel,

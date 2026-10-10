@@ -196,7 +196,7 @@ Artifacts and side channels:
 
 ## Seance
 
-Use `agent: "seance"` with required `sourceSession`, `task`, and `solutionSpace`; set `model` only to override the source's saved model. A source with no restorable saved model requires an explicit selection.
+Use `agent: "seance"` with required `sourceSession`, `task`, and `solutionSpace`; set `model` only to override the source's saved model. A source with no restorable saved model requires an explicit selection. The task schema and historical-consult guidance expose `sourceSession`/`model` only when the bundled seance agent is enabled and permitted by the current spawn policy.
 
 The seance reads a fork and copied artifacts, leaving the source unchanged. It can discover and read copied nested transcripts through `history://`; it does not revive historical children. Existing IRC consults can ask follow-ups against the same read-only history.
 

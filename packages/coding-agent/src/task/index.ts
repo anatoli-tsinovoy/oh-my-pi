@@ -42,14 +42,9 @@ import { isIrcEnabled } from "../irc/messaging";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
-import {
-	type AgentDefinition,
-	canSpawnAtDepth,
-	getTaskSchema,
-	type TaskItem,
-	type TaskParams,
-	type TaskToolSchemaInstance,
-} from "./types";
+import { SEANCE_AGENT_NAME } from "./seance-policy";
+import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
+import type { TaskItem, TaskParams, TaskRenderOptions } from "@oh-my-pi/pi-tui/tools/task";
 import { type AgentProgress, type SingleResult, type TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
 import { AsyncJobError, type AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
@@ -132,7 +127,7 @@ export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
 export type { AgentDefinition, SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "./types";
 export type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-export type { TaskItem, TaskParams } from "./types";
+export type { TaskItem, TaskParams } from "@oh-my-pi/pi-tui/tools/task";
 export * from "./result-summary";
 export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -141,6 +136,19 @@ export {
 	taskSchema,
 } from "./types";
 
+function isSeanceSpawnable(
+	agents: readonly AgentDefinition[],
+	disabledAgents: readonly string[],
+	parentSpawns: string | boolean | null | undefined,
+): boolean {
+	const policy = resolveSpawnPolicy(parentSpawns);
+	return (
+		policy.enabled &&
+		(policy.allowedAgents === null || policy.allowedAgents.includes(SEANCE_AGENT_NAME)) &&
+		!disabledAgents.includes(SEANCE_AGENT_NAME) &&
+		agents.some(agent => agent.name === SEANCE_AGENT_NAME && agent.source === "bundled")
+	);
+}
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
 	sessionAgents: readonly AgentDefinition[];
@@ -188,6 +196,8 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		asyncEnabled: options.asyncEnabled,
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasModelMentions: options.sessionAgents.length > 0,
+		seanceAgentName: SEANCE_AGENT_NAME,
+		seanceEnabled: isSeanceSpawnable(options.agents, options.disabledAgents, options.parentSpawns),
 		ircEnabled: options.ircEnabled,
 	});
 }
@@ -219,7 +229,7 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 		params.tasks !== undefined &&
 		(params.sourceSession !== undefined || params.model !== undefined)
 	) {
-		return "Put `sourceSession` and `model` on the individual `seance` item inside `tasks[]`.";
+		return `Put \`sourceSession\` and \`model\` on the individual \`${SEANCE_AGENT_NAME}\` item inside \`tasks[]\`.`;
 	}
 	return undefined;
 }
@@ -241,15 +251,16 @@ function validateEffort(effort: TaskEffort | undefined, label: string): string |
 	return `${label} has an invalid \`effort\` value ${JSON.stringify(effort)}. Use "lo", "med", or "hi".`;
 }
 function validateSeanceFields(item: TaskItem, agent: string, label: string): string | undefined {
-	if (agent !== "seance") {
-		if (item.sourceSession !== undefined) return `\`sourceSession\` is only accepted for the \`seance\` agent.`;
-		if (item.model !== undefined) return `\`model\` is only accepted for the \`seance\` agent.`;
+	if (agent !== SEANCE_AGENT_NAME) {
+		if (item.sourceSession !== undefined)
+			return `\`sourceSession\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
+		if (item.model !== undefined) return `\`model\` is only accepted for the \`${SEANCE_AGENT_NAME}\` agent.`;
 		return undefined;
 	}
 	if (typeof item.sourceSession !== "string" || item.sourceSession.trim().length === 0) {
-		return `${label} selects the \`seance\` agent and requires a non-empty \`sourceSession\`.`;
+		return `${label} selects the \`${SEANCE_AGENT_NAME}\` agent and requires a non-empty \`sourceSession\`.`;
 	}
-	if (item.tools?.length) return `${label} cannot pass custom tools to the read-only \`seance\` agent.`;
+	if (item.tools?.length) return `${label} cannot pass custom tools to the read-only \`${SEANCE_AGENT_NAME}\` agent.`;
 	const model: unknown = item.model;
 	if (
 		model !== undefined &&
@@ -377,7 +388,7 @@ interface SpawnPlan {
  * by dispatch and the speculative launcher so both derive identical spawns.
  */
 function planSpawns(rawParams: unknown, batchEnabled: boolean, defaultAgent: string): SpawnPlan | string {
-	const params = repairTaskParams(rawParams as TaskParams) as TaskParams;
+	const params = repairTaskParams(rawParams as TaskParams);
 	const error = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled, defaultAgent);
 	if (error) return error;
 	const items = resolveSpawnItems(params);
@@ -711,16 +722,24 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && cfgTaskIsolationEnabled.get(this.session.settings);
+		const agents =
+			discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
+			this.#discoveredAgents;
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
 			effortEnabled: cfgTaskEnableEffort.get(this.session.settings),
 			evalToolsEnabled: evalToolsEnabled(this.session),
 			defaultAgent: this.#defaultAgent(),
+			seanceEnabled: isSeanceSpawnable(
+				agents,
+				cfgTaskDisabledAgents.get(this.session.settings),
+				this.session.getSessionSpawns(),
+			),
 		});
 	}
 
-	renderCall(args: unknown, options: Parameters<typeof renderTaskCall>[1], theme: Theme) {
+	renderCall(args: unknown, options: TaskRenderOptions, theme: Theme) {
 		return renderTaskCall(repairTaskParams(args as TaskParams), options, theme);
 	}
 
@@ -1688,7 +1707,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				// call returns. Without this, a temporary (in-memory session)
 				// artifacts directory is deleted immediately on completion and the
 				// advertised URL 404s by the time delivery happens.
-				retainArtifacts: detached || params.agent === "seance",
+				retainArtifacts: detached || params.agent === SEANCE_AGENT_NAME,
 				...(onArtifactsRetained ? { onArtifactsRetained } : {}),
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,

@@ -7,7 +7,7 @@ import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-function persistedChild(id: string, cwd: string): string {
+function persistedChild(id: string, cwd: string, agent = "task", restrictToolNames = false): string {
 	const timestamp = "2026-10-01T00:00:00.000Z";
 	return `${[
 		{
@@ -22,10 +22,11 @@ function persistedChild(id: string, cwd: string): string {
 			id: `${id}-init`,
 			parentId: null,
 			timestamp,
-			systemPrompt: ["unrestricted historical child"],
+			systemPrompt: ["historical child contract"],
 			task: "copied history only",
-			tools: ["read", "write", "task"],
-			agent: "task",
+			tools: restrictToolNames ? ["read", "grep", "glob", "yield"] : ["read", "write", "task"],
+			agent,
+			...(restrictToolNames ? { restrictToolNames: true } : undefined),
 			spawns: "*",
 		},
 		{
@@ -76,5 +77,32 @@ describe("persisted seance descendants", () => {
 		const peek = await SessionManager.peekSessionInit(forkFile);
 		expect(peek).toMatchObject({ seanceFork: true, init: null });
 		expect(registry.list()).toEqual([]);
+	});
+
+	it("does not infer persisted seance scope from a custom agent name", async () => {
+		using tempDir = TempDir.createSync("@omp-custom-seance-roster-");
+		const cwd = path.join(tempDir.path(), "project");
+		await fs.mkdir(cwd, { recursive: true });
+		const rootFile = path.join(tempDir.path(), "root", "root.jsonl");
+		const timestamp = "2026-10-01T00:00:00.000Z";
+		await Bun.write(
+			rootFile,
+			`${JSON.stringify({
+				type: "session",
+				version: CURRENT_SESSION_VERSION,
+				id: "ordinary-root",
+				timestamp,
+				cwd,
+			})}\n`,
+		);
+		const artifactsDir = rootFile.slice(0, -6);
+		await fs.mkdir(path.join(artifactsDir, "Seance"), { recursive: true });
+		await Bun.write(path.join(artifactsDir, "Seance.jsonl"), persistedChild("Seance", cwd, "seance", true));
+		await Bun.write(path.join(artifactsDir, "Seance", "Seance.Nested.jsonl"), persistedChild("Seance.Nested", cwd));
+
+		const registry = new AgentRegistry();
+		await registerPersistedSubagents(registry, rootFile);
+		expect(registry.get("Seance")?.sessionFile).toBe(path.join(artifactsDir, "Seance.jsonl"));
+		expect(registry.get("Seance.Nested")?.sessionFile).toBe(path.join(artifactsDir, "Seance", "Seance.Nested.jsonl"));
 	});
 });

@@ -14,10 +14,13 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { SEANCE_AGENT_NAME, seanceIsolationOptions } from "@oh-my-pi/pi-coding-agent/task/seance-policy";
+import subagentSystemPromptTemplate from "../../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
+import seanceAssignmentTemplate from "../../src/prompts/system/seance-assignment.md" with { type: "text" };
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, prompt, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 function sourceHeader(id: string, cwd: string) {
 	return {
@@ -246,7 +249,7 @@ describe("seance startup contracts", () => {
 		}
 	});
 
-	it("cold-revives only the restricted SDK tool set and ignores parent extensions", async () => {
+	it("cold-revives the full persisted runtime prompt and retains restricted tools", async () => {
 		using tempDir = TempDir.createSync("@omp-seance-cold-");
 		const cwd = path.join(tempDir.path(), "project");
 		await fs.mkdir(cwd, { recursive: true });
@@ -258,38 +261,101 @@ describe("seance startup contracts", () => {
 		});
 		const sessionFile = forked.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted fork");
-		forked.appendSessionInit({
-			systemPrompt: ["restricted seance startup"],
-			task: "read only historical task",
-			tools: ["read", "grep", "glob", "yield"],
-			agent: "seance",
-			resolvedModel: "anthropic/claude-sonnet-4-5",
-			restrictToolNames: true,
-			spawns: "",
-		});
-		await forked.close();
-
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorage.keys.setRuntime("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage);
 		const previousAgentDir = getAgentDir();
 		setAgentDir(path.join(tempDir.path(), "agent"));
-		let extensionLoaded = false;
-		const extension = hostilePreparedExtension(() => {
-			extensionLoaded = true;
-		});
-		const registry = AgentRegistry.global();
-		const ref = registry.register({
-			id: "SeanceCold",
-			displayName: "seance",
-			kind: "sub",
-			parentId: "Main",
-			status: "parked",
-			session: null,
-			sessionFile,
-		});
+		let liveSession: AgentSession | undefined;
 		let revived: AgentSession | undefined;
+		let forkManagerClosed = false;
 		try {
+			const seanceAgent = getBundledAgent(SEANCE_AGENT_NAME);
+			if (!seanceAgent) throw new Error("Expected the bundled seance agent");
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected anthropic/claude-sonnet-4-5");
+			const resolvedModel = `${model.provider}/${model.id}`;
+			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+				agent: seanceAgent.systemPrompt,
+				context: "",
+				planReference: "",
+				planReferencePath: "",
+				worktree: "",
+				outputSchema: undefined,
+				outputSchemaOverridesAgent: false,
+				workPoolYieldItems: [],
+				ircPeers: [],
+				ircParkedCount: 0,
+				ircOmittedCount: 0,
+				ircSelfId: "",
+			});
+			const assignmentPrompt = prompt.render(seanceAssignmentTemplate, {
+				sourceSession: "source-session",
+				model: resolvedModel,
+			});
+			let defaultPromptBlocks: string[] = [];
+			const live = await createAgentSession({
+				cwd,
+				agentDir: path.join(tempDir.path(), "agent"),
+				authStorage,
+				modelRegistry,
+				model,
+				settings: Settings.isolated(),
+				sessionManager: forked,
+				agentId: "SeanceCold",
+				agentDisplayName: SEANCE_AGENT_NAME,
+				agentName: SEANCE_AGENT_NAME,
+				taskDepth: 1,
+				toolNames: ["read", "grep", "glob"],
+				requireYieldTool: true,
+				restrictToolNames: true,
+				spawns: "",
+				enableLsp: false,
+				enableIrc: false,
+				enableMCP: false,
+				...seanceIsolationOptions(),
+				systemPrompt: defaultPrompt => {
+					defaultPromptBlocks = [...defaultPrompt];
+					return [...defaultPrompt, subagentPrompt, assignmentPrompt];
+				},
+			});
+			liveSession = live.session;
+			const persistedTools = liveSession.getEnabledToolNames().filter(name => name !== "write");
+			liveSession.sessionManager.appendSessionInit({
+				systemPrompt: liveSession.agent.state.systemPrompt,
+				task: "Read the source transcript.",
+				tools: persistedTools,
+				agent: SEANCE_AGENT_NAME,
+				resolvedModel,
+				restrictToolNames: true,
+				spawns: "",
+			});
+			await liveSession.sessionManager.ensureOnDisk();
+			const warmPrompt = [...liveSession.systemPrompt];
+			const warmToolNames = liveSession.getActiveToolNames().toSorted();
+			const persisted = await SessionManager.peekSessionInit(sessionFile);
+			if (!persisted?.init) throw new Error("Expected the fresh seance runtime contract to be persisted");
+			expect(warmPrompt).toEqual([...defaultPromptBlocks, subagentPrompt, assignmentPrompt]);
+			expect(persisted.init.systemPrompt).toEqual(warmPrompt);
+			expect(persisted.init.tools.toSorted()).toEqual(warmToolNames);
+			expect(persisted.init.systemPrompt.join("\n")).not.toContain("source-only startup contract");
+			await liveSession.dispose();
+			liveSession = undefined;
+			forkManagerClosed = true;
+
+			let extensionLoaded = false;
+			const extension = hostilePreparedExtension(() => {
+				extensionLoaded = true;
+			});
+			const ref = AgentRegistry.global().register({
+				id: "SeanceCold",
+				displayName: SEANCE_AGENT_NAME,
+				kind: "sub",
+				parentId: "Main",
+				status: "parked",
+				session: null,
+				sessionFile,
+			});
 			const createReviver = createPersistedSubagentReviverFactory({
 				session: revivalParent(cwd, [extension]),
 				authStorage,
@@ -301,14 +367,21 @@ describe("seance startup contracts", () => {
 			if (!revive) throw new Error("Expected a cold seance reviver");
 			revived = await revive(ref);
 
-			expect(revived.getActiveToolNames().toSorted()).toEqual(["glob", "grep", "read", "yield"]);
+			expect(revived.systemPrompt).toEqual(warmPrompt);
+			expect(warmToolNames).toEqual(["glob", "grep", "read", "yield"]);
+			expect(revived.getActiveToolNames().toSorted()).toEqual(warmToolNames);
 			expect(extensionLoaded).toBe(false);
 		} finally {
 			try {
 				await revived?.dispose();
 			} finally {
-				authStorage.close();
-				setAgentDir(previousAgentDir);
+				try {
+					if (liveSession) await liveSession.dispose();
+					else if (!forkManagerClosed) await forked.close();
+				} finally {
+					authStorage.close();
+					setAgentDir(previousAgentDir);
+				}
 			}
 		}
 	});

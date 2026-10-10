@@ -2,10 +2,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { sessionFilesFromDisk } from "../internal-urls/registry-helpers";
 import { buildSessionContext, getRestorableSessionModels } from "../session/session-context";
-import type { SessionEntry } from "../session/session-entries";
+import { type SessionEntry } from "../session/session-entries";
 import { FileSessionStorage, type SessionStorage } from "../session/session-storage";
 import { SessionManager } from "../session/session-manager";
-import { loadSessionFile } from "../session/session-loader";
+import { loadSessionFile, visitEntriesFromFileStream } from "../session/session-loader";
 
 export interface ResolvedSeanceSource {
 	file: string;
@@ -115,8 +115,25 @@ export async function resolveSeanceSource(
 	throw new Error(`Session "${label}" was not found.`);
 }
 
-/** True only for a persisted seance root, never for a copied historical child transcript. */
+/** Read only the first session record; the shared stream parser skips title-slot preambles. */
+async function hasSeanceForkHeader(file: string): Promise<boolean> {
+	let seanceFork = false;
+	try {
+		await visitEntriesFromFileStream(
+			file,
+			entry => {
+				seanceFork = entry.type === "session" && entry.seanceFork === true;
+				return false;
+			},
+			{ maxRecords: 1 },
+		);
+	} catch {
+		return false;
+	}
+	return seanceFork;
+}
+
+/** True only for a persisted seance fork, never by agent display or init name. */
 export async function isSeanceSessionFile(file: string): Promise<boolean> {
-	const peek = await SessionManager.peekSessionInit(file);
-	return peek?.seanceFork === true || (peek?.init?.agent === "seance" && peek.init.restrictToolNames === true);
+	return hasSeanceForkHeader(file);
 }

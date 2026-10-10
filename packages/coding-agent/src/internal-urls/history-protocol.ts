@@ -336,7 +336,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	 */
 	async #roster(context: ResolveContext | undefined): Promise<Omit<RefLookup, "ref">> {
 		const registry = AgentRegistry.global();
-		if (context?.session?.agentName === "seance" && context.session.restrictToolNames === true) {
+		if (context?.session?.historyScope === "fork") {
 			return {
 				visible: [],
 				preferredArtifactDir: context.sessionFile?.slice(0, -".jsonl".length),
@@ -535,7 +535,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
-		const forkOnly = context?.session?.agentName === "seance" && context.session.restrictToolNames === true;
+		const forkOnly = context?.session?.historyScope === "fork";
 		const preferredArtifactDir = context?.sessionFile?.slice(0, -".jsonl".length);
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();

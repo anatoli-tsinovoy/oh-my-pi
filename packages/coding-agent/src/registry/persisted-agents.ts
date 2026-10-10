@@ -547,7 +547,6 @@ export async function ensurePersistedRoster(
 		return undefined;
 	}
 	if (!root) return undefined;
-	if (await isSeanceSessionFile(root)) return root;
 
 	const taggedRegistry = registry as RegistryWithPersistedRosterLatches;
 	let latches = taggedRegistry[kPersistedRosterLatches];
@@ -581,6 +580,7 @@ export async function ensurePersistedRoster(
 			return root;
 		}
 	}
+	if (await isSeanceSessionFile(root)) return root;
 	// Forget settled latches oldest-first once the bound is reached, so a
 	// process that visits many roots doesn't accumulate one entry per root.
 	// In-flight scans are never evicted: their latch is the single-flight guard.

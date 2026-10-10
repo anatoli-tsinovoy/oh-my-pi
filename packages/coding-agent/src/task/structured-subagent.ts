@@ -54,6 +54,7 @@ import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import { resolveSeanceSource, type ResolvedSeanceSource } from "./seance";
+import { SEANCE_AGENT_NAME } from "./seance-policy";
 import { type AgentDefinition, canSpawnAtDepth } from "./types";
 import type {
 	AgentProgress,
@@ -368,7 +369,7 @@ export async function resolveEffectiveSubagentPolicy(
 			`Agent "${agentName}" is disabled in settings. Enable it via /agents, or use a different agent type.${enabled.length > 0 ? ` Available: ${enabled.join(", ")}` : ""}`,
 		);
 	}
-	const isSeance = agentName === "seance";
+	const isSeance = agentName === SEANCE_AGENT_NAME;
 	if (request.sourceSession !== undefined && !isSeance) {
 		throw new StructuredSubagentError("preflight", "`sourceSession` is only supported by the `seance` agent.");
 	}
@@ -612,15 +613,32 @@ function buildExecutorOptions(
 ): ExecutorOptions {
 	const { session } = request;
 	const seance = policy.sourceSession !== undefined;
-	const { skills, autoloadSkills } = seance
-		? { skills: [], autoloadSkills: [] }
-		: resolveAutoloadSkills(session, policy.agent);
-	const localProtocolOptions = seance ? undefined : sessionLocalProtocolOptions(session);
+	const inheritedSkills = seance ? undefined : resolveAutoloadSkills(session, policy.agent);
 	const restrictToolNames = seance || policy.planMode || session.restrictToolNames === true;
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const inheritedOptions = seance
+		? undefined
+		: {
+				additionalDirectories: session.additionalDirectories,
+				inheritedSessionAgents: session.getSessionAgents?.(),
+				customTools: request.customTools,
+				contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
+				skills: inheritedSkills?.skills,
+				autoloadSkills: inheritedSkills?.autoloadSkills,
+				workspaceTree: session.workspaceTree,
+				promptTemplates: session.promptTemplates,
+				rules: session.rules,
+				extensionRoots: session.effectiveExtensionRoots?.bind(session),
+				preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
+				preloadedPreparedExtensions: session.preparedExtensions,
+				preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
+				localProtocolOptions: sessionLocalProtocolOptions(session),
+				parentArtifactManager: session.getArtifactManager?.() ?? undefined,
+				parentHindsightSessionState: session.getHindsightSessionState?.(),
+				parentMnemopiSessionState: session.getMnemopiSessionState?.(),
+			};
 	return {
 		cwd: session.cwd,
-		additionalDirectories: seance ? undefined : session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
 		agent: policy.effectiveAgent,
@@ -673,30 +691,10 @@ function buildExecutorOptions(
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
-		inheritedSessionAgents: seance ? undefined : session.getSessionAgents?.(),
+		...inheritedOptions,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
-		customTools: seance ? undefined : request.customTools,
 		workPoolYieldItems: request.workPoolYieldItems,
-		contextFiles: seance
-			? []
-			: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
-		skills,
-		autoloadSkills,
-		workspaceTree: seance ? undefined : session.workspaceTree,
-		promptTemplates: seance ? [] : session.promptTemplates,
-		rules: seance ? [] : session.rules,
-		// Root policy and module paths have separate jobs: the live policy drives
-		// recursive sub-discovery; preloaded paths only avoid re-scanning/reusing
-		// parent-bound extension instances while constructing the child.
-		extensionRoots: seance ? undefined : session.effectiveExtensionRoots?.bind(session),
-		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedPreparedExtensions: seance ? [] : session.preparedExtensions,
-		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
-		localProtocolOptions,
-		parentArtifactManager: seance ? undefined : (session.getArtifactManager?.() ?? undefined),
-		parentHindsightSessionState: seance ? undefined : session.getHindsightSessionState?.(),
-		parentMnemopiSessionState: seance ? undefined : session.getMnemopiSessionState?.(),
 		onRelease:
 			seance && lease.temporary
 				? async () => {

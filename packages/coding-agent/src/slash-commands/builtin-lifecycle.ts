@@ -2,6 +2,7 @@ import { clearSubmittedText } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
+import type { TextContent } from "@oh-my-pi/pi-ai";
 import { logger, setProjectDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { sanitizeErrorLine } from "@oh-my-pi/pi-tui/chrome/error-block";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
@@ -177,34 +178,26 @@ async function launchSeance(ctx: InteractiveModeContext, sourceSession: string, 
 	const taskIds = new Set<string>();
 	let jobId: string | undefined;
 	let selectedModel: string | undefined;
+	const collect = (details: TaskToolDetails | undefined): void => {
+		if (!details) return;
+		for (const progress of details.progress ?? []) {
+			taskIds.add(progress.id);
+			selectedModel ??= progress.resolvedModel;
+		}
+		for (const item of details.results ?? []) {
+			taskIds.add(item.id);
+			selectedModel ??= item.resolvedModel;
+		}
+		jobId = details.async?.jobId ?? jobId;
+	};
 	try {
 		const result = await taskTool.execute(`seance-${Snowflake.next()}`, params, undefined, update => {
-			const details = update.details as TaskToolDetails | undefined;
-			if (!details) return;
-			for (const progress of details.progress ?? []) {
-				taskIds.add(progress.id);
-				selectedModel ??= progress.resolvedModel;
-			}
-			for (const item of details.results ?? []) {
-				taskIds.add(item.id);
-				selectedModel ??= item.resolvedModel;
-			}
-			jobId = details.async?.jobId ?? jobId;
+			collect(update.details as TaskToolDetails | undefined);
 		});
 		const details = result.details as TaskToolDetails | undefined;
-		if (details) {
-			for (const progress of details.progress ?? []) {
-				taskIds.add(progress.id);
-				selectedModel ??= progress.resolvedModel;
-			}
-			for (const item of details.results ?? []) {
-				taskIds.add(item.id);
-				selectedModel ??= item.resolvedModel;
-			}
-			jobId = details.async?.jobId ?? jobId;
-		}
+		collect(details);
 		const content = result.content
-			.filter((part): part is Extract<(typeof result.content)[number], { type: "text" }> => part.type === "text")
+			.filter((part): part is TextContent => part.type === "text")
 			.map(part => part.text)
 			.join("\n")
 			.trim();

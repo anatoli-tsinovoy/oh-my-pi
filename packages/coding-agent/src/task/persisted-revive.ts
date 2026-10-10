@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
@@ -17,7 +17,6 @@ import { installRetryFallbackRole } from "../session/retry-fallback-chains";
 import type { AuthStorage } from "../session/auth-storage";
 import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
-import seanceAssignmentTemplate from "../prompts/system/seance-assignment.md" with { type: "text" };
 import {
 	attachIrcWakeTurnMonitor,
 	compactionThresholdSettings,
@@ -28,6 +27,7 @@ import {
 } from "./executor";
 import { getBundledAgent } from "./agents";
 import { cfgTaskAgentAccountPools } from "./settings";
+import { SEANCE_AGENT_NAME, seanceIsolationOptions } from "./seance-policy";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -81,10 +81,14 @@ export function createPersistedSubagentReviverFactory(
 		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
 		// (history://) rather than resurrect a wrong or broken session.
 		if (!peek?.init) return undefined;
-		const isSeance = peek.seanceFork || peek.init.agent === "seance";
-		const seanceAgent = isSeance ? getBundledAgent("seance") : undefined;
+		const isSeance = peek.seanceFork;
+		const seanceAgent = isSeance ? getBundledAgent(SEANCE_AGENT_NAME) : undefined;
 		if (isSeance) {
-			if (peek.init.agent !== "seance" || peek.init.restrictToolNames !== true || !peek.init.resolvedModel) {
+			if (
+				peek.init.agent !== SEANCE_AGENT_NAME ||
+				peek.init.restrictToolNames !== true ||
+				!peek.init.resolvedModel
+			) {
 				return undefined;
 			}
 			await ctx.modelRegistry.awaitBackgroundRefresh().catch(() => {});
@@ -191,16 +195,6 @@ export function createPersistedSubagentReviverFactory(
 			// Subscribe before minting proxies so a manager change during startup is replayed on bind.
 			const mcpFollower = mcpManager ? followMCPTools(mcpManager) : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
-			const seanceSystemPrompt =
-				isSeance && seanceAgent
-					? [
-							seanceAgent.systemPrompt,
-							prompt.render(seanceAssignmentTemplate, {
-								sourceSession: reopened.getHeader()?.parentSession ?? "unknown",
-								model: init.resolvedModel ?? "unknown",
-							}),
-						]
-					: init.systemPrompt;
 			let session: AgentSession;
 			try {
 				({ session } = await createAgentSession({
@@ -244,19 +238,11 @@ export function createPersistedSubagentReviverFactory(
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: restrictToolNames || undefined,
 					requireYieldTool: true,
-					systemPrompt: () => [...seanceSystemPrompt],
-					// Seance authority comes only from its bundled definition, never project content.
-					extensionRoots: isSeance ? undefined : () => ctx.session.effectiveExtensionRoots,
-					preloadedPreparedExtensions: isSeance ? [] : ctx.session.preparedExtensions,
-					...(isSeance
-						? {
-								disableExtensionDiscovery: true,
-								contextFiles: [],
-								skills: [],
-								rules: [],
-								promptTemplates: [],
-							}
-						: undefined),
+					systemPrompt: () => [...init.systemPrompt],
+					// Ordinary revived agents inherit the current owner's extension policy.
+					extensionRoots: () => ctx.session.effectiveExtensionRoots,
+					preloadedPreparedExtensions: ctx.session.preparedExtensions,
+					...(isSeance ? seanceIsolationOptions() : undefined),
 					// Old files predate persisted spawns: deny re-spawning rather than let
 					// createAgentSession default to wildcard ("*").
 					spawns: isSeance ? "" : (init.spawns ?? ""),

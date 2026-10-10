@@ -726,8 +726,7 @@ describe("history:// protocol", () => {
 				});
 
 				const session = makeToolSession(cwd, forkFile, {
-					agentName: "seance",
-					restrictToolNames: true,
+					historyScope: "fork",
 				});
 				const context = { session, sessionFile: forkFile };
 				const child = await InternalUrlRouter.instance().resolve(`history://${childId}`, context);
@@ -761,6 +760,34 @@ describe("history:// protocol", () => {
 			} finally {
 				await forked.close();
 			}
+		});
+	});
+
+	it("does not infer fork-only history scope from a custom agent name", async () => {
+		await withTempDir(async dir => {
+			const cwd = path.join(dir, "project");
+			await fs.mkdir(cwd, { recursive: true });
+			const rootFile = path.join(dir, "ordinary-root.jsonl");
+			await Bun.write(rootFile, sessionFixtureJsonl("ordinary root history", "ordinary-root"));
+			AgentRegistry.global().register({
+				id: "ForeignOnly",
+				displayName: "foreign",
+				kind: "sub",
+				session: fakeLiveSession([{ role: "user", content: "outside the fork", timestamp: 1 }]),
+				status: "running",
+			});
+
+			const session = Object.assign(makeToolSession(cwd, rootFile), {
+				agentName: "seance",
+				restrictToolNames: true,
+			});
+			const context = { session, sessionFile: rootFile };
+			const index = await InternalUrlRouter.instance().resolve("history://", context);
+			expect(index.content).toContain("| ForeignOnly | running");
+			const transcript = await InternalUrlRouter.instance().resolve("history://ForeignOnly", context);
+			expect(transcript.content).toContain("outside the fork");
+			const completions = await new HistoryProtocolHandler().complete(undefined, context);
+			expect(completions.map(completion => completion.value)).toContain("ForeignOnly");
 		});
 	});
 

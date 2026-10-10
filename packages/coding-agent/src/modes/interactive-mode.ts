@@ -328,6 +328,7 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	SessionPickHandler,
 	ShowStatusOptions,
 	SelectOnlyModelSelectorOptions,
 	SubmittedUserInput,
@@ -7978,10 +7979,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showThinkingSelector();
 	}
 
-	showSessionSelector(
-		source?: ForeignSessionSource,
-		onSelect?: Parameters<InteractiveModeContext["showSessionSelector"]>[1],
-	): void {
+	showSessionSelector(source?: ForeignSessionSource, onSelect?: SessionPickHandler): void {
 		void this.#selectorController.showSessionSelector(source, onSelect);
 	}
 
