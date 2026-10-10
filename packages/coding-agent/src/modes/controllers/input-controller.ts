@@ -980,6 +980,7 @@ export class InputController {
 			if (text === "." || (text === "c" && !this.ctx.isGuidedGoalInterviewActive())) {
 				if (
 					!this.ctx.session.isStreaming &&
+					!this.ctx.session.isRetrying &&
 					!this.ctx.session.isCompacting &&
 					this.ctx.session.hasFailedAssistantTurn &&
 					!this.ctx.collabGuest

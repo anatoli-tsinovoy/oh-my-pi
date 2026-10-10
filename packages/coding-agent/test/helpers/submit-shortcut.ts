@@ -9,6 +9,10 @@ export async function submitShortcut(
 	session: AgentSession,
 	sessionManager: SessionManager,
 	shortcut: "." | "c",
+	options?: {
+		onInput?: (input: SubmittedUserInput) => void;
+		onSubmitComplete?: () => void;
+	},
 ): Promise<void> {
 	const editor = new CustomEditor(getEditorTheme());
 	let continuation: Promise<unknown> | undefined;
@@ -24,6 +28,7 @@ export async function submitShortcut(
 				synthetic: input.synthetic,
 				userInitiated: input.userInitiated,
 			});
+			options?.onInput?.(input);
 		},
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
@@ -38,6 +43,7 @@ export async function submitShortcut(
 	editor.setText(shortcut);
 	editor.handleInput("\r");
 	if (submission) await submission;
+	options?.onSubmitComplete?.();
 	if (continuation) await continuation;
 	await session.waitForIdle();
 }

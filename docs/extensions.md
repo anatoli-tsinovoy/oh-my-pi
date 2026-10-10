@@ -475,7 +475,7 @@ handler through `sendUserMessage` or `sendMessage` is not discarded.
 This is an ingress event, not a user-role message event. Queue delivery and replay
 do not emit it again. Programmatic `sendUserMessage`/`sendMessage` calls and
 synthetic continuations do not automatically emit `input`.
-After a failed provider turn, an idle, non-compacting main session's Enter `.`/`c` shortcuts retry it as F5 does; otherwise they retain their synthetic continuation path. Both paths bypass main-session input hooks.
+After a failed provider turn, main-session Enter's `.`/`c` shortcuts retry it as F5 does only when the session is not streaming, compacting, or retrying; otherwise they retain their synthetic continuation path. Both paths bypass main-session input hooks.
 Focused-subagent input retains its chat-only routing and does not invoke main-session input hooks.
 Print and ACP input are outside this interception contract.
 
