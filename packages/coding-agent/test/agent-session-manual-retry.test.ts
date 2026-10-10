@@ -7,6 +7,7 @@ import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mo
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { CustomTool } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -201,6 +202,52 @@ describe("AgentSession manual retry", () => {
 			expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: scenario.output });
 		});
 	}
+
+	it("continues after cancelling a SessionTools custom tool without replaying it", async () => {
+		const toolName = "mcp__probe_cancel";
+		let executions = 0;
+		const { session, sessionManager } = await createManualRetrySession([
+			{
+				content: [{ type: "toolCall", id: "cancelled-tool", name: toolName, arguments: {} }],
+				stopReason: "toolUse",
+			},
+			{ content: ["Cancellation settled"], stopReason: "stop" },
+			{ content: ["continued after cancelled custom tool"], stopReason: "stop" },
+		]);
+		const customTool: CustomTool = {
+			name: toolName,
+			label: "probe/cancel",
+			description: "Cancel this operation",
+			parameters: type({}),
+			mcpServerName: "probe",
+			mcpToolName: "cancel",
+			async execute(_toolCallId, _params, _onUpdate, context) {
+				executions++;
+				context.abort();
+				return { content: [{ type: "text", text: "Cancellation requested" }], details: {} };
+			},
+		};
+		await session.refreshMCPTools([customTool]);
+
+		await session.prompt("Start the cancellable operation");
+		await session.waitForIdle();
+		expect(lastAgentMessage(session).stopReason).toBe("aborted");
+		expect(session.hasFailedAssistantTurn).toBe(false);
+		expect(executions).toBe(1);
+
+		await submitShortcut(session, sessionManager, "c");
+
+		expect(executions).toBe(1);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "continued after cancelled custom tool",
+		});
+		expect(session.agent.state.messages.find(message => message.role === "developer")).toMatchObject({
+			synthetic: true,
+			userInitiated: true,
+		});
+	});
 
 	it("continues instead of retrying during automatic retry backoff", async () => {
 		const retryableFailure = "503 service unavailable: overloaded_error retry-after-ms=60000";
