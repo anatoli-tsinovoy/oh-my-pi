@@ -26,7 +26,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
-import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -451,21 +451,29 @@ function resetUsageCost(usage: Usage | undefined): void {
 
 /** Clear child billing kept in task results without discarding their token counts. */
 function resetTaskResultBilling(details: unknown): void {
-	if (details === null || typeof details !== "object") return;
-	const results = Reflect.get(details, "results");
-	if (Array.isArray(results)) {
-		for (const result of results) {
-			resetUsageCost(taskUsageFrom(result));
-		}
+	if (!isTaskToolDetails(details)) return;
+	resetUsageCost(taskUsageFrom(details));
+	for (const result of details.results) {
+		if (result === null || typeof result !== "object") continue;
+		resetUsageCost(taskUsageFrom(result));
+		resetNestedTaskBilling(result.extractedToolData);
 	}
-	const progress = Reflect.get(details, "progress");
+	const progress = details.progress;
 	if (Array.isArray(progress)) {
 		for (const item of progress) {
-			if (item !== null && typeof item === "object" && typeof Reflect.get(item, "cost") === "number") {
-				Reflect.set(item, "cost", 0);
-			}
+			if (item === null || typeof item !== "object") continue;
+			if (typeof item.cost === "number") item.cost = 0;
+			resetTaskResultBilling(item.inflightTaskDetails);
+			resetNestedTaskBilling(item.extractedToolData);
 		}
 	}
+}
+
+/** Recurse only through task snapshots extracted from the task subprocess tool. */
+function resetNestedTaskBilling(extractedToolData: Record<string, unknown[]> | undefined): void {
+	const tasks = extractedToolData?.task;
+	if (!Array.isArray(tasks)) return;
+	for (const task of tasks) resetTaskResultBilling(task);
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
