@@ -417,6 +417,14 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir, forkOnly);
 			if (disk) return { ...disk, url: url.href };
 
+			if (forkOnly) {
+				throw new Error(
+					`Unknown copied child-agent transcript: ${agentId}\n` +
+						"This fork's `history://` lookup is limited to copied child-agent transcripts; " +
+						"the source conversation is already inherited.\n" +
+						"List copied transcripts with `history://`.",
+				);
+			}
 			const known = visible.map(candidate => candidate.id);
 			const knownStr = known.length > 0 ? known.join(", ") : "none";
 			throw new Error(`Unknown agent: ${agentId}\nKnown agents: ${knownStr}\nList all with history://`);
@@ -511,7 +519,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 		const lines: string[] = ["# Agents", ""];
 		if (entries.length === 0) {
-			lines.push("No agents registered.");
+			lines.push(
+				forkOnly
+					? "No copied child-agent transcripts.\nThe source conversation is already inherited; `history://` lists only copied child-agent transcripts."
+					: "No agents registered.",
+			);
 			return `${lines.join("\n")}\n`;
 		}
 		lines.push("| id | status | kind | parent | last activity |", "|---|---|---|---|---|");

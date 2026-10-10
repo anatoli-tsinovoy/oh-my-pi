@@ -347,7 +347,7 @@ Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explici
 
 The source's saved model is used when restorable; `--model selector` overrides it. If the saved model is absent or unavailable, supply an explicit selection.
 
-Seance reads the copied history with `read`, `grep`, and `glob`. Copied child and grandchild transcripts can be discovered and read through `history://`, but historical children are not revived as unrestricted agents. Existing IRC consults can ask follow-ups against this read-only history.
+Consult the inherited source conversation first; it is already in the fork. Use `history://` only to discover/read copied child and grandchild transcripts; NEVER use the source session UUID as an agent ID. An empty listing means no nested histories, not missing source context. Archive is unnecessary, and Eval remains unavailable. Historical children are not revived as unrestricted agents. Existing IRC consults can ask follow-ups against this read-only history.
 
 Inherited aggregate source charges are excluded; new consultation turns use existing task/Agent Hub usage tracking.
 

@@ -494,7 +494,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	},
 	{
 		name: "seance",
-		icon: "history",
+		icon: "ghost",
 		description: "Consult a saved session without resuming it",
 		inlineHint: "[session id|path] [--model selector]",
 		allowArgs: true,
