@@ -86,6 +86,7 @@ interface TransformersRuntime {
 			device: TinyModelDevice;
 			dtype: TinyModelDtype;
 			progress_callback: (info: ProgressInfo) => void;
+			session_options?: { graphOptimizationLevel: "disabled" };
 		},
 	) => Promise<AutomaticSpeechRecognitionPipeline>;
 }
@@ -178,6 +179,7 @@ async function loadPipelineOnDevice(
 		device,
 		dtype: sttModelDtypeOverride ?? spec.dtype,
 		progress_callback: info => sendProgress(transport, requestId, modelKey, info),
+		session_options: process.platform === "android" ? { graphOptimizationLevel: "disabled" } : undefined,
 	});
 }
 
@@ -190,7 +192,7 @@ async function loadPipelineWithDeviceFallback(
 ): Promise<{ pipeline: AutomaticSpeechRecognitionPipeline; device: TinyModelDevice }> {
 	const devices = tinyModelDeviceLoadOrder(sttModelDevicePreference);
 	if (devices[0] !== sttModelDevicePreference.device) {
-		sendLog(transport, "warn", "stt: requested device is unsafe in the worker; using CPU", {
+		sendLog(transport, "warn", "stt: requested device is unavailable in this worker; using compatible backend", {
 			modelKey,
 			repo: spec.repo,
 			requestedDevice: sttModelDevicePreference.device,
