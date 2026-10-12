@@ -4,18 +4,17 @@
 
 ### Added
 
-- Added optional Linux-host `bun run build:android` for a relocatable Termux Android ARM64 bundle in `dist/android`; the generic `bun run build` remains the ordinary host/cross binary builder.
+- Added optional Linux-host `bun run build:android` for a standalone Termux Android ARM64 executable at `dist/omp-android-arm64`.
 
 ### Changed
 
+- Termux installation and binary updates now select Android ARM64 executables without requiring an external Bun installation.
 - Android desktop-session requests now fail explicitly with `Unsupported: desktop sessions are not supported on this platform.`
 - Android clipboard routing no longer calls the native clipboard bridge: Termux uses its bounded clipboard helpers, while other Android environments retain OSC 52 copy and return empty/no-image reads.
 
 ### Fixed
 
 - Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
-- Android/Termux builds now produce a relocatable bundled launcher with its generated CLI and native assets, so copied artifacts run without the original repository layout.
-- Fixed legacy extensions resolving bundled resources against the current project instead of the relocated Android bundle.
 
 ## [18.10.1] - 2026-10-12
 
