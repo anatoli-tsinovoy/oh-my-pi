@@ -22,7 +22,7 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Autofix: lint + format prompts | `bun run fix` |
 | Build the `dist/omp` binary | `bun run build` |
 
-## Optional Android ARM64 bundle
+## Optional Android ARM64 standalone binary
 
 From a Linux build host, run:
 
@@ -30,7 +30,23 @@ From a Linux build host, run:
 bun --cwd=packages/coding-agent run build:android
 ```
 
-Set `ANDROID_NDK_HOME` to an installed Android NDK. This optional Linux cross-build uses the canonical Bazel `android-arm64` native driver and the existing Android bundle generator, writing the complete relocatable bundle to `packages/coding-agent/dist/android`. It does not produce a Bun-compiled executable or provide a Termux-host build path.
+Set `ANDROID_NDK_HOME` to Android NDK 25b or newer and use released Bun 1.4.3
+on the Linux build host; that compiler version was verified to have the matching
+Android runtime asset. The optional Linux cross-build builds the `android-arm64`
+native addon with Bazel, then compiles the CLI for Bun's
+`bun-linux-arm64-android` target. It writes the raw standalone executable to
+`packages/coding-agent/dist/omp-android-arm64`; the Bun runtime is included, so
+Termux does not need a separate Bun installation. The bundled Bun 1.4.3 runtime
+targets Android 9 (API 28), while the native addon targets API 24.
+
+To install a published binary from Termux, use:
+
+```sh
+curl -fsSL https://omp.sh/install | sh -s -- --binary
+```
+
+Cross-compilation does not verify Android/Termux or seccomp compatibility;
+validate the executable on a native non-root Termux device before publishing.
 
 Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them

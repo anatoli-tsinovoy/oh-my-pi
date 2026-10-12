@@ -1,10 +1,8 @@
 #!/usr/bin/env bun
 
 import * as fs from "node:fs/promises";
-import { createRequire } from "node:module";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
-import { embeddedAddonFiles } from "../../natives/scripts/embed-native";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
@@ -15,34 +13,10 @@ const defaultOutDir = configuredOutDir ? path.resolve(configuredOutDir) : path.j
 const shebang = "#!/usr/bin/env bun\n";
 const htmlExportAssetPattern =
 	/^(?:template-[^.]+\.(?:css|html|js)|tool-views\.generated-[^.]+\.js|(?:marked|highlight)\.min-[^.]+\.js)$/;
-const androidBundle = Bun.env.OMP_ANDROID_BUNDLE === "1";
 
-// Transformers.js remains an on-demand worker dependency, but a relocated
-// Android bundle cannot resolve the workspace's `catalog:` manifest. Bake the
-// installed concrete version into the worker's runtime-install path just as
-// compiled binaries do.
-const transformersVersion = androidBundle
-	? (() => {
-			const manifest: unknown = createRequire(import.meta.url)("@huggingface/transformers/package.json");
-			if (
-				typeof manifest !== "object" ||
-				manifest === null ||
-				!("version" in manifest) ||
-				typeof manifest.version !== "string"
-			) {
-				throw new Error("@huggingface/transformers package manifest has no string version");
-			}
-			return manifest.version;
-		})()
-	: undefined;
-
-// Native / optional / platform-specific deps are loaded from installed files
-// in desktop npm bundles. Android bundles embed the native addon archive and
-// the ordinary runtime dependencies so the artifact directory is relocatable;
-// heavyweight model runtimes stay on the worker's on-demand install path.
-const ALWAYS_EXTERNAL = androidBundle
-	? ["@huggingface/transformers", "fastembed", "onnxruntime-node"]
-	: ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+// Native and optional dependencies load from installed files in desktop npm bundles.
+const ALWAYS_EXTERNAL = ["@oh-my-pi/pi-natives", "@huggingface/transformers", "fastembed", "onnxruntime-node"];
+const RUNTIME_EXTERNAL = ["puppeteer-core", "@babel/parser"];
 
 // Heavy, lazily-used third-party leaf deps. Each is a declared `dependency`, so the
 // published package resolves it from node_modules at runtime; bundling only embeds a
@@ -51,7 +25,6 @@ const ALWAYS_EXTERNAL = androidBundle
 // import would load the unpatched npm package in users' installs (currently
 // @ark/schema is patched, so it — and arktype, which pulls @ark/schema — stay
 // bundled).
-const RUNTIME_EXTERNAL = androidBundle ? [] : ["puppeteer-core", "@babel/parser"];
 
 async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {
@@ -118,9 +91,6 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	// still resolve omp:// docs (see src/internal-urls/docs-index.ts).
 	try {
 		const docsPayload = await buildDocsIndexPayload();
-		const embeddedFiles = androidBundle
-			? await embeddedAddonFiles({ platform: "android", arch: "arm64" })
-			: {};
 		// Build in-process: the docs embed payload is far larger than Linux's
 		// 128KiB per-argv-string cap, so it can never be passed as a CLI
 		// `--define` (posix_spawn fails with E2BIG).
@@ -130,17 +100,9 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 			target: "bun",
 			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin()],
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
-			files: embeddedFiles,
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),
-				// Relocated Android bundles cannot resolve workspace installs from
-				// worker subprocesses. Keep this marker narrower than PI_COMPILED:
-				// bundled desktop/npm runs still use their ambient dependency tree.
-				...(androidBundle ? { "process.env.PI_ANDROID_BUNDLE": JSON.stringify("1") } : {}),
 				"process.env.PI_DOCS_EMBED": JSON.stringify(docsPayload.payload),
-				...(transformersVersion
-					? { "process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(transformersVersion) }
-					: {}),
 			},
 			minify: {
 				whitespace: true,
