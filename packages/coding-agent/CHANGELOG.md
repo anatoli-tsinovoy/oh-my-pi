@@ -16,6 +16,7 @@
 
 - Fixed local Whisper speech-to-text on Android/Termux by using Transformers.js with the ONNX Runtime WebAssembly backend instead of the unavailable native Node binding.
 - Fixed local speech-to-text on Android/Termux by defaulting to Whisper when the sherpa native addon is unavailable and loading ONNX Runtime WebAssembly entirely from the local runtime.
+- Fixed `omp say` and local speech playback failing on Android/Termux by running Kokoro through the ONNX Runtime WebAssembly backend.
 - Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
 
 ## [18.10.1] - 2026-10-12
