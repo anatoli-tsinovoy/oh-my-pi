@@ -112,13 +112,13 @@ const title = await tab.run(
 );
 ```
 
-Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.
+Functions receive `{ tab, page, browser, wait, assert }` as their first argument. Additional `args` follow it. `args` that is neither an array nor `null`, or a non-empty `args` with a code string, throws before the run starts; `null` passes no arguments. Plain data, functions, and `RegExp` values are serialized; the function cannot capture Eval-cell closures. Code strings use the same names as globals and allow top-level `await`.
 
 The inner `tab` is the full worker helper API. In addition to the direct surface it includes handle-returning `waitFor`/`waitForSelector` and run-scoped `waitForNavigation`/`waitForResponse`. Start a navigation/response wait before the action that triggers it.
 
 Runs use a persistent, per-tab JavaScript runtime with ordinary Eval helpers and full Bun/Node and tool-bridge access. This is API isolation, not a security sandbox. Raw `page.setRequestInterception` and run-added request listeners are cleaned up at run end; `tab.route` handlers persist until `unroute` or tab close.
 
-The return value stays structured. Nonempty text emitted by inner `display(...)` calls prints in the outer Eval cell, object/image displays remain Eval output, and a run with no display text emits no placeholder.
+The return value stays structured. Nonempty text printed inside the run (`print`, `console.*`) prints in the outer Eval cell, printed images remain Eval output, and a run with no printed text emits no placeholder.
 
 ## Python API
 
@@ -141,21 +141,23 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 - **Managed Chromium:** creates an omp-owned page in project-shared Chromium and applies stealth patches. Installation happens automatically on first use. `headed` overrides the default hidden mode.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here; Chromium-family processes use an omp-owned profile unless args specify `--user-data-dir`.
 - **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint.
-- **Relay (`app.relay: true`):** adopts the user's real Chrome tab. `app.target` selects by URL/title substring; without it the visible usable tab is adopted. Passing `url` navigates the adopted tab.
+- **Relay (`app.relay: true`):** drives the user's real Chrome. Opening a new name without `app.target` creates omp's own background tab, leaving the user's selected tab and window focus alone (an extension installed before this release selects the new tab instead; reinstall it with `omp browser-relay install`); `url` navigates that tab, and screenshots capture it without raising it. With several browsers on one relay, a new tab opens in the browser of the tab omp used last on that relay (for a page `tab.run` opens, the browser of its own tab), else the browser showing the first selected tab in the relay's tab list (whether or not its window is minimized), else the browser whose extension connected last. `app.target` borrows an existing tab by URL/title substring. Reopening a name that is already open keeps its tab, borrowed or owned.
 - **Tern:** inside a Tern pane, opens a visible browser picture-in-picture over the pane using native WKWebView, not Chromium. `headed: false` or `app.tern: false` opts out; `app.tern: true` requires Tern. Automatic Tern selection falls back to Chromium with an explanatory result when Tern cannot host the page.
 - **Cmux:** drives an available cmux WKWebView surface.
 
 The native-webview backends do not provide full Puppeteer/CDP capabilities. Tern provides fetch/XHR and navigation-response logging, not complete CDP subresource coverage; routing accepts only fetch/XHR resource types. CPU/network throttling, timezone/headers/reduced-motion emulation, CSS-transformed frame input, and tracing/profiling are unsupported; `metrics` returns navigation timing and DOM counts rather than full CDP metrics. Tern PDF accepts only `path`; storage loading restores only the current origin. Inspect backend-specific errors rather than assuming Chromium behavior.
 
-Reusing one tab name across browser kinds is rejected until the existing tab is closed. Closing omp-owned Chromium pages, Tern picture-in-pictures, and owned cmux surfaces closes them. Connected and relay pages remain open. Spawned browser processes remain open unless `kill: true` releases their last managed tab and terminates an application owned by this process; reused processes are never killed.
+Reusing one tab name across browser kinds is rejected until the existing tab is closed. Closing omp-owned Chromium pages, tabs omp opened in the relay, Tern picture-in-pictures, and owned cmux surfaces closes them. Connected pages and borrowed relay tabs remain open. Spawned browser processes remain open unless `kill: true` releases their last managed tab and terminates an application owned by this process; reused processes are never killed.
 
 ## Screenshots and output
 
 `tab.screenshot({ selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold? })` returns a saved path, or `{ path?, changed, revision, pixelChangeRatio }` when change detection is enabled. `format` is `png` or `jpeg`; integer `quality` (0–100) requires JPEG. `threshold` is a changed-pixel ratio from 0–1 and implies change detection. An unchanged tracked capture saves/emits nothing.
 
+Chromium-backed captures never activate the tab or raise its window: a background tab, a minimized window, or a window behind other apps is captured where it is, with its current content, so the user's frontmost app keeps focus. On relay and CDP-attached browsers this includes an adopted tab the user has since switched away from.
+
 Images are saved beneath `browser.screenshotDir`, or the OS temporary directory when unset. Chromium saves full resolution when that directory or an explicit format is supplied; otherwise it saves the resized image. Model-visible images are resized to at most 1024×1024 and 150 KiB. When the image's pixels are not CSS pixels (resized, or captured at a device scale other than 1), the capture text gives the factor from image coordinates to CSS pixels: viewport pixels for `clickAt` on a plain capture, page pixels for `fullPage`, element-relative pixels for `selector`. Unless `silent: true`, a capture emits an Eval image. `annotate: true` overlays numeric interactive-element labels and refreshes `tab.id` mappings. Screenshot options do not accept an output path; `diffScreenshot(baselinePath, { threshold?, output? })` does, and `pdf({ path?, ... })` writes a PDF.
 
-Host result details preserve structured `value` separately from displayed content. Display text is capped by the shared inline-output policy; over-cap text is stored as a session artifact and the capped text is printed.
+Host result details preserve structured `value` separately from displayed content. Printed text is capped by the shared inline-output policy; over-cap text is stored as a session artifact and the capped text is printed.
 
 ## Safety and lifecycle
 

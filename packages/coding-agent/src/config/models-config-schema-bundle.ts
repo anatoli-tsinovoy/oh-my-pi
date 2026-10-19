@@ -17,6 +17,16 @@ function validateMaxContextWindow(
 	return true;
 }
 
+function validateImageCountBudget(value: { imageCountBudget?: number }, ctx: NarrowContext): boolean {
+	if (
+		value.imageCountBudget !== undefined &&
+		(!Number.isSafeInteger(value.imageCountBudget) || value.imageCountBudget <= 0)
+	) {
+		return ctx.mustBe("imageCountBudget a positive integer");
+	}
+	return true;
+}
+
 export const getModelsConfigSchemaBundle = once(() => {
 	const OpenRouterRoutingSchema = type({
 		"only?": "string[]",
@@ -169,7 +179,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		});
 
 	const ModelTokenizerSchema = type(
-		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5"',
+		'"claude-v3" | "claude-v47" | "claude-v5" | "claude-v5-sonnet" | "qwen3" | "deepseek-v3" | "kimi-k2" | "glm5" | "o200k"',
 	);
 
 	const RemoteCompactionSchema = type({
@@ -210,6 +220,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -258,7 +269,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateMaxContextWindow(value, ctx);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
@@ -269,6 +280,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',
 		"imageInputDecoder?": '"stb"',
+		"imageCountBudget?": "number",
 		"tokenizer?": ModelTokenizerSchema,
 		"supportsTools?": "boolean",
 		"cost?": {
@@ -310,7 +322,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateMaxContextWindow(value, ctx);
+		return validateImageCountBudget(value, ctx) && validateMaxContextWindow(value, ctx);
 	});
 
 	const ProviderDiscoverySchema = type({

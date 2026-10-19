@@ -15,10 +15,19 @@ import {
 	readArgsHaveTarget,
 } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { RecapNotice } from "@oh-my-pi/pi-tui/chat/recap-notice";
+import { readMediaPath } from "@oh-my-pi/pi-tui/native/blobs";
 import { TodoReminderComponent } from "@oh-my-pi/pi-tui/chat/todo-reminder";
 import { isNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { ToolExecutionComponent, type ToolExecutionHandle, toolRenderName } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import {
+	asyncJobState,
+	isSettledJobFrame,
+	parksAsBackground,
+	settleWithJobFrame,
+	ToolExecutionComponent,
+	type ToolExecutionHandle,
+	toolRenderName,
+} from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notification";
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
@@ -34,7 +43,7 @@ import {
 	readQueueChipText,
 	resolveAbortLabel,
 } from "../../session/messages";
-import { formatApprovalPrompt, resolveApproval } from "../../tools/approval";
+import { formatApprovalPrompt, resolveApproval, sessionApprovalScope } from "../../tools/approval";
 import { recoverAskQuestions } from "../../tools/ask";
 import { previewLine, PREVIEW_LIMITS, TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-tui/tools/resolve";
@@ -71,6 +80,7 @@ import {
 	cfgTerminalShowImages,
 	cfgTerminalShowProgress,
 } from "../settings";
+import { getCacheWarmingDelayMs } from "../../session/cache-warmer";
 import { cfgCompaction } from "../../session/context-settings";
 import { cfgReadToolResultPreview, cfgToolsApproval, cfgToolsApprovalMode } from "../../tools/settings";
 import { cfgSpeechEnabled, cfgSpeechMode } from "../../tts/settings";
@@ -90,6 +100,11 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
 const MAX_LIVE_IRC_CARDS = 4;
 const IDLE_RECAP_MIN_SECONDS = 1;
 const IDLE_RECAP_MAX_SECONDS = 3600;
+/**
+ * Idle compaction fires this long before the warmer's own refresh point, so the
+ * compaction request (not a one-token warm replay) reads the still-warm prefix.
+ */
+const IDLE_COMPACTION_CACHE_LEAD_MS = 5_000;
 
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
@@ -175,7 +190,14 @@ export class EventController {
 	#lastVisibleBlockCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
-	#backgroundTaskCallIds = new Set<string>();
+	/** Returned calls parked for their background job's frames ({@link parksAsBackground}). */
+	#backgroundCallIds = new Set<string>();
+	/**
+	 * A job's settled frame ({@link isSettledJobFrame}) that landed while its
+	 * call was still executing, keyed by call id: a fast job can settle before
+	 * the call's `tool_execution_end` carries its `running` start result.
+	 */
+	#settledBeforeReturn = new Map<string, Extract<AgentSessionEvent, { type: "tool_execution_update" }>>();
 	/** Tool calls waiting on the user (an approval prompt or `ask`), with the
 	 *  `blocked` status each reports; cleared at their tool_execution_end so the
 	 *  run returns to `working` once none is left. */
@@ -287,6 +309,10 @@ export class EventController {
 	#runEpoch = 0;
 	/** Epoch of the in-flight {@link #finishWhenRunSettles} watch, if any. */
 	#settleWatchEpoch: number | undefined = undefined;
+	// Composer activity: a host run or idle maintenance (auto-compaction) owns
+	// turn-scoped chrome, so the post-run chrome floor must not settle on it.
+	#runActive = false;
+	#maintenanceActive = false;
 	// Coalescing window for `message_update` events at the subscription boundary.
 	// `message_update` carries the CUMULATIVE assistant message (every update
 	// re-lists all content blocks), so when a burst of deltas arrives faster than
@@ -465,7 +491,7 @@ export class EventController {
 	/** Freeze foreground tool cards once no live agent turn can complete them. */
 	#sealAbandonedForegroundTools(): void {
 		const background = new Set<ToolExecutionHandle>();
-		for (const toolCallId of this.#backgroundTaskCallIds) {
+		for (const toolCallId of this.#backgroundCallIds) {
 			const component = this.ctx.pendingTools.get(toolCallId);
 			if (component) background.add(component);
 		}
@@ -478,12 +504,12 @@ export class EventController {
 			}
 		}
 		for (const [toolCallId, component] of this.ctx.pendingTools) {
-			if (this.#backgroundTaskCallIds.has(toolCallId)) continue;
+			if (this.#backgroundCallIds.has(toolCallId)) continue;
 			component.seal();
 			this.ctx.pendingTools.delete(toolCallId);
 		}
-		this.#backgroundTaskCallIds = new Set(
-			Array.from(this.#backgroundTaskCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
+		this.#backgroundCallIds = new Set(
+			Array.from(this.#backgroundCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
 		);
 		this.#finalizeAbandonedPostToolSegments();
 	}
@@ -691,7 +717,7 @@ export class EventController {
 
 	#inlineReadToolImages(
 		toolCallId: string,
-		result: { content: Array<{ type: string; data?: string; mimeType?: string }> },
+		result: { content: Array<{ type: string; data?: string; mimeType?: string }>; details?: unknown },
 	): boolean {
 		const assistantComponent = this.#readToolCallAssistantComponents.get(toolCallId);
 		if (!assistantComponent) return false;
@@ -701,9 +727,11 @@ export class EventController {
 					content.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string",
 			)
 			.map(content => ({ type: "image", data: content.data, mimeType: content.mimeType }));
-		if (images.length === 0) return false;
-		assistantComponent.setToolResultImages(toolCallId, images);
-		return cfgTerminalShowImages.get(settings);
+		const mediaPath = readMediaPath(result.details);
+		if (images.length === 0 && !mediaPath) return false;
+		assistantComponent.setToolResultImages(toolCallId, images, mediaPath);
+		// A media-only result (a model, a PDF) still settles through the read group.
+		return images.length > 0 && cfgTerminalShowImages.get(settings);
 	}
 
 	#insertAfterTranscriptComponent(anchor: Component | undefined, component: Component): boolean {
@@ -892,6 +920,17 @@ export class EventController {
 		return this.#executionStartedCallIds.has(toolCallId);
 	}
 
+	/** The viewed session was swapped for an idle one: no run owns the chrome any more. */
+	markViewIdle(): void {
+		this.#runActive = false;
+		this.#maintenanceActive = false;
+		this.#syncComposerActivity();
+	}
+
+	#syncComposerActivity(): void {
+		this.ctx.composer.setRunActive(this.#runActive || this.#maintenanceActive);
+	}
+
 	/**
 	 * Clear every transcript-anchored/turn-scoped piece of state. Used by the
 	 * session focus proxy when re-pointing the transcript at another session:
@@ -916,7 +955,8 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
-		this.#backgroundTaskCallIds.clear();
+		this.#backgroundCallIds.clear();
+		this.#settledBeforeReturn.clear();
 		this.#blockingPrompts.clear();
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
@@ -1093,6 +1133,8 @@ export class EventController {
 		this.#compactionOwnsProgress = false;
 		this.#setTerminalProgress(true);
 		this.ctx.ensureLoadingAnimation();
+		this.#runActive = true;
+		this.#syncComposerActivity();
 		setRunStatus({ state: "working" });
 		this.ctx.ui.requestRender();
 	}
@@ -1389,15 +1431,15 @@ export class EventController {
 	}
 
 	/**
-	 * Re-register parked background task cards after a transcript rebuild so a
-	 * detached task's replayed and live progress frames keep routing to the
-	 * preserved component. Focus attach clears {@link #backgroundTaskCallIds}
+	 * Re-register parked background cards after a transcript rebuild so a
+	 * background job's replayed and live progress frames keep routing to the
+	 * preserved component. Focus attach clears {@link #backgroundCallIds}
 	 * via {@link resetTranscriptAnchors} before the rebuild repopulates it.
 	 * Ids whose component did not survive into `pendingTools` are skipped.
 	 */
-	markBackgroundTaskCalls(toolCallIds: Iterable<string>): void {
+	markBackgroundCalls(toolCallIds: Iterable<string>): void {
 		for (const toolCallId of toolCallIds) {
-			if (this.ctx.pendingTools.has(toolCallId)) this.#backgroundTaskCallIds.add(toolCallId);
+			if (this.ctx.pendingTools.has(toolCallId)) this.#backgroundCallIds.add(toolCallId);
 		}
 	}
 
@@ -1739,7 +1781,7 @@ export class EventController {
 				if (supersededByRewind) {
 					this.ctx.streamingComponent.markRewound();
 					for (const [toolCallId, component] of Array.from(this.ctx.pendingTools.entries())) {
-						if (this.#backgroundTaskCallIds.has(toolCallId)) continue;
+						if (this.#backgroundCallIds.has(toolCallId)) continue;
 						if (
 							!(component instanceof ToolExecutionComponent) &&
 							!(component instanceof ReadToolGroupComponent)
@@ -1943,12 +1985,16 @@ export class EventController {
 			const questions = recoverAskQuestions(args)?.map(question => question.question);
 			return { state: "blocked", kind: "question", msg: questions?.join(" ") };
 		}
-		const tool = this.ctx.viewSession.getToolByName(toolName);
+		const session = this.ctx.viewSession;
+		const tool = session.getToolByName(toolName);
 		if (!tool) return undefined;
 		const mode = cfgToolsApprovalMode.get(settings);
 		const userPolicies: Record<string, unknown> = cfgToolsApproval.get(settings);
 		const approval = resolveApproval(tool, args, mode, userPolicies);
 		if (approval.policy !== "prompt") return undefined;
+		// Approved for this session: the wrapper runs it without asking.
+		const scope = sessionApprovalScope(approval, tool.name);
+		if (scope && session.extensionRunner?.hasSessionApproval(scope.key)) return undefined;
 		return { state: "blocked", kind: "permission", msg: formatApprovalPrompt(tool, args, approval.reason) };
 	}
 
@@ -1958,22 +2004,21 @@ export class EventController {
 		this.#ensureWorkingLoaderWhileStreaming();
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
-			const asyncState = (event.partialResult.details as { async?: { state?: string } } | undefined)?.async?.state;
-			const isFinalAsyncState = asyncState === "completed" || asyncState === "failed";
+			const isFinalAsyncState = isSettledJobFrame(event.partialResult.details);
 			// A final async snapshot is terminal only for a parked background
 			// block (the call already returned and was kept alive for its jobs).
 			// While the call is still executing — a mixed blocking+async task
 			// call whose jobs settle before its blocking subset — treat it as a
 			// partial frame: `tool_execution_end` still owns the terminal result.
-			const isTerminal = isFinalAsyncState && this.#backgroundTaskCallIds.has(event.toolCallId);
-			component.updateResult(
-				{ ...event.partialResult, isError: asyncState === "failed" },
-				!isTerminal,
-				event.toolCallId,
-			);
+			const isTerminal = isFinalAsyncState && this.#backgroundCallIds.has(event.toolCallId);
 			if (isTerminal) {
+				settleWithJobFrame(component, event.partialResult, event.toolCallId);
 				this.ctx.pendingTools.delete(event.toolCallId);
-				this.#backgroundTaskCallIds.delete(event.toolCallId);
+				this.#backgroundCallIds.delete(event.toolCallId);
+			} else {
+				if (isFinalAsyncState) this.#settledBeforeReturn.set(event.toolCallId, event);
+				const isError = asyncJobState(event.partialResult.details) === "failed";
+				component.updateResult({ ...event.partialResult, isError }, true, event.toolCallId);
 			}
 			this.ctx.ui.requestRender();
 		}
@@ -2027,15 +2072,23 @@ export class EventController {
 		component: ToolExecutionHandle,
 		event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 	): void {
-		const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-		const isBackgroundTask = event.toolName === "task" && asyncState === "running";
-		component.updateResult({ ...event.result, isError: event.isError }, isBackgroundTask, event.toolCallId);
-		if (isBackgroundTask) {
+		const settled = this.#settledBeforeReturn.get(event.toolCallId)?.partialResult;
+		this.#settledBeforeReturn.delete(event.toolCallId);
+		const parks = parksAsBackground(event.toolName, event.result.details);
+		if (parks && settled) {
+			// The job finished before the call returned: its settled frame, not the
+			// `running` start result, is the card's final state.
+			settleWithJobFrame(component, settled, event.toolCallId);
+			this.ctx.pendingTools.delete(event.toolCallId);
+			return;
+		}
+		component.updateResult({ ...event.result, isError: event.isError }, parks, event.toolCallId);
+		if (parks) {
 			component.parkAsBackground();
-			this.#backgroundTaskCallIds.add(event.toolCallId);
+			this.#backgroundCallIds.add(event.toolCallId);
 		} else {
 			this.ctx.pendingTools.delete(event.toolCallId);
-			this.#backgroundTaskCallIds.delete(event.toolCallId);
+			this.#backgroundCallIds.delete(event.toolCallId);
 		}
 	}
 
@@ -2219,7 +2272,20 @@ export class EventController {
 		// leaving "Working…" gone while the agent keeps running. The live turn owns
 		// the loader and finalizes it at its own agent_end (isStreaming === false by
 		// then). Mirrors the collab guest's !isStreaming loader reconciler.
-		if (this.ctx.session.isStreaming) return;
+		if (this.ctx.session.isStreaming) {
+			// A focused worker can end while the main session streams; its run is
+			// over even though main's is not. Tear down only what the viewed worker
+			// owns (its loader); main-owned work waits for main's own settle.
+			const view = this.ctx.viewSession;
+			if (view !== this.ctx.session && !view.isStreaming && this.ctx.loadingAnimation) {
+				this.ctx.loadingAnimation.stop();
+				this.ctx.loadingAnimation = undefined;
+				this.ctx.statusContainer.disposeChildren();
+			}
+			this.#runActive = view.isStreaming;
+			this.#syncComposerActivity();
+			return;
+		}
 		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
 		// end of the run: the agent's own continuation (reminder, retry, queued
 		// steer/follow-up, IRC wake) follows, or background work may re-wake it.
@@ -2327,6 +2393,10 @@ export class EventController {
 			this.ctx.loadingAnimation = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
+		// A stale end landing after the viewed session started a new turn must
+		// not mark that live turn idle.
+		this.#runActive = this.ctx.viewSession.isStreaming;
+		this.#syncComposerActivity();
 		await this.ctx.flushPendingModelSwitch();
 		this.#sealAbandonedForegroundTools();
 		this.#blockingPrompts.clear();
@@ -2446,6 +2516,8 @@ export class EventController {
 			() => this.ctx.interruptFromPointer(),
 		);
 		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
+		this.#maintenanceActive = true;
+		this.#syncComposerActivity();
 		this.ctx.ui.requestRender();
 	}
 
@@ -2461,6 +2533,8 @@ export class EventController {
 			this.ctx.autoCompactionLoader = undefined;
 			this.ctx.statusContainer.disposeChildren();
 		}
+		this.#maintenanceActive = false;
+		this.#syncComposerActivity();
 		const isHandoffAction = event.action === "handoff";
 		const isRemoteAction = event.action === "remote";
 		const isShakeAction = event.action === "shake";
@@ -2486,14 +2560,14 @@ export class EventController {
 				if (!event.skipped) {
 					this.ctx.rebuildChatFromMessages();
 					this.ctx.statusLine.invalidate();
-					this.ctx.ui.requestRender();
+					this.ctx.ui.requestRender(true, { clearScrollback: true });
 				}
 				this.ctx.showWarning(event.errorMessage);
 			} else if (!event.skipped) {
 				this.ctx.lastAssistantUsage = undefined;
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
-				this.ctx.ui.requestRender();
+				this.ctx.ui.requestRender(true, { clearScrollback: true });
 				this.ctx.showStatus("Auto-shake completed");
 			}
 		} else if (event.result) {
@@ -2721,7 +2795,25 @@ export class EventController {
 		if (threshold <= 0) return;
 		if (this.#currentContextTokens() < threshold) return;
 
-		const timeoutMs = Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
+		// Compact just before a 1h (long-tier) prompt cache entry expires, while
+		// the summary request can still read the cached prefix; a turn that settles
+		// past that point but before expiry compacts right away. A 5-minute entry
+		// lapses too soon after a turn for compaction to be worth starting on its
+		// schedule, so it, an unknown lifetime, and an expired entry all fall back
+		// to the configured delay.
+		// Deliberate cost: the delay counts from agent_end while the entry's TTL
+		// counts from the request send (`touchedAt`), so with the default 300s
+		// delay a short-tier idle summary always runs after the 5-minute entry
+		// expired and pays a cold full-prefix read. That is the price of never
+		// compacting after a short break; do not re-time short entries to dodge it.
+		const promptCacheEntry = this.ctx.viewSession.promptCacheEntry;
+		const cacheEntry = promptCacheEntry?.tier === "long" ? promptCacheEntry : undefined;
+		const refreshDelayMs = cacheEntry ? getCacheWarmingDelayMs(cacheEntry.ttlMs) : undefined;
+		const now = Date.now();
+		const timeoutMs =
+			cacheEntry && refreshDelayMs !== undefined && cacheEntry.touchedAt + cacheEntry.ttlMs > now
+				? Math.max(0, cacheEntry.touchedAt + refreshDelayMs - IDLE_COMPACTION_CACHE_LEAD_MS - now)
+				: Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
 		this.#idleCompactionTimer = setTimeout(() => {
 			this.#idleCompactionTimer = undefined;
 			// Re-check conditions before firing. Pruning may have run between arming

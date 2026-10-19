@@ -1,3 +1,4 @@
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
@@ -6,6 +7,8 @@ import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-
 import type {
 	CompactOptions,
 	ExtensionActions,
+	ExtensionApprovalAnswer,
+	ExtensionApprovalPrompt,
 	ExtensionAskDialogQuestion,
 	ExtensionAskDialogResult,
 	ExtensionAskDialogResultItem,
@@ -24,6 +27,7 @@ import type {
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import {
 	type AskDialogPrompt,
 	type AskDialogPromptValue,
@@ -44,6 +48,9 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 import { launchTerminal } from "../../subprocess/terminal-launch";
 
 const MAX_WIDGET_LINES = 10;
+/** Approval answers, as a collab guest's select shows them. */
+const APPROVE_OPTION = "Approve";
+const DENY_OPTION = "Deny";
 
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
@@ -111,6 +118,14 @@ export class ExtensionUiController {
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
 	/**
+	 * The steering messages that last denied an approval. Steering waits for the tool batch to
+	 * end, so while any of them is still pending, later approvals of that batch (an exclusive call
+	 * asks only after the denied one settles) are denied by it as well. Tracked by identity: once
+	 * they are delivered, an equal-looking newer steer (another `[Image]` chip) predates its prompt
+	 * and does not answer it.
+	 */
+	#denyingSteering: readonly AgentMessage[] | undefined;
+	/**
 	 * Built once in `initHooksAndCustomTools()`. Reused directly by `/tree`
 	 * `ask` re-answer (issue #5642) to drive a standalone `AskTool.execute()`
 	 * call with the same picker/dialog primitives a live tool call would get.
@@ -143,6 +158,7 @@ export class ExtensionUiController {
 			confirm: (title, message, dialogOptions) => this.showHookConfirm(title, message, dialogOptions),
 			input: (title, placeholder, dialogOptions) => this.showHookInput(title, placeholder, dialogOptions),
 			askDialog: (questions, dialogOptions) => this.showAskDialog(questions, dialogOptions),
+			approve: (prompt, dialogOptions) => this.showCollabAwareApproval(prompt, dialogOptions),
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
@@ -162,6 +178,7 @@ export class ExtensionUiController {
 			editor: (title, prefill, dialogOptions, editorOptions) =>
 				this.showCollabAwareEditor(title, prefill, dialogOptions, editorOptions),
 			addAutocompleteProvider: factory => this.ctx.addAutocompleteProvider(factory),
+			getEditorComponent: () => this.ctx.getEditorComponent(),
 			get theme() {
 				return theme;
 			},
@@ -233,6 +250,9 @@ export class ExtensionUiController {
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 			shutdown: () => this.ctx.requestShutdown(),
+			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
+			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
+			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
@@ -461,6 +481,9 @@ export class ExtensionUiController {
 			abort: () => this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL }),
 			hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,
 			shutdown: () => this.ctx.requestShutdown(),
+			resolvePlanReview: (reviewId, choice, input) => this.ctx.resolvePlanReview(reviewId, choice, input),
+			getPendingPlanReview: () => this.ctx.getPendingPlanReview(),
+			openPlanReview: () => this.ctx.openPlanReview({ fromExtension: true }),
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
@@ -637,6 +660,101 @@ export class ExtensionUiController {
 		return this.#raceCollabDialog(request, dialogOptions?.signal, signal =>
 			this.showHookEditor(title, prefill, { ...dialogOptions, signal }, editorOptions),
 		);
+	}
+
+	/**
+	 * The tool-approval prompt in the composer's place; a collab guest answers it as a select over
+	 * the full prompt with the same choices: Approve, the prompt's "for this session" choice when it
+	 * offers one, and Deny. Locally it shows the compact prompt (the details summarized to a
+	 * row, so the composer beneath keeps its room) over that list, and the expand key
+	 * swaps in the full one, wrapped — even when the two match, since a row the summary kept whole
+	 * can still clip. The composer stays mounted beneath it and takes the typing: a user message
+	 * queued as steering while the call waits (sent here, from Tern, or by a collab guest) denies
+	 * the call, so the message tells the agent why instead of a bare denial. The watch starts with
+	 * the request, so approvals still queued behind another dialog are denied by the same message.
+	 */
+	async showCollabAwareApproval(
+		prompt: ExtensionApprovalPrompt,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionApprovalAnswer> {
+		const sessionLabel = prompt.session;
+		const request: CollabUiRequestDraft = {
+			kind: "select",
+			title: prompt.full,
+			options: sessionLabel ? [APPROVE_OPTION, sessionLabel, DENY_OPTION] : [APPROVE_OPTION, DENY_OPTION],
+		};
+		const session = this.ctx.session;
+		const agent = session.agent;
+		const pendingSteering = agent.peekSteeringQueue();
+		if (this.#denyingSteering?.some(message => pendingSteering.includes(message))) return "deny";
+		this.#denyingSteering = undefined;
+		const steered = new AbortController();
+		let steeringBaseline = session.getQueuedMessages().steering.length;
+		let knownSteering = new Set(pendingSteering);
+		const unsubscribe = session.subscribe(event => {
+			if (event.type !== "queue_update" || steered.signal.aborted) return;
+			const current = agent.peekSteeringQueue();
+			if (event.steering.length > steeringBaseline) {
+				const added = current.filter(message => !knownSteering.has(message));
+				this.#denyingSteering = added;
+				// One-at-a-time delivery takes the oldest steer at the batch boundary; the
+				// message that denied this call must be the one that lands after the denial.
+				agent.prioritizeSteering(added);
+				steered.abort();
+			} else {
+				steeringBaseline = event.steering.length;
+				knownSteering = new Set(current);
+			}
+		});
+		const signal = dialogOptions?.signal ? AbortSignal.any([dialogOptions.signal, steered.signal]) : steered.signal;
+		try {
+			const choice = await this.#raceCollabDialog(request, signal, localSignal =>
+				this.#presentDialog(localSignal, settle => {
+					const editor = this.ctx.editor;
+					const dialog = new ApprovalDialogComponent(
+						prompt.compact,
+						{ onApprove: () => settle(APPROVE_OPTION), onDeny: () => settle(DENY_OPTION) },
+						{
+							tui: this.ctx.ui,
+							fullPrompt: prompt.full,
+							timeout: dialogOptions?.timeout,
+							onTimeout: dialogOptions?.onTimeout,
+							onTimeoutStart: dialogOptions?.onTimeoutStart,
+							onTimeoutReset: dialogOptions?.onTimeoutReset,
+							...(sessionLabel
+								? { session: { label: sessionLabel, onApprove: () => settle(sessionLabel) } }
+								: {}),
+							draft: {
+								hasDraft: () =>
+									editor.getText().length > 0 || editor.pendingImages.length > 0 || editor.pasteInFlight,
+								handleInput: keyData => editor.handleDraftEdit(keyData),
+							},
+						},
+					);
+					this.ctx.editorContainer.clear();
+					this.ctx.editorContainer.addChild(dialog);
+					this.ctx.editorContainer.addChild(editor);
+					this.ctx.ui.setFocus(dialog);
+					// The dialog owns focus but forwards typing: keep the composer's cursor visible.
+					editor.focused = true;
+					// Its submissions steer this (main) session, even from a focused agent's view.
+					this.ctx.approvalOwnsComposer = true;
+					this.ctx.ui.requestRender();
+					return () => {
+						this.ctx.approvalOwnsComposer = false;
+						dialog.dispose();
+						this.ctx.editorContainer.clear();
+						this.ctx.editorContainer.addChild(editor);
+						this.ctx.ui.setFocus(editor);
+						this.ctx.ui.requestRender();
+					};
+				}),
+			);
+			if (choice === APPROVE_OPTION) return "once";
+			return sessionLabel !== undefined && choice === sessionLabel ? "session" : "deny";
+		} finally {
+			unsubscribe();
+		}
 	}
 
 	async showAskDialog(

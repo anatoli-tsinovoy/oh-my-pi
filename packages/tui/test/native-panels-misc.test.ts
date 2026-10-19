@@ -6,7 +6,7 @@ import { AgentTranscriptViewer, type AgentTranscriptViewerDeps } from "../src/ov
 import { BtwHistoryPanel } from "../src/overlays/btw-history-panel";
 import type { BtwHistoryRecord } from "../src/overlays/btw-history";
 import { CodexResetFireworksController } from "../src/overlays/codex-reset-fireworks";
-import type { Component, OverlayHandle, TUI } from "../src/index";
+import { type Component, Input, type OverlayHandle, type TUI } from "../src/index";
 import type { NativeChild, NativeNode, NativeUiEvent } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
 import { initTheme, theme } from "../src/theme/theme";
@@ -228,6 +228,28 @@ describe("BtwHistoryPanel native events", () => {
 		expect(details()?.scroll).toEqual({ by: "end", n: 1 });
 	});
 
+	it("forwards answer scroll keys while composing a follow-up, keeping the draft", () => {
+		const history = new BtwHistoryPanel({
+			records: [record("a", "first question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp: async () => true,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const find = (key: string) => findNode(history.describe(), node => node.key === key);
+		history.handleInput("f");
+		history.pasteText("draft");
+		history.handleInput("\x1b[5~");
+		expect(find("details")?.scroll?.by).toBe("page-up");
+		history.handleInput("\x1b[A");
+		expect(find("details")?.scroll?.by).toBe("line-up");
+		const input = find("composer")?.c?.[0];
+		expect(input instanceof Input ? input.getValue() : undefined).toBe("draft");
+	});
+
 	it("routes the footer buttons to the same paths as their keys", async () => {
 		const onCopy = vi.fn();
 		const onFollowUp = vi.fn(async () => true);
@@ -249,7 +271,15 @@ describe("BtwHistoryPanel native events", () => {
 		});
 		const click = (act: string): void =>
 			history.handleNativeEvent({ type: "action", key: `actions/${act}`, act, mods: [] });
-		click("copy");
+		// Click the act the rendered button carries: `copy` would be the terminal-local
+		// action, which copies the button's own label and never reaches the panel.
+		const copyAct = findNode(
+			history.describe(),
+			node => node.p?.role === "omp.btn" && String(node.p?.title).startsWith("Copy answer"),
+		)?.p?.actions?.click;
+		expect(copyAct).toBeDefined();
+		expect(copyAct).not.toBe("copy");
+		click(copyAct!);
 		expect(onCopy).toHaveBeenCalledWith(expect.objectContaining({ id: "a" }));
 		click("follow-up");
 		expect(findNode(history.describe(), node => node.key === "composer")).toBeDefined();

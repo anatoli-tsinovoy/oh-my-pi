@@ -113,6 +113,7 @@ Plain provider credential names come from `env` entries in `packages/catalog/src
 | `BASETEN_API_KEY`               | Baseten auth                                     | Using `baseten` provider                                       | Also configured via the interactive API-key login (`/login baseten`, key from the Baseten dashboard) |
 | `COREWEAVE_API_KEY` / `WANDB_API_KEY` | CoreWeave Serverless Inference auth        | Using `coreweave` provider                                     | Either variable works (W&B fallback). `COREWEAVE_PROJECT` (fallback `WANDB_INFERENCE_PROJECT`) supplies the required `OpenAI-Project` header |
 | `SAKANA_API_KEY` / `FUGU_API_KEY` | Sakana AI auth                                 | Using `sakana` provider                                        | Either variable works; `SAKANA_BASE_URL` / `FUGU_BASE_URL` override the request base URL            |
+| `SAMBANOVA_API_KEY`             | SambaNova Cloud auth                             | Using `sambanova` provider                                     | Also configured via the interactive API-key login (`/login sambanova`)                              |
 | `DEVIN_API_KEY`                 | Devin auth                                       | Using `devin` provider                                         | Also available via the interactive login (`/login devin`, OAuth)                                    |
 | `AIAND_API_KEY`                 | ai& auth                                         | Using `aiand` provider                                         |                                                                                                     |
 | `GMI_API_KEY`                   | GMI Cloud auth                                   | Using `gmi-cloud` provider                                     |                                                                                                     |
@@ -172,6 +173,14 @@ Scope differs between the two `PI_PROXY` forms:
 Loopback, link-local, private-range (`10/8`, `172.16/12`, `192.168/16`), and
 `NO_PROXY` targets always bypass, so local model servers and MCP hosts stay direct.
 
+### Request body compression
+
+Request bodies of 1 KiB or more are compressed when sent to a provider's own endpoint that decodes them, as declared by the `request-encodings` / `endpoint-hosts` catalog rules: the official Anthropic API (gzip), the ChatGPT Codex backend (zstd), and the GitHub Copilot API at `api[.individual|.business|.enterprise].githubcopilot.com` (zstd, falling back to gzip). Proxies, relays, models.yml gateways (even under a built-in provider id), and every other host receive uncompressed JSON. If an endpoint, or a TLS-inspecting proxy in front of it, rejects an encoding and the uncompressed resend succeeds, that encoding stays off for the host for the rest of the process.
+
+| Variable                 | Behavior                                                                          |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| `PI_REQUEST_COMPRESSION` | `0`/`false`/`no`/`off` sends every request body uncompressed (enabled by default) |
+
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 
 When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry mode:
@@ -184,6 +193,18 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
   `ANTHROPIC_BASE_URL` points to a non-Anthropic host (e.g. a corporate API
   gateway), so enterprise gateways requiring proprietary auth headers work
   without enabling Foundry mode.
+- `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` (same contract as Claude Code) makes
+  provider `anthropic` requests omit pre-release body fields and their
+  `anthropic-beta` tokens: `context_management`, the beta tool fields
+  (`strict`, `defer_loading`, `eager_input_streaming`) and mid-conversation
+  tool changes, `output_config.format` and `output_config.task_budget`, plus
+  `thinking.block_binding` and Anthropic server compaction. Effort, adaptive
+  thinking, interleaved thinking, and extended context stay. Unlike Claude
+  Code, the matching betas are also removed from caller-supplied betas and
+  `anthropic-beta` headers. Use it when an `ANTHROPIC_BASE_URL` gateway
+  rejects them; it works with or without Foundry mode. Which providers honor
+  it is the `honors-claude-code-beta-kill-switch` compat axis
+  (`compat.honorsClaudeCodeBetaKillSwitch` in `models.yml`).
 - TLS client/server material can be injected from env values:
   `NODE_EXTRA_CA_CERTS`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`.
   Each accepts either:
@@ -202,6 +223,7 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 | `FOUNDRY_BASE_URL`          | URL string                                     | Anthropic endpoint base URL in Foundry mode                                                                                                                   |
 | `ANTHROPIC_FOUNDRY_API_KEY` | Token string                                   | Used for `Authorization: Bearer <token>`                                                                                                                      |
 | `ANTHROPIC_CUSTOM_HEADERS`  | Header list string                             | Extra headers; format `header-a: value, header-b: value` or newline-separated. Also forwarded outside Foundry whenever `ANTHROPIC_BASE_URL` is non-Anthropic. |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | Boolean-like string (`1`, `true`, `yes`, `on`) | Omits pre-release fields (`context_management`, beta tool fields, task budgets, structured-output format, `thinking.block_binding`, server compaction) and their beta headers on provider `anthropic` |
 | `NODE_EXTRA_CA_CERTS`       | PEM path or inline PEM                         | Extra CA chain for server certificate validation                                                                                                              |
 | `CLAUDE_CODE_CLIENT_CERT`   | PEM path or inline PEM                         | mTLS client certificate                                                                                                                                       |
 | `CLAUDE_CODE_CLIENT_KEY`    | PEM path or inline PEM                         | mTLS client private key (must be paired with cert)                                                                                                            |
@@ -326,7 +348,6 @@ therefore completes through the paste-code path.
 | `PI_CODEX_WEBSOCKET`                        | `1`/`true` enables websocket transport preference                                                                                                                                                             |
 | `PI_CODEX_RESPONSES_LITE`                   | `1`/`true` opts normal inference into Responses Lite; `0`/`false` forces the standard Responses body; unset defaults normal inference to full Responses                                                       |
 | `PI_OPENAI_STATEFUL`                        | Overrides the stateful-chaining default for the platform OpenAI Responses API (`previous_response_id`, forces `store: true`): on by default against api.openai.com, off elsewhere                             |
-| `PI_CODEX_ZSTD`                             | `0`/`false` disables zstd compression of request bodies sent to the official Codex API (enabled by default)                                                                                                   |
 | `PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS`        | Positive integer override (default `300000`)                                                                                                                                                                  |
 | `PI_CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS` | First-event timeout override (default `300000`)                                                                                                                                                               |
 | `PI_CODEX_WEBSOCKET_PING_INTERVAL_MS`       | Ping interval override (default `10000`)                                                                                                                                                                      |
@@ -364,6 +385,7 @@ therefore completes through the paste-code path.
 | `EXA_API_KEY`                                       | Exa search/MCP; alternatively use `/login exa`                            |
 | `TINYFISH_API_KEY`                                  | TinyFish search provider (required)                                       |
 | `BRAVE_API_KEY`                                     | Brave search provider                                                     |
+| `DEEPSEEK_API_KEY`                                  | DeepSeek search provider (same key as DeepSeek models)                    |
 | `PERPLEXITY_API_KEY`                                | Perplexity search provider API-key mode                                   |
 | `PERPLEXITY_COOKIES`                                | Perplexity cookie-auth search mode                                        |
 | `PI_PERPLEXITY_RESPONSES`                           | `1` selects the Perplexity Responses endpoint instead of Chat Completions |
@@ -408,7 +430,7 @@ For an Anthropic catalog model, `searchAnthropic()` uses credentials in this ord
 
 ### TypeSafe judgments
 
-Small typed decisions the app makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging, and `judge()` eval helper) use the `judge` model role. With a TypeSafe credential, the catalog discovers the account-visible judge roster from `GET /v1/models`—including `jev-latest` and `jev-preview` when advertised—and the role selects an exact catalog model. The built-in judge chain is `typesafe/jev-latest`, `openrouter/~typesafe/jev-latest`, `tiny`, `smol`, `default`, then the active-session model. Once the chain reaches a native System One model (TypeSafe directly or through OpenRouter), it only falls back to other native models: when every native judge fails, the judgment fails instead of degrading to a prompted chat or on-device model. Each failed candidate is logged as `judgment candidate failed`. Configure `modelRoles.judge` or `retry.fallbackChains.judge` to select `typesafe/jev-preview` or another judge candidate.
+Small typed decisions the app makes about its own state (the `auto` thinking-level difficulty classifier, Smart unexpected-stop detection, git TUI AI staging, and `judge()` eval helper) use the `judge` model role. With a TypeSafe credential, the catalog discovers the account-visible judge roster from `GET /v1/models`—including `jev-latest` and `jev-preview` when advertised, alongside the seeded `jev-1.14.0` the alias-only listing omits—and the role selects an exact catalog model. The built-in judge chain is `typesafe/jev-1.14.0`, `openrouter/typesafe/jev-1.14`, `tiny`, `smol`, `default`, then the active-session model. Once the chain reaches a native System One model (TypeSafe directly or through OpenRouter), it only falls back to other native models: when every native judge fails, the judgment fails instead of degrading to a prompted chat or on-device model. Each failed candidate is logged as `judgment candidate failed`. Configure `modelRoles.judge` or `retry.fallbackChains.judge` to select `typesafe/jev-preview` or another judge candidate.
 
 | Variable                 | Default / behavior                                                                                                                                                                                                                                       |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -445,6 +467,7 @@ Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips 
 | `PI_SLOW_MODEL`              | Ephemeral model-role override for `slow` (CLI `--slow` takes precedence)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `PI_PLAN_MODEL`              | Ephemeral model-role override for `plan` (CLI `--plan` takes precedence)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `PI_NO_TITLE`                | If set (any non-empty value), disables auto session title generation on first user message                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `OMP_BUILD_LABEL`            | Free-form name (collapsed to one line, first 80 characters) recorded with the build on every session entry this process writes, so transcripts from a custom or experimental build can be told apart; shown by `/session` |
 | `PI_TINY_DEVICE`             | Inference backend for local tiny models; overrides the `providers.tinyModelDevice` setting (default: CPU; ONNX providers `cpu`, `gpu`, `webgpu`, `auto`, `cuda`, `dml`, `coreml`, `wasm`, `webnn`, `webnn-gpu`, `webnn-cpu`, `webnn-npu`, or `mlx`/`metal` to run MLX weights through mlx-lm on Apple silicon)                                                                                                                                                                                                                                                                                                                                                          |
 | `PI_TINY_DTYPE`              | ONNX quantization/precision for local tiny models; overrides the `providers.tinyModelDtype` setting (default: each model's shipped dtype, currently `q4`; supports `auto`, `fp32`, `fp16`, `q8`, `int8`, `uint8`, `q4`, `bnb4`, `q4f16`, `q2`, `q2f16`, `q1`, `q1f16`)                                                                                                                                                                                                                                                                                                                                     |
 | `PI_NO_INTERLEAVED_THINKING` | If `1`, disables Anthropic interleaved thinking budget behavior and uses output-token inflation for older thinking mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |

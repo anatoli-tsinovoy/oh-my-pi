@@ -380,6 +380,23 @@ const CANCEL_RUN_GRACE: Duration = Duration::from_secs(5);
 #[cfg(not(windows))]
 const CANCEL_RUN_GRACE: Duration = Duration::from_secs(2);
 
+/// How long a cancelled POSIX run's processes get to finish TERM cleanup
+/// (traps, lock/marker removal) before the KILL wave.
+#[cfg(unix)]
+const TERM_GRACE: Duration = Duration::from_secs(1);
+
+/// Delay between cancellation and cancelling the output readers. Readers stay
+/// open so pipeline consumers can flush after their producers die, and so a
+/// TERM trap that writes output during [`TERM_GRACE`] does not hit EPIPE and
+/// die before finishing its cleanup. Windows needs a wider budget for the same
+/// reason as `CANCEL_RUN_GRACE`: the consumer's flush depends on the
+/// producer's exit becoming visible through several thread wakeups. The
+/// delayed fallback still releases readers whose writers never close.
+#[cfg(windows)]
+const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
+#[cfg(not(windows))]
+const CANCEL_READER_GRACE: Duration = Duration::from_millis(1250);
+
 async fn run_shell_session(
 	session: Arc<TokioMutex<Option<ShellSessionCore>>>,
 	abort_state: ShellAbortState,
@@ -461,8 +478,10 @@ async fn run_shell_session(
 	let _ = process_cancel_bridge.await;
 	abort_state.clear().await;
 
-	let keepalive = res.as_ref().is_ok_and(|(exec, ..)| session_keepalive(exec));
-	if !keepalive {
+	// `exit`, errexit, or a stray top-level `return`/`break` ends this command,
+	// not the session: the next run keeps the variables, functions, and options
+	// built so far. Only a failed run leaves the shell in an unknown state.
+	if res.is_err() {
 		*session.lock().await = None;
 	}
 	let (exec, minimized, working_dir) = res?;
@@ -840,7 +859,7 @@ async fn create_session_for_run(
 	// implementations that run without spawning a process and resolve paths
 	// against the shell working directory. The whole set can be disabled
 	// (falling back to system binaries) via PI_DISABLE_UUTILS_BUILTINS; the
-	// destructive set (`rm`, `mv`, `cp`, `ln`) additionally honors
+	// destructive set (`rm`, `mv`, `cp`, `ln`, `dd`) additionally honors
 	// PI_DISABLE_UUTILS_DESTRUCTIVE, and `rm`/`mv` have their own switches.
 	if !env_flag(config, "PI_DISABLE_UUTILS_BUILTINS") {
 		let destructive_disabled = env_flag(config, "PI_DISABLE_UUTILS_DESTRUCTIVE");
@@ -850,9 +869,9 @@ async fn create_session_for_run(
 			let disabled = match name {
 				"rm" => rm_disabled,
 				"mv" => mv_disabled,
-				// cp overwrites existing files, ln can clobber them via -f; gate
-				// both with the destructive set.
-				"cp" | "ln" => destructive_disabled,
+				// cp and dd (`of=`) overwrite existing files, ln can clobber them
+				// via -f; gate them with the destructive set.
+				"cp" | "ln" | "dd" => destructive_disabled,
 				_ => false,
 			};
 			if !disabled {
@@ -1282,7 +1301,7 @@ async fn run_shell_command_segmented_chain(
 			aggregate = None;
 		}
 
-		let keep_running = session_keepalive(&command_run.result) && !cancel_token.is_cancelled();
+		let keep_running = continues_command(&command_run.result) && !cancel_token.is_cancelled();
 		last_result = Some(command_run.result);
 		if !keep_running {
 			break;
@@ -1346,6 +1365,7 @@ async fn run_shell_command_once(
 	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
+	register_background_jobs(&session.shell, &spawn_registry);
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
 	// Only a buffered capture can be minimized, so only it asks for the report.
@@ -1380,16 +1400,6 @@ async fn run_shell_command_once(
 			}
 		}
 	});
-	// Let pipeline consumers flush output after cancellation kills their
-	// producers. The outer run cancellation remains bounded, and this delayed
-	// fallback still releases readers whose writers never close. Windows needs
-	// a wider budget for the same reason as `CANCEL_RUN_GRACE`: the consumer's
-	// flush depends on the producer's exit becoming visible through several
-	// thread wakeups.
-	#[cfg(windows)]
-	const CANCEL_READER_GRACE: Duration = Duration::from_millis(2000);
-	#[cfg(not(windows))]
-	const CANCEL_READER_GRACE: Duration = Duration::from_millis(500);
 	let cancel_bridge = tokio::spawn({
 		let cancel_token = cancel_token.clone();
 		let reader_cancel = reader_cancel.clone();
@@ -1413,7 +1423,7 @@ async fn run_shell_command_once(
 	drop(diagnostics);
 
 	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell);
+		terminate_background_jobs(&mut session.shell, &spawn_registry).await;
 	}
 
 	drop(params);
@@ -1520,6 +1530,7 @@ async fn run_shell_command_streams_in_filesystem(
 	params.set_fd(OpenFiles::STDOUT_FD, stdout_file);
 	params.set_fd(OpenFiles::STDERR_FD, stderr_file);
 	params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
+	register_background_jobs(&session.shell, &spawn_registry);
 	params.set_cancel_token(cancel_token.clone());
 	params.set_spawn_observer(spawn_registry.clone());
 	let reader_cancel = CancellationToken::new();
@@ -1544,6 +1555,7 @@ async fn run_shell_command_streams_in_filesystem(
 		let reader_cancel = reader_cancel.clone();
 		async move {
 			cancel_token.cancelled().await;
+			time::sleep(CANCEL_READER_GRACE).await;
 			reader_cancel.cancel();
 		}
 	});
@@ -1562,7 +1574,7 @@ async fn run_shell_command_streams_in_filesystem(
 	drop(diagnostics);
 
 	if cancel_token.is_cancelled() {
-		terminate_background_jobs(&mut session.shell);
+		terminate_background_jobs(&mut session.shell, &spawn_registry).await;
 	}
 
 	if env_scope_pushed {
@@ -1697,8 +1709,9 @@ impl SpawnObserver for process::SpawnRegistry {
 	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
 		// Pin a stable process reference *now*, before the pid can be recycled.
 		// On Windows an open handle keeps the pid slot reserved for the lifetime
-		// of the handle; on Linux the pidfd carries identity; on macOS the
-		// recorded start-time triple detects impersonation. Deferring the open
+		// of the handle; on Linux the pidfd carries identity; Android prefers a
+		// pidfd and otherwise records `/proc` start time; on macOS the recorded
+		// start-time triple detects impersonation. Deferring the open
 		// to `build_targets` (as the old code did) let a recycled pid resolve
 		// to an unrelated process — issue #4605.
 		let process = process::Process::from_pid(pid);
@@ -1732,41 +1745,54 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 			targets.signal(signal);
 		}
 		if wave + 1 < WAVES {
-			let pause = if wave == 0 {
-				Duration::from_millis(75)
+			if wave == 0 {
+				wait_for_term_grace(registry).await;
 			} else {
-				Duration::from_millis(150)
-			};
-			time::sleep(pause).await;
+				time::sleep(Duration::from_millis(150)).await;
+			}
 		}
 	}
 }
 
-fn terminate_background_jobs(shell: &mut BrushShell) {
-	let mut targets = process::TerminationTargets::new();
+#[cfg_attr(
+	not(unix),
+	expect(clippy::unused_async, reason = "the TERM grace wait only awaits on unix")
+)]
+async fn wait_for_term_grace(registry: &process::SpawnRegistry) {
+	// Windows TERM is already hard termination; there is no trap to wait for.
+	#[cfg(unix)]
+	{
+		let deadline = time::Instant::now() + TERM_GRACE;
+		while !registry.build_targets().is_empty() {
+			let now = time::Instant::now();
+			if now >= deadline {
+				break;
+			}
+			time::sleep_until((now + Duration::from_millis(25)).min(deadline)).await;
+		}
+	}
+	#[cfg(not(unix))]
+	let _ = registry;
+}
+
+fn register_background_jobs(shell: &BrushShell, registry: &process::SpawnRegistry) {
+	// Include retained session jobs in the same cancellation wave as new spawns.
+	for job in &shell.jobs().jobs {
+		let process = job
+			.representative_pid()
+			.and_then(process::Process::from_pid);
+		registry.record(job.process_group_id(), process);
+	}
+}
+
+async fn terminate_background_jobs(shell: &mut BrushShell, registry: &process::SpawnRegistry) {
+	// The run's cancellation bridge owns TERM/KILL, including background jobs.
+	// Aborting their internal tasks sooner drops ChildProcess and hard-kills
+	// children while their TERM traps are still running.
+	wait_for_term_grace(registry).await;
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
 	}
-	for job in &shell.jobs().jobs {
-		if let Some(pgid) = job.process_group_id() {
-			targets.add_pgid(pgid);
-		}
-		if let Some(pid) = job.representative_pid() {
-			targets.add_pid(pid);
-		}
-	}
-	if targets.is_empty() {
-		// Shell-internal jobs were aborted above. Pure descendant cleanup is
-		// handled by `process_cancel_bridge` while the cancel was in flight;
-		// without job-tracked pgids or pids there is nothing else to signal here.
-		return;
-	}
-
-	targets.signal(process::TERM_SIGNAL);
-	tokio::spawn(async move {
-		time::sleep(Duration::from_millis(150)).await;
-		targets.signal(process::KILL_SIGNAL);
-	});
 }
 
 /// Apply per-command environment variables onto a freshly pushed
@@ -1922,7 +1948,9 @@ fn ensure_trailing_newline_for_heredoc(command: &mut String) {
 	command.push('\n');
 }
 
-const fn session_keepalive(result: &ExecutionResult) -> bool {
+/// Whether the command goes on to its next segment; `exit`, errexit, and other
+/// non-normal control flow stop it (the session itself stays usable).
+const fn continues_command(result: &ExecutionResult) -> bool {
 	match result.next_control_flow {
 		ExecutionControlFlow::Normal => true,
 		ExecutionControlFlow::BreakLoop { .. } => false,
@@ -2206,7 +2234,6 @@ mod tests {
 	#[cfg(unix)]
 	use std::os::unix::process::ExitStatusExt as _;
 
-	#[cfg(unix)]
 	use tokio::process::Command;
 
 	use super::*;
@@ -2501,6 +2528,7 @@ mod tests {
 		(master, slave)
 	}
 
+	#[cfg(unix)]
 	async fn interactive_kill_test_context(
 		terminal_stdin: &fs::File,
 	) -> (ShellSessionCore, ExecutionParameters) {
@@ -4605,6 +4633,8 @@ mod tests {
 			"base64",
 			"basename",
 			"cat",
+			#[cfg(unix)]
+			"chmod",
 			"cksum",
 			"cmp",
 			"combine",
@@ -4612,15 +4642,22 @@ mod tests {
 			"cp",
 			"cut",
 			"date",
+			"dd",
+			"df",
 			"diff",
 			"dirname",
+			"du",
+			"env",
 			#[cfg(unix)]
 			"errno",
 			"fd",
 			"find",
+			"fold",
 			"grep",
 			"head",
 			"hostname",
+			#[cfg(unix)]
+			"id",
 			"ifne",
 			"isutf8",
 			"jq",
@@ -4630,13 +4667,16 @@ mod tests {
 			"mkdir",
 			"mktemp",
 			"mv",
+			"nl",
 			"nproc",
+			"od",
 			"paste",
 			"printenv",
 			"readlink",
 			"realpath",
 			"rg",
 			"rm",
+			"rmdir",
 			"sed",
 			"seq",
 			"sha1sum",
@@ -4656,6 +4696,7 @@ mod tests {
 			"ts",
 			"uname",
 			"uniq",
+			"uptime",
 			"wc",
 			"which",
 			"whoami",
@@ -6035,7 +6076,6 @@ mod tests {
 		}
 	}
 
-	#[cfg(unix)]
 	fn shell_test_lock() -> &'static TokioMutex<()> {
 		static LOCK: std::sync::OnceLock<TokioMutex<()>> = std::sync::OnceLock::new();
 		LOCK.get_or_init(|| TokioMutex::new(()))
@@ -6090,6 +6130,74 @@ mod tests {
 
 		assert_eq!(result.exit_code, Some(1));
 		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
+	}
+
+	/// Runs `command` on a dedicated single-worker runtime and fails after five
+	/// seconds. The deadline lives on the calling thread, so it still fires when
+	/// a builtin blocks the runtime's only worker.
+	#[cfg(unix)]
+	fn capture_on_single_worker(command: &'static str) -> (ShellExecuteResult, String) {
+		capture_on_runtime(command, 512)
+	}
+
+	/// [`capture_on_single_worker`] with the blocking pool capped at
+	/// `max_blocking_threads`.
+	#[cfg(unix)]
+	fn capture_on_runtime(
+		command: &'static str,
+		max_blocking_threads: usize,
+	) -> (ShellExecuteResult, String) {
+		let (tx, rx) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let runtime = tokio::runtime::Builder::new_multi_thread()
+				.worker_threads(1)
+				.max_blocking_threads(max_blocking_threads)
+				.enable_all()
+				.build()
+				.expect("single-worker runtime");
+			let _ = tx.send(runtime.block_on(run_command_capture(
+				command,
+				None,
+				None,
+				CancelToken::default(),
+			)));
+		});
+		rx.recv_timeout(Duration::from_secs(5))
+			.expect("read must not wait on a blocking worker it cannot get")
+	}
+
+	/// Owned-shell pipeline stages already hold a blocking worker. Two `read`
+	/// stages fill a two-thread pool; offloading each read again would queue it
+	/// behind the workers its own stages hold, forever.
+	#[cfg(unix)]
+	#[test]
+	fn pipeline_reads_do_not_nest_on_a_full_blocking_pool() {
+		let (result, output) =
+			capture_on_runtime("printf 'a\\n' | read -r x | read -r y; printf 'done\\n'", 2);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "done\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn read_process_substitution_assigns_line() {
+		let (result, output) =
+			capture_on_single_worker("read -r line < <(printf 'ok\\n'); printf '%s\\n' \"$line\"");
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "ok\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn read_process_substitution_delivers_lines_and_reaches_eof() {
+		let (result, output) = capture_on_single_worker(
+			"while IFS= read -r l; do export X=\"$l\"; done < <(printf 'v\\n'); printf '%s\\n' \"$X\"",
+		);
+
+		assert_eq!(result.exit_code, Some(0), "output: {output:?}");
+		assert_eq!(output, "v\n");
 	}
 
 	/// Builtins share the host process, so a descriptor path must reach the
@@ -6346,6 +6454,33 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 
 		// Dropping the shell at scope end reaps the child via kill-on-drop.
 		shell.abort().await;
+	}
+
+	/// `exit` and errexit end the command, not the session: later runs keep
+	/// the variables, functions, and options set before them.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn exit_and_errexit_keep_session_state() {
+		let _guard = shell_test_lock().lock().await;
+		let shell = Shell::new(None);
+		let exit_code = async |command: &str| {
+			shell
+				.run(
+					ShellRunOptions { command: command.into(), ..Default::default() },
+					None,
+					CancelToken::default(),
+				)
+				.await
+				.expect("run")
+				.exit_code
+		};
+		let state_intact = "test \"$PI_KEPT\" = kept && pi_kept_fn";
+
+		assert_eq!(exit_code("set -e; PI_KEPT=kept; pi_kept_fn() { true; }").await, Some(0));
+		assert_eq!(exit_code("false; true").await, Some(1), "errexit stops the command");
+		assert_eq!(exit_code(state_intact).await, Some(0), "state lost after errexit");
+		assert_eq!(exit_code("exit 3").await, Some(3));
+		assert_eq!(exit_code(state_intact).await, Some(0), "state lost after exit");
+		assert_eq!(exit_code("false; exit 0").await, Some(1), "errexit option lost");
 	}
 
 	/// `Shell::pids` reports the in-flight run's live external children without
@@ -6838,6 +6973,119 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			child_sid, child_pid,
 			"child PID {child_pid} should be its own session leader after setsid",
 		);
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancellation_allows_background_term_cleanup_while_builtin_is_running() {
+		let _guard = shell_test_lock().lock().await;
+		let root = tempfile::tempdir().expect("cleanup directory");
+		let script = root.path().join("cleanup.sh");
+		fs::write(
+			&script,
+			"trap 'sleep 0.2; printf cleaned >> cleaned; exit 0' TERM\n: > ready\nwhile :; do :; \
+			 done\n",
+		)
+		.expect("cleanup script");
+		let shell = Shell::new(None);
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
+		let task = tokio::spawn(async move {
+			shell
+				.run(
+					ShellRunOptions {
+						command: "sh cleanup.sh & sleep 30".into(),
+						cwd: Some(cwd),
+						..Default::default()
+					},
+					None,
+					cancel,
+				)
+				.await
+		});
+		time::timeout(Duration::from_secs(5), async {
+			while !root.path().join("ready").exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("background child ready");
+		abort.abort(AbortReason::Signal);
+		let result = time::timeout(Duration::from_secs(5), task)
+			.await
+			.expect("cancel finished")
+			.expect("run task")
+			.expect("shell result");
+		assert!(result.cancelled);
+		assert_eq!(fs::read_to_string(root.path().join("cleaned")).expect("TERM cleanup"), "cleaned");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cancellation_keeps_output_open_for_a_term_trap_that_writes() {
+		let _guard = shell_test_lock().lock().await;
+		let root = tempfile::tempdir().expect("cleanup directory");
+		fs::write(
+			root.path().join("cleanup.sh"),
+			"trap 'sleep 0.7; echo flushing; printf cleaned > cleaned; exit 0' TERM\n: > \
+			 ready\nwhile :; do :; done\n",
+		)
+		.expect("cleanup script");
+		let shell = Shell::new(None);
+		let mut cancel = CancelToken::default();
+		let abort = cancel.emplace_abort_token();
+		let cwd = root.path().to_str().expect("utf8 cwd").to_owned();
+		let task = tokio::spawn(async move {
+			shell
+				.run(
+					ShellRunOptions {
+						command: "sh cleanup.sh".into(),
+						cwd: Some(cwd),
+						..Default::default()
+					},
+					None,
+					cancel,
+				)
+				.await
+		});
+		time::timeout(Duration::from_secs(5), async {
+			while !root.path().join("ready").exists() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("child ready");
+		abort.abort(AbortReason::Signal);
+		let result = time::timeout(Duration::from_secs(5), task)
+			.await
+			.expect("cancel finished")
+			.expect("run task")
+			.expect("shell result");
+		assert!(result.cancelled);
+		assert_eq!(
+			fs::read_to_string(root.path().join("cleaned"))
+				.expect("TERM cleanup after writing output"),
+			"cleaned"
+		);
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn termination_returns_early_after_the_child_exits() {
+		let mut command = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+		if cfg!(windows) {
+			command.args(["/c", "ping -n 30 127.0.0.1"]);
+		} else {
+			command.args(["-c", "exec sleep 30"]);
+		}
+		let mut child = command.kill_on_drop(true).spawn().expect("child");
+		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits");
+		let registry = process::SpawnRegistry::new();
+		registry.record(None, process::Process::from_pid(pid));
+		let started = time::Instant::now();
+		let ((), status) = tokio::join!(terminate_run(&registry), child.wait());
+		assert!(status.is_ok(), "terminated child must be reaped");
+		assert!(started.elapsed() < Duration::from_millis(750), "exited child consumed TERM grace");
 	}
 
 	/// Cancelling one `Shell::run` must only signal processes spawned by that

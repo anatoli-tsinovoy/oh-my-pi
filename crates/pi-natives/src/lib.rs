@@ -27,8 +27,10 @@ pub mod applefm;
 pub mod ast;
 pub mod audio;
 pub mod block;
+#[cfg(not(target_os = "android"))]
 pub mod clipboard;
 pub mod crash_handler;
+#[cfg(not(target_os = "android"))]
 pub mod desktop;
 pub mod devicecheck;
 pub mod diff;
@@ -49,6 +51,7 @@ pub mod ipc;
 pub mod js;
 pub mod keys;
 pub mod live;
+pub mod memory;
 pub mod mermaid;
 pub mod oauth_callback;
 /// PDF inspection and Markdown conversion.

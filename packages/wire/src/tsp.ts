@@ -49,6 +49,7 @@ export const TSP_KINDS = [
 	"ansi",
 	"math",
 	"image",
+	"media",
 	"kv",
 	"table",
 	"tree",
@@ -164,7 +165,7 @@ export interface TspColProps {
 }
 export interface TspRowProps {
 	gap?: TspSpace;
-	align?: "start" | "center" | "baseline" | "end";
+	align?: "start" | "center" | "baseline" | "end" | "stretch";
 	justify?: "start" | "between" | "end";
 	wrap?: boolean;
 }
@@ -211,7 +212,9 @@ export interface TspMarkdownProps {
 }
 export interface TspCodeProps {
 	text?: string;
+	/** The language of text that is no file's (`bash`, `json`); wins over `path`. */
 	lang?: string;
+	/** The file the text comes from: the terminal picks the grammar from it (and heads a block outside a tool card with it). */
 	path?: string;
 	start?: number;
 	numbers?: boolean;
@@ -229,7 +232,9 @@ export interface TspDiffProps {
 	/** Unified diff text (or give `hunks`). */
 	text?: string;
 	hunks?: readonly TspDiffHunk[];
+	/** The file the diff changes: the terminal picks the grammar from it. Not drawn. */
 	path?: string;
+	/** A language overriding the one `path` gives. */
 	lang?: string;
 	mode?: "unified" | "split" | "auto";
 }
@@ -256,6 +261,20 @@ export interface TspImageProps {
 	alt?: string;
 	w?: number;
 	h?: number;
+	max?: { w?: TspExtent; h?: TspExtent };
+}
+/**
+ * A file the terminal loads by path and shows in its media viewer (pictures, SVG, 3D models,
+ * PDF/video/audio, else a card). Programs check `cx.supports("media")` first.
+ */
+export interface TspMediaProps {
+	/** The file: absolute, or relative to the pane's working directory. */
+	path: string;
+	/** Git revision to read instead of the disk file: a commit-ish (`HEAD`, a sha) or `:0` for the index. */
+	rev?: string;
+	/** `media` nodes of one surface sharing this name pan and zoom together (before/after compare). */
+	link?: string;
+	/** Size cap; the node otherwise fills its container. */
 	max?: { w?: TspExtent; h?: TspExtent };
 }
 export interface TspKvProps {
@@ -414,7 +433,7 @@ export interface TspPickerItem {
 	detail?: TspText;
 	/** Leading visual: a named icon, a provider/avatar mark, or a status dot. */
 	icon?: string;
-	mark?: { text: string; seed?: string };
+	mark?: TspPickerMark;
 	dot?: TspTone;
 	/** Label is a machine string (model id, path): mono, dim prefix and strong tail by the `/`. */
 	mono?: boolean;
@@ -437,6 +456,17 @@ export interface TspPickerItem {
 	title?: string;
 }
 
+/**
+ * A picker avatar: the `icon` when the terminal has it (`provider:<id>` names a
+ * model provider's logo by its id), else up to two initials of `text` on a
+ * gradient picked by `seed` (default `text`).
+ */
+export interface TspPickerMark {
+	text: string;
+	seed?: string;
+	icon?: string;
+}
+
 /** A right-aligned fact column in a picker. */
 export interface TspPickerColumn {
 	id: string;
@@ -454,7 +484,7 @@ export interface TspPickerScope {
 	id: string;
 	label: TspText;
 	icon?: string;
-	mark?: { text: string; seed?: string };
+	mark?: TspPickerMark;
 	count?: number;
 	/** Group heading this scope sits under (consecutive scopes with the same group share a head). */
 	group?: string;
@@ -803,6 +833,7 @@ export interface TspPropsByKind {
 	ansi: TspAnsiProps;
 	math: TspMathProps;
 	image: TspImageProps;
+	media: TspMediaProps;
 	kv: TspKvProps;
 	table: TspTableProps;
 	tree: TspTreeProps;
