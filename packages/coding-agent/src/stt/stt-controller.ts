@@ -174,11 +174,23 @@ export class STTController {
 			// models can still warm in the background while recording.
 			const spec = resolveSttModelSpec(modelKey);
 			const online = spec.engine === "sherpa" && spec.mode === "online";
+			// Cached non-streaming models warm in the background. Downloads remain
+			// foreground work so recording never starts without the model weights.
+			// Cached-model warmup must not clear an unrelated status line.
+			let wroteStatus = false;
 			if (!online && (await isSttModelCached(modelKey))) {
 				this.#warmModel(modelKey);
 			} else {
-				await downloadSttModel(modelKey, undefined, { signal });
+				await downloadSttModel(
+					modelKey,
+					progress => {
+						wroteStatus = true;
+						options.showStatus(`Downloading speech model ${progress.label} (${progress.percent}%)`);
+					},
+					{ signal },
+				);
 			}
+			if (wroteStatus) options.showStatus("");
 			this.#resolvedModelKey = modelKey;
 			return modelKey;
 		} catch (err) {
