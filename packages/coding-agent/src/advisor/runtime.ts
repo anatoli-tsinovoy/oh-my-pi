@@ -3,6 +3,7 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { raceWithSignal } from "@oh-my-pi/pi-ai/utils/abort";
 import { logger } from "@oh-my-pi/pi-utils";
+import { isEvalStateContext } from "../eval/state";
 import {
 	collectNativeReplayRegexSecretValues,
 	obfuscateNativeReplay,
@@ -254,13 +255,6 @@ interface CatchupWaiter {
 	timer?: NodeJS.Timeout;
 }
 
-/**
- * Synthetic message `AgentSession.#withEvalStateContext` appends at the tail of
- * every display-context rebuild; its slot moves each time, so
- * {@link AdvisorRuntime.rebaseDeliveredPrefix} does not align on it.
- */
-const EVAL_STATE_CONTEXT_TYPE = "eval-state-context";
-
 interface DeliveredMessage {
 	message: AgentMessage;
 	fingerprint: bigint | undefined;
@@ -348,9 +342,9 @@ export class AdvisorRuntime {
 	 *  being retried/requeued into the post-reset conversation. */
 	#epoch = 0;
 	disposed = false;
-	/** Quota/rate-limit pause state. When `true`, the advisor stops processing
-	 *  turns and drops new deltas until an explicit {@link reset} clears it
-	 *  (triggered by `/new`, config rebuild, or session restart). There is no
+	/** Quota/usage-limit pause state. When `true`, the advisor stops processing
+	 *  turns and drops new deltas until a {@link reset} clears it (compaction,
+	 *  image drop, shake, session switch, rebuild, or restart). There is no
 	 *  timer-based auto-resume: provider quota windows (5h/7d) are far longer
 	 *  than any reasonable timer, and premature retries waste calls and
 	 *  re-trigger the same error. */
@@ -736,7 +730,7 @@ export class AdvisorRuntime {
 		const rebased: DeliveredMessage[] = [];
 		for (const delivered of this.#deliveredPrefix) {
 			const message = delivered.message;
-			if (message.role === "custom" && message.customType === EVAL_STATE_CONTEXT_TYPE) continue;
+			if (isEvalStateContext(message)) continue;
 			const current = all[rebased.length];
 			if (current === undefined) return;
 			const fingerprint = fingerprintMessage(current);
@@ -1749,7 +1743,7 @@ function obfuscateAssistantMessage(
 			const args = obfuscateToolArguments(obfuscator, block.arguments, sharedRegexSecretValues);
 			if (args === block.arguments) return block;
 			changed = true;
-			return { ...block, arguments: args };
+			return { ...block, arguments: args, thoughtSignature: undefined };
 		}
 		return block;
 	});

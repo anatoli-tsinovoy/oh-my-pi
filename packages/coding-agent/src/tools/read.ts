@@ -1,4 +1,4 @@
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath, type ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -24,10 +24,12 @@ import {
 	isProbablyBinaryHeader,
 	isEnoent,
 	logger,
+	parseHeifImageMimeType,
 	parseImageMetadata,
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
+import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import {
 	cfgIdaAvailable,
 	EXECUTABLE_SNIFF_BYTES,
@@ -36,7 +38,7 @@ import {
 	isIdaDatabasePath,
 } from "../ida";
 import { normalizeToLF } from "../edit/normalize";
-import { getEditStore } from "../edit/store";
+import { getEditStore, recordFullySeenRows } from "../edit/store";
 import {
 	extractUriScheme,
 	type InternalResource,
@@ -63,7 +65,7 @@ import {
 } from "../utils/block-context";
 import { isCpuProfilePath, renderCpuProfile } from "../utils/cpuprofile";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { loadImageInput, loadSvgImageInput } from "../utils/image-loading";
+import { loadHeifImageInput, loadImageInput, loadSvgImageInput } from "../utils/image-loading";
 import {
 	ImageInputTooLargeError,
 	InvalidImageDataError,
@@ -77,13 +79,21 @@ import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import {
 	formatConflictSummary,
 	formatConflictWarning,
+	formatScanCapNote,
 	getConflictHistory,
 	recoverConflictUriPrefix,
 	scanConflictLines,
 	scanFileForConflicts,
 } from "./conflict-detect";
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
-import { postProcessToolResult, resolveOutputMaxColumns } from "./output-meta";
+import { approvalDirectoryKey } from "./approval-cache";
+import { approvalTargetKey, approvalTargetNamesFile, isApprovalPublicUrl } from "./approval-targets";
+import {
+	postProcessToolResult,
+	resolveArtifactSpillThreshold,
+	resolveInlineByteCapBudget,
+	resolveOutputMaxColumns,
+} from "./output-meta";
 import {
 	expandPath,
 	formatPathRelativeToCwd,
@@ -93,6 +103,7 @@ import {
 	splitDelimitedPathEntry,
 	splitMixedUrlPathList,
 	splitPathAndSelPreferringLiteral,
+	splitPathAndSelPreferringLiteralSync,
 } from "./path-utils";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
@@ -128,6 +139,7 @@ import {
 	type SuffixMatchCache,
 } from "./read-path-resolution";
 import { type PdfImageReadTarget, renderPdfPageScreenshot, splitPdfImageReadPath } from "./read-pdf";
+import { ternShowsMedia } from "./tern-media";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import {
 	VideoError,
@@ -334,15 +346,10 @@ function collectLineWindowFromBuffer(
 	maxLinesToCollect: number,
 	maxBytes: number,
 	selectedLineLimit: number,
-	includeTerminalNewline: boolean,
 ): ReadLineWindow {
 	const { bytes, rawSegments, endsWithNewline } = file;
-	// A trailing LF closes the last line rather than opening an empty one, except
-	// in raw mode where that terminal sentinel is addressable.
-	const totalFileLines =
-		endsWithNewline && !includeTerminalNewline && rawSegments.length > 1
-			? rawSegments.length - 1
-			: rawSegments.length;
+	// A trailing LF closes the last addressable line.
+	const totalFileLines = endsWithNewline && rawSegments.length > 1 ? rawSegments.length - 1 : rawSegments.length;
 	const window: ReadLineWindow = {
 		lines: [],
 		totalFileLines,
@@ -435,7 +442,6 @@ function sameSeekFileIdentity(identity: SeekFileIdentity, stat: SeekFileIdentity
 }
 
 interface StreamFileLinesOptions {
-	includeTerminalNewline?: boolean;
 	stopScanAfterCollect?: boolean;
 	/**
 	 * Start scanning at byte `byte`, which begins 0-indexed line `line` (`line <= startLine`).
@@ -454,7 +460,7 @@ async function streamLinesFromFile(
 	signal?: AbortSignal,
 	options: StreamFileLinesOptions = {},
 ): Promise<ReadLineWindow> {
-	const { includeTerminalNewline = false, stopScanAfterCollect = false, seek } = options;
+	const { stopScanAfterCollect = false, seek } = options;
 	const bufferChunk = Buffer.allocUnsafe(READ_CHUNK_SIZE);
 	const collectedLines: string[] = [];
 	let lineIndex = seek?.line ?? 0;
@@ -641,7 +647,7 @@ async function streamLinesFromFile(
 		}
 	}
 
-	if (reachedEof && (currentLineLength > 0 || !sawAnyByte || (endedWithNewline && includeTerminalNewline))) {
+	if (reachedEof && (currentLineLength > 0 || !sawAnyByte)) {
 		finalizeLine();
 	}
 
@@ -691,9 +697,8 @@ async function resolveFileTailSelector(
 	signal?: AbortSignal,
 ): Promise<ResolvedFileTail> {
 	if (parsed.kind !== "tail") return { sel: parsed };
-	const includeTerminalNewline = parsed.raw === true;
 	if (buffered) {
-		const totalLines = collectLineWindowFromBuffer(buffered, 0, 0, 0, 0, includeTerminalNewline).totalFileLines;
+		const totalLines = collectLineWindowFromBuffer(buffered, 0, 0, 0, 0).totalFileLines;
 		return { sel: resolveTailSelector(parsed, totalLines) };
 	}
 
@@ -728,11 +733,9 @@ async function resolveFileTailSelector(
 	}
 	// A write during the scan leaves offsets that the identity no longer vouches for.
 	if (position !== identity.size) identity = { ...identity, ino: -1 };
-	// Mirror the streamer's final-line rule: an empty file, an unterminated last
-	// line, or (raw mode) the empty segment after a terminal newline is a line.
-	const endsWithNewline = lastByte === LF_BYTE;
-	const hasFinalLine = position === 0 || !endsWithNewline || includeTerminalNewline;
-	const totalLines = newlines + (hasFinalLine ? 1 : 0);
+	// Mirror the streamer's final-line rule: an empty file or an unterminated
+	// last line contributes one line; a terminal newline closes the last line.
+	const totalLines = newlines + (position === 0 || lastByte !== LF_BYTE ? 1 : 0);
 	return {
 		sel: resolveTailSelector(parsed, totalLines),
 		seekTo: line =>
@@ -753,6 +756,19 @@ interface LocatedRead {
 	path: string;
 	sel?: string;
 	spec: SchemeSpec;
+}
+
+interface FilesystemReadOptions {
+	located?: LocatedRead;
+	question?: string;
+	/** Model-facing path for `?q=` hints; defaults to the displayed file path. */
+	questionPath?: string;
+	signal?: AbortSignal;
+	onBufferedFile?: (bytes: Buffer) => void;
+	onConflictMarkers?: () => void;
+	lexicalAbsolutePath?: string;
+	/** The read's tool context: `rawImages` keeps image routing under `:raw`, and split reads pass it on. */
+	toolContext?: AgentToolContext;
 }
 
 /**
@@ -834,7 +850,16 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	const tracker = holder[kRepeatReadTracker];
 	if (tracker.size > REPEAT_READ_TRACKER_CAP) tracker.clear();
 
-	const hash = Bun.hash.xxHash64(block.text);
+	let hash = BigInt(result.content.length);
+	for (const content of result.content) {
+		hash = Bun.hash.wyhash(content.type, hash);
+		if (content.type === "text") {
+			hash = Bun.hash.wyhash(content.text, hash);
+		} else if (content.type === "image") {
+			hash = Bun.hash.wyhash(content.mimeType, hash);
+			hash = Bun.hash.wyhash(content.data, hash);
+		}
+	}
 	const entry = tracker.get(path);
 	if (!entry || entry.hash !== hash) {
 		tracker.set(path, { hash, count: 1 });
@@ -969,6 +994,38 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		readPath = splitImageQuestionTarget(readPath).path;
 		const target = splitPathAndSel(readPath);
 		return target.sel === undefined && splitPdfImageReadPath(readPath) ? "exec" : "read";
+	};
+	/**
+	 * `always-ask-cached` key: the file this read targets, with every selector
+	 * (`:120-140`, `:raw`, `:img`, `?q=`) peeled, so all reads of one file share
+	 * a single grant. Internal-URL targets keep their normalized form.
+	 *
+	 * Public web reads (`http(s)://`, `www.`) report no key at all: their
+	 * contents are already public, so the cached mode allows them like a
+	 * listing instead of asking, and there is nothing to remember. The legacy
+	 * PDF image-member syntax keeps its target — that read is exec-tier, and
+	 * its remembered grant is what silences the prompt.
+	 */
+	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
+		const rawPath = args && typeof args === "object" && "path" in args ? String(args.path ?? "") : "";
+		if (rawPath.length === 0) return undefined;
+		const withoutImageQuestion = splitImageQuestionTarget(rawPath).path;
+		// Authorization must key what execution reads: an existing literal file like `notes:1` is
+		// read literally, so its grant belongs to `notes:1`, not to `notes`.
+		const { path: selectorless, sel } = splitPathAndSelPreferringLiteralSync(withoutImageQuestion, this.session.cwd);
+		if (isReadableUrlPath(selectorless) && !(sel === undefined && splitPdfImageReadPath(withoutImageQuestion))) {
+			// Nobody needs permission to read a public page, so those stay ungated. A private host —
+			// loopback, a private or link-local address, a single-label intranet name — is reachable
+			// only from inside this machine or network, so it is gated like a file.
+			if (isApprovalPublicUrl(selectorless)) return undefined;
+		}
+		const key = approvalTargetKey(this.session.cwd, selectorless);
+		if (key === undefined) return undefined;
+		// A directory read lists that folder itself, so it keys as the folder grant: approving it
+		// covers the folder's own entries, and a parent folder's grant never authorizes reading a
+		// subfolder's contents.
+		if (path.isAbsolute(key) && !approvalTargetNamesFile(key)) return [approvalDirectoryKey(key)];
+		return [key];
 	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
@@ -1148,14 +1205,20 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 	async #tryReadDelimitedPaths(
 		readPath: string,
-		signal?: AbortSignal,
+		signal: AbortSignal | undefined,
+		toolContext: AgentToolContext | undefined,
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
 		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
-		return parts ? this.#readDelimitedParts(parts, signal) : null;
+		return parts ? this.#readDelimitedParts(parts, signal, toolContext) : null;
 	}
 
-	async #readDelimitedParts(parts: string[], signal?: AbortSignal): Promise<AgentToolResult<ReadToolDetails>> {
+	/** Read each part as its own call; `toolContext` carries flags such as `rawImages` into every part. */
+	async #readDelimitedParts(
+		parts: string[],
+		signal: AbortSignal | undefined,
+		toolContext: AgentToolContext | undefined,
+	): Promise<AgentToolResult<ReadToolDetails>> {
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
 		const content: Array<TextContent | ImageContent> = [];
@@ -1173,7 +1236,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		for (const part of parts) {
 			try {
-				const result = await this.execute("read-delimited-part", { path: part }, signal);
+				const result = await this.execute("read-delimited-part", { path: part }, signal, undefined, toolContext);
 				const nestedTargets = result.details?.displayReadTargets;
 				if (nestedTargets?.length) {
 					const nestedLinks = result.details?.displayReadTargetLinks;
@@ -1211,8 +1274,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	/**
 	 * Reinterpret a read target pointing at a video file. Timestamp selectors
 	 * (`clip.mp4:1h5m42s`, `clip.mp4:0:05`) never survive line-selector parsing,
-	 * so peel one off the raw path whenever the base names an existing video
-	 * file; a literal file named by the full path (colon included) still wins.
+	 * so peel one off the raw path whenever it parses as a video frame or
+	 * timestamp selector; a literal file named by the peeled path wins, and
+	 * `splitPathAndSelPreferringLiteral` already reports the full entry as the
+	 * peeled path whenever that entry exists. The base does not have to sit in
+	 * the session cwd: unique workspace suffixes still resolve it, and a genuinely
+	 * missing file then reports its path instead of a colon-mangled one.
 	 */
 	async #applyVideoSelectorFallback(
 		literalSplit: { path: string; sel?: string },
@@ -1220,8 +1287,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): Promise<{ path: string; sel?: string }> {
 		const videoSplit = splitVideoReadTarget(readPath);
 		if (!videoSplit) return literalSplit;
-		if ((await probeLiteralPathExists(videoSplit.path, this.session.cwd)) === "missing") return literalSplit;
-		if ((await probeLiteralPathExists(readPath, this.session.cwd)) === "exists") return literalSplit;
+		if ((await probeLiteralPathExists(literalSplit.path, this.session.cwd)) === "exists") return literalSplit;
 		return videoSplit;
 	}
 
@@ -1373,7 +1439,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		mimeType: string;
 		imageMetadata: ImageMetadata | null;
 		fileSize: number;
-		imageKind?: "svg";
+		imageKind?: "svg" | "heif";
 		question?: string;
 		questionPath?: string;
 		signal?: AbortSignal;
@@ -1419,11 +1485,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const imageInput =
 				imageKind === "svg"
 					? await loadSvgImageInput(imageLoadOptions)
-					: await loadImageInput({ ...imageLoadOptions, detectedMimeType: mimeType });
+					: imageKind === "heif"
+						? await loadHeifImageInput({ ...imageLoadOptions, detectedMimeType: mimeType }, signal)
+						: await loadImageInput({ ...imageLoadOptions, detectedMimeType: mimeType });
 			if (!imageInput) {
 				throw new ToolError(
 					imageKind === "svg"
-						? "The ':img' selector only supports .svg and .svgz files."
+						? "The ':img' selector only rasterizes .svg and .svgz files. Read a raster image such as PNG or JPEG without ':img'."
 						: `Read image file [${mimeType}] failed: unsupported image format.`,
 				);
 			}
@@ -1481,6 +1549,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		outputText: string;
 		columnCut: ColumnCut | undefined;
 		displayContent?: { text: string; startLine: number; lineNumbers?: Array<number | null> };
+		rowPrefixes?: boolean;
 		bridgeResult?: AgentToolResult<ReadToolDetails>;
 	}> {
 		const rawSelector = isRawSelector(parsed);
@@ -1521,6 +1590,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const displayLineByNumber = new Map<number, string>();
 		const fullLines = rawSelector ? undefined : buffered?.addressableLines;
 		let columnCut: ColumnCut | undefined;
+		let cutLines: Set<number> | undefined;
 		let displayContent: { text: string; startLine: number; lineNumbers?: Array<number | null> } | undefined;
 
 		for (const range of ranges) {
@@ -1530,23 +1600,28 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 			// The file is already in memory for everything within the snapshot byte
 			// cap, so slice ranges out of it instead of re-streaming per range. Raw
-			// mode cannot use the addressable lines (it keeps CR bytes and the
-			// terminal newline sentinel) but still slices the same buffer.
+			// mode keeps CR bytes, so it slices the original segments instead.
 			let collectedLines: string[];
 			let totalFileLines: number;
+			let endsAtTerminalNewline = false;
 			const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLines * 512);
 			if (fullLines) {
 				totalFileLines = fullLines.length;
 				collectedLines = fullLines.slice(rangeStart, rangeStart + maxLines);
 			} else {
 				const window = buffered
-					? collectLineWindowFromBuffer(buffered, rangeStart, maxLines, maxBytesForRead, maxLines, rawSelector)
+					? collectLineWindowFromBuffer(buffered, rangeStart, maxLines, maxBytesForRead, maxLines)
 					: await streamLinesFromFile(absolutePath, rangeStart, maxLines, maxBytesForRead, maxLines, signal, {
-							includeTerminalNewline: rawSelector,
 							stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
 						});
 				totalFileLines = window.totalFileLines;
 				collectedLines = window.lines;
+				// An open raw range that reaches EOF keeps the file's terminal newline, as single-range reads do.
+				endsAtTerminalNewline =
+					range.endLine === undefined &&
+					window.reachedEof &&
+					window.hasTrailingNewline &&
+					rangeStart + collectedLines.length === totalFileLines;
 			}
 
 			if (rangeStart >= totalFileLines) {
@@ -1566,6 +1641,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						if (!cloned) cloned = collectedLines.slice();
 						cloned[i] = text;
 						columnCut = addColumnCut(columnCut, maxColumns, range.startLine + i);
+						(cutLines ??= new Set()).add(range.startLine + i);
 					}
 				}
 				if (cloned) displayLines = cloned;
@@ -1577,7 +1653,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					displayLineByNumber.set(range.startLine + i, displayLines[i] ?? "");
 				}
 				if (!fullLines || rawSelector) {
-					const blockText = displayLines.join("\n");
+					const blockText = displayLines.join("\n") + (rawSelector && endsAtTerminalNewline ? "\n" : "");
 					blocks.push(formatTextWithMode(blockText, range.startLine, shouldAddHashLines, shouldAddLineNumbers));
 				}
 			}
@@ -1600,6 +1676,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const truncated = truncateLine(sourceText, maxColumns);
 						if (truncated.wasTruncated) {
 							columnCut = addColumnCut(columnCut, maxColumns, lineNumber);
+							(cutLines ??= new Set()).add(lineNumber);
 						}
 						return truncated.text;
 					},
@@ -1620,7 +1697,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				? getEditStore(this.session).recordSnapshot(absolutePath, buffered.normalizedText)
 				: getEditStore(this.session).recordSnapshotFile(absolutePath);
 			if (tag) {
-				getEditStore(this.session).recordSeenLinesFromBody(absolutePath, tag, outputText);
+				recordFullySeenRows(getEditStore(this.session), absolutePath, tag, outputText, cutLines);
 				outputText = `${formatReadHashlineHeader(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag)}\n${outputText}`;
 			}
 		} else if (rawSelector && visibleSpans.length > 0) {
@@ -1636,7 +1713,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (notices.length > 0) {
 			outputText = outputText ? `${outputText}\n${notices.join("\n")}` : notices.join("\n");
 		}
-		return { outputText, columnCut, displayContent };
+		return { outputText, columnCut, displayContent, rowPrefixes: shouldAddHashLines || shouldAddLineNumbers };
 	}
 
 	async execute(
@@ -1658,7 +1735,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		params: ReadParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
-		_toolContext?: AgentToolContext,
+		toolContext?: AgentToolContext,
 		onBufferedFile?: (bytes: Buffer) => void,
 		onConflictMarkers?: () => void,
 		lexicalAbsolutePath?: string,
@@ -1675,7 +1752,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			this.session.cwd,
 			part => parseReadUrlTarget(part) !== null || InternalUrlRouter.instance().canResolve(part),
 		);
-		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal);
+		if (mixedParts) return this.#readDelimitedParts(mixedParts, signal, toolContext);
 		const imageQuestion = splitImageQuestionTarget(readPath);
 		readPath = imageQuestion.path;
 		const question = imageQuestion.question;
@@ -1691,7 +1768,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				const entry = await fetchReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
 					ensureArtifact: true,
 				});
-				return buildInMemorySelectorResult(this.session, entry.output, urlSel, {
+				return buildInMemorySelectorResult(this.session, entry.content, urlSel, {
 					details: { ...entry.details },
 					sourceUrl: entry.details.finalUrl,
 					entityLabel: "URL output",
@@ -1704,7 +1781,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.
 		const internalRouter = InternalUrlRouter.instance();
 		const delimitedInternalResult = internalRouter.canResolve(readPath)
-			? await this.#tryReadDelimitedPaths(readPath, signal, entry => internalRouter.canResolve(entry))
+			? await this.#tryReadDelimitedPaths(readPath, signal, toolContext, entry => internalRouter.canResolve(entry))
 			: null;
 		if (delimitedInternalResult) return delimitedInternalResult;
 
@@ -1733,6 +1810,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				onBufferedFile,
 				onConflictMarkers,
 				lexicalAbsolutePath,
+				toolContext,
 			});
 		}
 		// A located URL reads its backing file through the filesystem pipeline (images, `:img`,
@@ -1742,6 +1820,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			question,
 			questionPath: readPath,
 			signal,
+			toolContext,
 		});
 		const details: ReadToolDetails = result.details ?? {};
 		details.resolvedPath ??= located.path;
@@ -1763,22 +1842,36 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 * The filesystem read pipeline: directories, archives, sqlite, PDFs, video,
 	 * images, documents, notebooks, and streamed/paged text. `located` carries
 	 * the URL a routed read resolved to `readPath`; its hints name that URL.
+	 * A whole read of a file Tern's media viewer shows records it as display-only
+	 * `details.mediaPath`, whatever content the model receives.
 	 */
 	async #readFilesystemPath(
 		readPath: string,
-		options: {
-			located?: LocatedRead;
-			question?: string;
-			/** Model-facing path for `?q=` hints; defaults to the displayed file path. */
-			questionPath?: string;
-			signal?: AbortSignal;
-			onBufferedFile?: (bytes: Buffer) => void;
-			onConflictMarkers?: () => void;
-			lexicalAbsolutePath?: string;
-		},
+		options: FilesystemReadOptions,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const { located, question, questionPath, signal, onBufferedFile, onConflictMarkers, lexicalAbsolutePath } =
-			options;
+		const media: { path?: string } = {};
+		const result = await this.#readFilesystemPipeline(readPath, options, media);
+		if (media.path === undefined || result.isError) return result;
+		return { ...result, details: { ...result.details, mediaPath: media.path } };
+	}
+
+	/** {@link #readFilesystemPath}'s body; sets `media.path` once the read is known to be a whole Tern-viewable file. */
+	async #readFilesystemPipeline(
+		readPath: string,
+		options: FilesystemReadOptions,
+		media: { path?: string },
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		const {
+			located,
+			question,
+			questionPath,
+			signal,
+			onBufferedFile,
+			onConflictMarkers,
+			lexicalAbsolutePath,
+			toolContext,
+		} = options;
+		const rawImages = toolContext?.rawImages === true;
 		const immutable = located?.spec.immutable === true;
 		const displayMode = resolveFileDisplayMode(this.session, { immutable });
 		// In-body continuation hints name the URL for located reads, so paging stays on the URL.
@@ -1821,7 +1914,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (sqlitePath) {
 				return readSqlite(sqlitePath, signal);
 			}
-			const jsonPath = await resolveJsonReadPath(this.session, literalSplit.path, suffixCache, signal);
+			// local:// and artifact:// locate backing files without their URL query;
+			// restore it only for JSON reads, leaving other schemes' query semantics alone.
+			const jsonQuery = located?.url.indexOf("?") ?? -1;
+			const jsonScheme = jsonQuery >= 0 && located ? extractUriScheme(located.url) : null;
+			const jsonReadPath =
+				located && (jsonScheme === "local" || jsonScheme === "artifact")
+					? `${literalSplit.path}${located.url.slice(jsonQuery)}`
+					: literalSplit.path;
+			const jsonPath = await resolveJsonReadPath(this.session, jsonReadPath, suffixCache, signal);
 			if (jsonPath) {
 				return readJson(this.session, jsonPath, literalSplit.sel, signal);
 			}
@@ -1877,7 +1978,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				// workspace scan, but only after literal/archive/sqlite resolution so
 				// real resources containing semicolons retain precedence.
 				if (readPath.includes(";")) {
-					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 					if (delimitedResult) return delimitedResult;
 				}
 				// Attempt unique suffix resolution before falling back to the approved-plan
@@ -1918,7 +2019,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				}
 
 				if (!recoveredApprovedPlan && !suffixResolution) {
-					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
+					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal, toolContext);
 					if (delimitedResult) return delimitedResult;
 					throw new ToolError(`Path '${localReadPath}' not found`);
 				}
@@ -1980,6 +2081,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				.done();
 		}
 
+		// Whole-file reads only (no selector, `:raw`, `:img`); line ranges and video frames show their slice.
+		if (
+			(localTarget.sel === undefined || parsed.kind === "raw" || parsed.kind === "image") &&
+			ternShowsMedia(absolutePath)
+		) {
+			media.path = absolutePath;
+		}
+
 		const ext = path.extname(renderAbsolutePath).toLowerCase();
 		// Buffer once for every consumer below: the image sniff, the binary sniff,
 		// the structural summary, the rendered window, bracket context, and the
@@ -1989,31 +2098,36 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// unbuffered files keep one centralized 256KB peek regardless of
 		// extension, since only magic bytes — never the name — decide.
 		const wholeFileBytes = fileSize <= SNAPSHOT_MAX_BYTES ? await readWholeFile(absolutePath) : undefined;
-		const imageHeader = wholeFileBytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES);
-		const imageMetadata = isRawSelector(parsed)
-			? null
-			: imageHeader !== undefined
-				? parseImageMetadata(imageHeader)
-				: await readImageMetadata(absolutePath);
+		const imageHeader =
+			isRawSelector(parsed) && !rawImages
+				? undefined
+				: (wholeFileBytes?.subarray(0, IMAGE_METADATA_HEADER_BYTES) ??
+					(await peekFile(absolutePath, IMAGE_METADATA_HEADER_BYTES, header => header)));
+		const imageMetadata = imageHeader ? parseImageMetadata(imageHeader) : null;
 		const mimeType = imageMetadata?.mimeType;
+		// HEIC, AVIF and other HEIF stills reach the model decoded by ffmpeg instead of as binary.
+		const heifMimeType = imageHeader && !mimeType ? parseHeifImageMimeType(imageHeader) : null;
 		const resolvedDisplayPath = located?.url ?? formatPathRelativeToCwd(renderAbsolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
-		// replace the raw dump with a bottleneck summary (hot paths, top self
-		// time/samples). `:raw` reads the original bytes; text that merely wears
-		// the extension falls through to the plain-text path.
-		if (!mimeType && !isRawSelector(parsed) && fileSize <= MAX_PROFILE_SUMMARY_BYTES) {
+		// a whole-file read gets a bottleneck summary (hot paths, top self
+		// time/samples) instead of the raw dump. Line selectors and `:raw` read the
+		// file itself, so their line numbers and snapshot tag are the file's; text
+		// that merely wears the extension falls through to the plain-text path.
+		if (!mimeType && parsed.kind === "none" && fileSize <= MAX_PROFILE_SUMMARY_BYTES) {
 			let rendered: string | null = null;
 			if (isSampleProfilePath(renderAbsolutePath))
 				rendered = renderSampleProfile(await Bun.file(absolutePath).text());
 			else if (isCpuProfilePath(renderAbsolutePath))
 				rendered = renderCpuProfile(await Bun.file(absolutePath).text());
 			if (rendered) {
-				return buildInMemorySelectorResult(this.session, rendered, parsed, {
-					details: { resolvedPath: renderAbsolutePath },
-					sourcePath: renderAbsolutePath,
-					entityLabel: "profile summary",
-				});
+				// One unnumbered document: `:N` addresses the file, so the summary carries no row
+				// numbers, snapshot tag or `:N` continuation, and no line count that would mark it a
+				// complete read of the file. An oversized summary goes to the central artifact spill.
+				return toolResult<ReadToolDetails>({ resolvedPath: renderAbsolutePath })
+					.text(rendered)
+					.sourcePath(renderAbsolutePath)
+					.done();
 			}
 		}
 		// Read the file based on type
@@ -2057,6 +2171,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				mimeType,
 				imageMetadata,
 				fileSize,
+				question,
+				questionPath,
+				signal,
+			}));
+		} else if (heifMimeType) {
+			({ content, details, sourcePath } = await this.#loadImageContent({
+				readPath,
+				absolutePath,
+				mimeType: heifMimeType,
+				imageMetadata: null,
+				fileSize,
+				imageKind: "heif",
 				question,
 				questionPath,
 				signal,
@@ -2199,6 +2325,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					}
 					details = {
 						displayContent: { text: renderedSummary.displayText, startLine: 1 },
+						rowPrefixes: renderedSummary.rowPrefixes,
 						summary: {
 							lines: countTextLines(renderedSummary.text),
 							elidedSpans: renderedSummary.elidedRanges.length,
@@ -2228,7 +2355,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
-					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
+					details = {
+						...(multiResult.displayContent && { displayContent: multiResult.displayContent }),
+						rowPrefixes: multiResult.rowPrefixes,
+					};
 					columnCut = multiResult.columnCut;
 				} else {
 					// Raw text or line-range mode
@@ -2270,41 +2400,67 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const requestedStart = offset ? Math.max(0, offset - 1) : 0;
 					const expandStart = !rawSelector && offset !== undefined && offset > 1;
 					const expandEnd = !rawSelector && limit !== undefined;
-					const leadingContext = expandStart ? Math.min(requestedStart, RANGE_LEADING_CONTEXT_LINES) : 0;
+					let leadingContext = expandStart ? Math.min(requestedStart, RANGE_LEADING_CONTEXT_LINES) : 0;
 					const trailingContext = expandEnd ? RANGE_TRAILING_CONTEXT_LINES : 0;
-					const startLine = requestedStart - leadingContext;
-					const startLineDisplay = startLine + 1;
+					let startLine = requestedStart - leadingContext;
+					let startLineDisplay = startLine + 1;
 
 					const DEFAULT_LIMIT = this.#defaultLimit;
 					const effectiveLimit = limit ?? DEFAULT_LIMIT;
-					const maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
-					const selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
-					// Scale byte budget with line limit so the configured line count actually fits.
-					// Assume ~512 bytes/line average; never go below the shared default.
-					const maxBytesForRead = Math.max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512);
+					let maxLinesToCollect = Math.min(effectiveLimit + leadingContext + trailingContext, DEFAULT_MAX_LINES);
+					let selectedLineLimit = effectiveLimit + leadingContext + trailingContext;
+					// Scale byte budget with line limit so the configured line count actually fits
+					// (~512 bytes/line, never below the shared default). Pages that would otherwise
+					// spill also stop at the spill threshold: past it the page would be middle-elided
+					// into an artifact, while stopping here pages at a line boundary with an exact
+					// `:N` continuation. Row prefixes (`N|`/`N:`) count against that threshold, so
+					// their worst-case width is reserved (at most half the threshold). Artifact-storage
+					// pages never spill, so they keep the full budget.
+					const budgetFor = (firstLine: number, lineCount: number): number => {
+						const scaled = Math.max(DEFAULT_MAX_BYTES, lineCount * 512);
+						if (located?.spec.artifactStore) return scaled;
+						const threshold = resolveArtifactSpillThreshold(this.session.settings);
+						const prefixWidth =
+							!rawSelector && displayMode.lineNumbers ? String(firstLine + lineCount).length + 1 : 0;
+						const prefixReserve = Math.min(lineCount * prefixWidth, Math.floor(threshold / 2));
+						return Math.min(scaled, threshold - prefixReserve);
+					};
+					const collectWindow = async (
+						firstLine: number,
+						lineCount: number,
+						maxBytes: number,
+						selectedLimit: number,
+					) =>
+						buffered
+							? collectLineWindowFromBuffer(buffered, firstLine, lineCount, maxBytes, selectedLimit)
+							: await streamLinesFromFile(
+									absolutePath,
+									firstLine,
+									lineCount,
+									maxBytes,
+									selectedLimit,
+									undefined,
+									{
+										stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
+										seek: tailSeekTo?.(firstLine),
+									},
+								);
+					let maxBytesForRead = budgetFor(startLine, maxLinesToCollect);
 
-					const lineWindow = buffered
-						? collectLineWindowFromBuffer(
-								buffered,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-								rawSelector,
-							)
-						: await streamLinesFromFile(
-								absolutePath,
-								startLine,
-								maxLinesToCollect,
-								maxBytesForRead,
-								selectedLineLimit,
-								undefined, // plain-file read: deterministic and fast, never abort mid-read
-								{
-									includeTerminalNewline: rawSelector,
-									stopScanAfterCollect: fileSize > SNAPSHOT_MAX_BYTES,
-									seek: tailSeekTo?.(startLine),
-								},
-							);
+					let lineWindow = await collectWindow(startLine, maxLinesToCollect, maxBytesForRead, selectedLineLimit);
+
+					// Leading context is optional padding. If the byte budget stopped
+					// before any requested line, retry from the requested start so an
+					// oversized context line cannot hide the page that was asked for.
+					if (leadingContext > 0 && lineWindow.stoppedByByteLimit && lineWindow.lines.length < leadingContext) {
+						leadingContext = 0;
+						startLine = requestedStart;
+						startLineDisplay = startLine + 1;
+						maxLinesToCollect = Math.min(effectiveLimit + trailingContext, DEFAULT_MAX_LINES);
+						selectedLineLimit = effectiveLimit + trailingContext;
+						maxBytesForRead = budgetFor(startLine, maxLinesToCollect);
+						lineWindow = await collectWindow(startLine, maxLinesToCollect, maxBytesForRead, selectedLineLimit);
+					}
 
 					const {
 						lines: collectedLines,
@@ -2343,6 +2499,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					// ellipsis-truncated text made every long-line file uneditable on
 					// the next edit attempt.
 					let displayLines: string[] = collectedLines;
+					let cutLines: Set<number> | undefined;
 					if (!rawSelector && maxColumns > 0) {
 						let cloned: string[] | undefined;
 						for (let i = 0; i < collectedLines.length; i++) {
@@ -2351,6 +2508,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								if (!cloned) cloned = collectedLines.slice();
 								cloned[i] = text;
 								columnCut = addColumnCut(columnCut, maxColumns, startLineDisplay + i);
+								(cutLines ??= new Set()).add(startLineDisplay + i);
 							}
 						}
 						if (cloned) displayLines = cloned;
@@ -2363,7 +2521,16 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const bracketContextFullLines = rawSelector ? undefined : buffered?.addressableLines;
 					const displayedEndLine = startLineDisplay + Math.max(0, displayLines.length - 1);
 
-					const selectedContent = displayLines.join("\n");
+					let selectedContent = displayLines.join("\n");
+					if (
+						rawSelector &&
+						limit === undefined &&
+						reachedEof &&
+						hasTrailingNewline &&
+						startLine + displayLines.length === totalFileLines
+					) {
+						selectedContent += "\n";
+					}
 					const userLimitedLines = collectedLines.length;
 
 					const totalSelectedLines = totalFileLines - startLine;
@@ -2463,6 +2630,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									const truncated = truncateLine(sourceText, maxColumns);
 									if (truncated.wasTruncated) {
 										columnCut = addColumnCut(columnCut, maxColumns, lineNumber);
+										(cutLines ??= new Set()).add(lineNumber);
 									}
 									return truncated.text;
 								},
@@ -2528,7 +2696,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								maxBytesForRead,
 								`${selectorBase}:raw:${lineNumber}-${lineNumber}`,
 							)}`;
-						} else {
+						} else if (!rawSelector || limit === undefined || userLimitedLines < limit) {
 							outputText += `\n\n[More lines in file (${formatBytes(
 								fileSize,
 							)} total; not scanned to EOF). Use ${selectorBase}:${nextOffset} to continue]`;
@@ -2557,7 +2725,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								maxBytes: maxBytesForRead,
 							},
 						};
-					} else if (startLine + userLimitedLines < totalFileLines) {
+					} else if (!rawSelector && startLine + userLimitedLines < totalFileLines) {
 						const nextOffset = startLine + userLimitedLines + 1;
 
 						outputText = formatBracketAwareText() ?? formatText(selectedContent, startLineDisplay);
@@ -2573,9 +2741,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						sourcePath = renderAbsolutePath;
 					}
 					if (reachedEof) details.totalLines = totalFileLines;
+					details.rowPrefixes = shouldAddHashLines || shouldAddLineNumbers;
 
 					if (hashContext?.tag) {
-						getEditStore(this.session).recordSeenLinesFromBody(absolutePath, hashContext.tag, outputText);
+						recordFullySeenRows(getEditStore(this.session), absolutePath, hashContext.tag, outputText, cutLines);
 					}
 					if (rawSelector && !immutable && !firstLineExceedsLimit && collectedLines.length > 0) {
 						// A raw read emits no header, but recording the range it displayed
@@ -2609,28 +2778,33 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							// Cheap full-file scan only when the window already showed
 							// at least one conflict — otherwise pay nothing on clean files.
 							let totalInFile = entries.length;
-							let scanTruncated = false;
+							let truncatedAtLine: number | undefined;
 							try {
 								const fileScan = await scanFileForConflicts(absolutePath);
 								totalInFile = Math.max(entries.length, fileScan.blocks.length);
-								scanTruncated = fileScan.scanTruncated;
+								truncatedAtLine = fileScan.truncatedAtLine;
 							} catch {
 								// Best-effort enrichment; fall back to window-only count.
 							}
 							outputText += formatConflictWarning(entries, {
 								totalInFile,
 								displayPath: displayPathForWarning,
-								scanTruncated,
+								truncatedAtLine,
 							});
 							details.conflictCount = entries.length;
 						}
 					}
 
 					content = [{ type: "text", text: outputText }];
+					// `maxBytesForRead` bounds only the selected source lines; row prefixes and
+					// off-window block context ride on top. Skip the spill only while the final page
+					// still fits the inline cap, so block context can never bypass the bound.
+					pagedSource =
+						Buffer.byteLength(outputText, "utf-8") <= resolveInlineByteCapBudget(this.session.settings);
 				}
 			}
 			// A page of artifact storage is re-readable with selectors: spilling it would only
-			// duplicate it into another artifact. Every other located read spills like a plain file.
+			// duplicate it into another artifact. Every other unpaged located read spills like a plain file.
 			if (located?.spec.artifactStore) pagedSource = true;
 			// Immutable sources have no write path, so the hint never lands in a written-back file.
 			if (located && immutable && !isRawSelector(parsed) && fileSize > MAX_URL_RAW_INLINE_BYTES) {
@@ -2697,10 +2871,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}),
 		);
 
-		const summary =
-			entries.length === 0
-				? `No unresolved git merge conflicts in ${displayPath}.`
-				: formatConflictSummary(entries, { displayPath, scanTruncated: scan.scanTruncated });
+		let summary: string;
+		if (entries.length > 0) {
+			summary = formatConflictSummary(entries, { displayPath, truncatedAtLine: scan.truncatedAtLine });
+		} else if (scan.truncatedAtLine !== undefined) {
+			summary = `No unresolved git merge conflicts before line ${scan.truncatedAtLine} of ${displayPath}.\n${formatScanCapNote(displayPath, scan.truncatedAtLine)}`;
+		} else {
+			summary = `No unresolved git merge conflicts in ${displayPath}.`;
+		}
 
 		const details: ReadToolDetails = {
 			resolvedPath: absolutePath,

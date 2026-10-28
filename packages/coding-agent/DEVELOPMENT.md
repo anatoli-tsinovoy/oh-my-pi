@@ -22,6 +22,31 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Autofix: lint + format prompts | `bun run fix` |
 | Build the `dist/omp` binary | `bun run build` |
 
+## Optional Android ARM64 standalone binary
+
+From a Linux build host, run:
+
+```sh
+bun --cwd=packages/coding-agent run build:android
+```
+
+Set `ANDROID_NDK_HOME` to Android NDK 25b or newer and use released Bun 1.4.4
+on the Linux build host. The optional Linux cross-build builds the `android-arm64`
+native addon with Bazel, then compiles the CLI for Bun's
+`bun-linux-arm64-android` target. It writes the raw standalone executable to
+`packages/coding-agent/dist/omp-android-arm64`; the Bun runtime is included, so
+Termux does not need a separate Bun installation. The bundled Bun 1.4.4 runtime
+targets Android 9 (API 28), while the native addon targets API 24.
+
+To install a published binary from Termux, use:
+
+```sh
+curl -fsSL https://omp.sh/install | sh -s -- --binary
+```
+
+Cross-compilation does not verify Android/Termux or seccomp compatibility;
+validate the executable on a native non-root Termux device before publishing.
+
 Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
 with `bun run gen:tool-views`.
@@ -29,6 +54,13 @@ with `bun run gen:tool-views`.
 Scope fake timers to the deadline a test exercises, then restore real timers
 before real socket listeners are started. Bun's mocked clock can defer
 `server.listen` callbacks, leaving registry publication and teardown waiting.
+
+Tests that call `setAgentDir()` must snapshot and restore `PI_CODING_AGENT_DIR`,
+`OMP_PROFILE`, and `PI_PROFILE` for each test, then call
+`__resetDirsFromEnvForTests()` after restoration. Home-directory discovery fixtures
+must clear and restore `PI_CODING_AGENT_DIR` so inherited overrides cannot bypass
+the fixture. Reuse `restoreEnvValue()` from `test/helpers/settings-test-state.ts`
+to preserve unset values.
 
 ## Boot flow
 

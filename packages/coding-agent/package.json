@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.10.1",
+	"version": "18.13.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -15,7 +15,10 @@
 		"url": "https://github.com/can1357/oh-my-pi/issues"
 	},
 	"license": "MIT",
-	"author": { "name": "Stencil Labs, Inc.", "url": "https://stencil.so" },
+	"author": {
+		"name": "Stencil Labs, Inc.",
+		"url": "https://stencil.so"
+	},
 	"contributors": [
 		"Mario Zechner"
 	],
@@ -33,6 +36,7 @@
 		"dist/docs-index.generated.txt",
 		"dist/CHANGELOG-*.md",
 		"dist/*.node",
+		"dist/*.json-*.zst",
 		"dist/template-*.css",
 		"dist/template-*.html",
 		"dist/template-*.js",
@@ -521,6 +525,7 @@
 	},
 	"scripts": {
 		"build": "bun scripts/build-binary.ts",
+		"build:android": "bun scripts/build-android-binary.ts",
 		"check": "oxlint . && oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts' && bun run check:types",
 		"check:types": "tsgo -p tsconfig.json --noEmit",
 		"lint": "oxlint .",

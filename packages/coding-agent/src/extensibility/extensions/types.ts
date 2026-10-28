@@ -37,6 +37,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	Api,
 	AssistantMessage,
@@ -256,6 +257,39 @@ export interface ExtensionCustomOptions {
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 
+/** The renderings of a tool-approval prompt passed to `ExtensionUIContext.approve()`. */
+export interface ExtensionApprovalPrompt {
+	full: string;
+	compact: string;
+	/** Label of the "approve for this session" choice; absent when the call must be approved each time. */
+	session?: string;
+	/**
+	 * Grants an `always-ask-cached` prompt can remember, in display order; absent otherwise. A host
+	 * that does not render them still answers `once`/`session`/`deny`.
+	 */
+	grants?: readonly ExtensionApprovalGrant[];
+}
+
+/** One remembered-approval choice of an `always-ask-cached` prompt. */
+export interface ExtensionApprovalGrant {
+	/** `folder`: the directory around the call, its own entries only; `target`: the exact file or URL. */
+	scope: "folder" | "target";
+	/** Label of the choice remembered for this session, e.g. `Approve Directory: ~/src`. */
+	label: string;
+	/** Label of the same choice remembered across sessions, e.g. `Always Approve Directory: ~/src`. */
+	alwaysLabel: string;
+}
+
+/**
+ * An answer to `ExtensionUIContext.approve()`: this call only, later like calls this session too,
+ * one of the prompt's {@link ExtensionApprovalPrompt.grants} (`always`: across sessions), or no.
+ */
+export type ExtensionApprovalAnswer =
+	| "once"
+	| "session"
+	| "deny"
+	| { grant: ExtensionApprovalGrant["scope"]; always: boolean };
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -290,6 +324,17 @@ export interface ExtensionUIContext {
 		questions: ExtensionAskDialogQuestion[],
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined>;
+
+	/**
+	 * Show a tool-approval prompt; anything but an explicit approval is `deny`, `session` only when
+	 * the prompt offers it, and a grant only one the prompt lists. Each prompt is a title line then
+	 * details: `compact` summarizes the tool's own details (command, path, content) to one row for a
+	 * host with little room, `full` keeps them whole. Absent: callers fall back to a `select`.
+	 */
+	approve?(
+		prompt: ExtensionApprovalPrompt,
+		dialogOptions?: ExtensionUIDialogOptions,
+	): Promise<ExtensionApprovalAnswer>;
 
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -366,6 +411,9 @@ export interface ExtensionUIContext {
 	setEditorComponent(
 		factory: ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined,
 	): void;
+
+	/** Get the current custom editor factory, if one has been installed. */
+	getEditorComponent(): ((tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => CustomEditor) | undefined;
 
 	/** Get the current theme for styling. */
 	readonly theme: Theme;
@@ -501,7 +549,7 @@ export type AnnotationDiffSource =
 	| { kind: "diff"; diff: string; label?: string }
 	/** Staged + unstaged (or jj working-copy) changes in the live session cwd. */
 	| { kind: "uncommitted" }
-	/** A GitHub PR: `https://github.com/owner/repo/pull/N` or `pr://owner/repo/N`. */
+	/** A GitHub PR or GitLab MR: `https://github.com/owner/repo/pull/N`, `pr://owner/repo/N`, `https://<host>/<group>/<project>/-/merge_requests/N`, or `mr://<host>/<group>/<project>/N/diff`. */
 	| { kind: "pr"; ref: string };
 
 export type AnnotationSource = AnnotationTextSource | AnnotationDiffSource;
@@ -653,6 +701,33 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Gracefully shutdown and exit. */
 	shutdown(): void;
+	/**
+	 * Answer the open interactive plan review as if the operator picked `choice` in it.
+	 * `refine` needs non-empty `input.feedback`, which is sent as the next planning prompt.
+	 * `save` writes the plan under its default file name without the path prompt.
+	 * Approvals execute the plan as it is when picked (in-overlay edits, else the plan
+	 * file), which may differ from the `planContent` that `plan_review_requested` reported.
+	 * `input.role` selects an approval's execution tier, matched against `plan_review_requested`'s
+	 * `tiers` by role name; without it the approval runs on the tier selected in the
+	 * overlay's model slider. `role` applies only to approvals (`execute`, `compact`, `keep`).
+	 * False when that review is not open, the choice is disabled or missing its feedback,
+	 * `input.role` names no selectable tier or accompanies a non-approval choice, or the
+	 * mode has no plan review.
+	 */
+	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string; role?: string }): boolean;
+	/**
+	 * The open interactive plan review still awaiting an answer, as `plan_review_requested` reported it,
+	 * or `undefined`. Lets an extension that loaded or reconnected after the event answer the review.
+	 */
+	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
+	/**
+	 * Open the interactive plan review on the newest plan file, like `/plan-review`, while the
+	 * session is idle. True once a review is awaiting an answer (an already-open review is kept,
+	 * not replaced), without waiting for a choice. False, without aborting anything or showing
+	 * warnings, when plan mode is inactive, the agent is streaming or compacting, or no non-empty
+	 * plan file exists.
+	 */
+	openPlanReview(): Promise<boolean>;
 	/** Identity of the agent this session runs: the top-level session or a subagent. */
 	agent: ExtensionAgentIdentity;
 	/**
@@ -829,6 +904,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Tool approval tier. Defaults to `"exec"` when omitted.
 	 *  `"read"`: read-only operations. `"write"`: mutations. `"exec"`: code execution. */
 	approval?: ToolApproval;
+	/** Exact targets an approval mode may remember for this call (`always-ask-cached`), one key per
+	 *  target, derived from the call's args. Omit it and approvals are never remembered per target. */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 	/** Structured-output strict grammar opt-in/out. `false` is meaningful: OpenAI-family
 	 *  serializers preserve an explicit `strict: false` on the wire (#4336/#4340). */
 	strict?: boolean;
@@ -836,6 +914,8 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** MCP read-only annotation, independent of the approval tier. */
+	mcpReadOnlyHint?: boolean;
 	/** Previous public name when a rename changed minting. Forwarded through
 	 *  RegisteredToolAdapter so approval falls back to legacy `deny`/`prompt`. */
 	legacyName?: string;
@@ -981,9 +1061,14 @@ export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
 	type: "after_provider_response";
 }
 
-/** Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider. */
+/**
+ * Fired before an ordinary prompt or an actually dequeued user-containing batch reaches the provider
+ * (`reason: "prompt"`), and once with an empty `prompt` when a parked subagent is revived
+ * (`reason: "revive"`, result discarded).
+ */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
+	reason: "prompt" | "revive";
 	/** Already-transformed text; queued batches join user messages with two newlines, excluding agent companions. */
 	prompt: string;
 	/** Already-normalized user images in delivery order. */
@@ -1203,6 +1288,51 @@ export interface ToolApprovalResolvedEvent {
 	reason?: string;
 }
 
+/** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
+export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
+/** A choice as displayed in the interactive plan review, delivered in display order by `plan_review_requested`. */
+export interface PlanReviewOption {
+	id: PlanReviewChoice;
+	label: string;
+	disabled: boolean;
+}
+/** An execution tier selectable in the plan review's model slider; pass `role` back as `input.role` to `ctx.resolvePlanReview`. */
+export interface PlanReviewTier {
+	role: string;
+	provider: string;
+	model: string;
+	/** Thinking level the role's configured model pins (a `provider/model:high` suffix); absent when it inherits. */
+	thinkingLevel?: ConfiguredThinkingLevel;
+}
+
+/**
+ * The interactive plan review opened (interactive mode only). Resolve it with `ctx.resolvePlanReview`.
+ * `plan_review_resolved` waits until every handler of this event returns, so handlers should hand
+ * long work (a remote round-trip, a dialog) off rather than await it.
+ */
+export interface PlanReviewRequestedEvent {
+	type: "plan_review_requested";
+	reviewId: string;
+	sessionId: string;
+	title: string;
+	planFilePath: string;
+	planContent: string;
+	options: PlanReviewOption[];
+	/** Execution tiers in slider order (not selection order); omitted when fewer than two resolve. */
+	tiers?: PlanReviewTier[];
+}
+/**
+ * The plan review closed: a choice, or `undefined` when it was dismissed or cancelled (session switch,
+ * replacement review, shutdown). `by` is `"extension"` only for a choice made via `ctx.resolvePlanReview`.
+ */
+export interface PlanReviewResolvedEvent {
+	type: "plan_review_resolved";
+	reviewId: string;
+	sessionId: string;
+	choice: PlanReviewChoice | undefined;
+	by: "local" | "extension";
+}
+
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
@@ -1379,7 +1509,9 @@ export type ExtensionEvent =
 	| ToolCallEvent
 	| ToolResultEvent
 	| ToolApprovalRequestedEvent
-	| ToolApprovalResolvedEvent;
+	| ToolApprovalResolvedEvent
+	| PlanReviewRequestedEvent
+	| PlanReviewResolvedEvent;
 
 // ============================================================================
 // Event Results
@@ -1582,6 +1714,8 @@ export interface ExtensionAPI {
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_approval_requested", handler: ExtensionHandler<ToolApprovalRequestedEvent>): void;
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
+	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
+	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
@@ -2036,6 +2170,13 @@ export interface ExtensionContextActions {
 	abort: () => void;
 	hasPendingMessages: () => boolean;
 	shutdown: () => void;
+	resolvePlanReview?: (
+		reviewId: string,
+		choice: PlanReviewChoice,
+		input?: { feedback?: string; role?: string },
+	) => boolean;
+	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
+	openPlanReview?: () => Promise<boolean>;
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
@@ -2079,6 +2220,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** Set once the extension calls `registerProvider`; providers feed startup model resolution. */
+	registersProviders?: boolean;
 }
 
 /**

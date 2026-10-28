@@ -38,7 +38,9 @@ interface AppKeybindings {
 	"app.tools.expand": true;
 	"app.tools.toggleVisibility": true;
 	"app.ask.hide": true;
+	"app.approval.approve": true;
 	"app.editor.external": true;
+	"app.local.open": true;
 	"app.message.followUp": true;
 	"app.retry": true;
 	"app.message.dequeue": true;
@@ -57,8 +59,8 @@ interface AppKeybindings {
 	"app.session.rename": true;
 	"app.session.delete": true;
 	"app.session.deleteNoninvasive": true;
-	"app.tree.foldOrUp": true;
-	"app.tree.unfoldOrDown": true;
+	"app.tree.previousBranch": true;
+	"app.tree.nextBranch": true;
 	"app.plan.toggle": true;
 	"app.history.search": true;
 	"app.stt.pushToTalk": true;
@@ -143,9 +145,19 @@ export const KEYBINDINGS = {
 		defaultKeys: "alt+h",
 		description: "Hide or show a pending ask dialog",
 	},
+	"app.approval.approve": {
+		// A chord, not Enter: an Enter typed for the composer as the prompt appears must not approve.
+		// Ctrl+Q backs up Ctrl+Enter, which Windows Terminal cannot deliver (#1903).
+		defaultKeys: ["ctrl+enter", "ctrl+q"],
+		description: "Approve a pending tool call",
+	},
 	"app.editor.external": {
 		defaultKeys: "ctrl+g",
 		description: "Open external editor",
+	},
+	"app.local.open": {
+		defaultKeys: "alt+g",
+		description: "Open a local:// file in external editor",
 	},
 	"app.message.followUp": {
 		// Ctrl+Enter is preserved for terminals that deliver it (Kitty/iTerm2/WezTerm/Ghostty),
@@ -227,13 +239,13 @@ export const KEYBINDINGS = {
 		defaultKeys: "ctrl+backspace",
 		description: "Delete session (non-invasive)",
 	},
-	"app.tree.foldOrUp": {
-		defaultKeys: ["ctrl+left", "alt+left"],
-		description: "Fold or move up",
+	"app.tree.previousBranch": {
+		defaultKeys: [],
+		description: "Jump to the previous branch in /tree",
 	},
-	"app.tree.unfoldOrDown": {
-		defaultKeys: ["ctrl+right", "alt+right"],
-		description: "Unfold or move down",
+	"app.tree.nextBranch": {
+		defaultKeys: [],
+		description: "Jump to the next branch in /tree",
 	},
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",

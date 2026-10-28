@@ -44,8 +44,16 @@ const DEFAULT_TERMINAL_TITLE = "π";
 const NATIVE_TERMINAL_TITLE = "omp";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 
+/**
+ * Console titles longer than this read back truncated, so they always count
+ * as drifted: harmless, it only re-sets the same title.
+ */
+const CONSOLE_TITLE_READ_CHARS = 1024;
+
 interface WindowsConsoleTitleApi {
 	set(title: string): boolean;
+	/** The live console title, or `undefined` when it cannot be read. */
+	get(): string | undefined;
 	close(): void;
 }
 
@@ -58,11 +66,19 @@ function getWindowsConsoleTitleApi(): WindowsConsoleTitleApi | null {
 	try {
 		const kernel32 = dlopen("kernel32.dll", {
 			SetConsoleTitleW: { args: [FFIType.ptr], returns: FFIType.bool },
+			GetConsoleTitleW: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
 		});
+		const readBuffer = new Uint16Array(CONSOLE_TITLE_READ_CHARS);
 		windowsConsoleTitleApi = {
 			set(title) {
 				const wideTitle = Buffer.from(`${title}\0`, "utf16le");
 				return kernel32.symbols.SetConsoleTitleW(ptr(wideTitle));
+			},
+			get() {
+				readBuffer.fill(0);
+				if (kernel32.symbols.GetConsoleTitleW(ptr(readBuffer), readBuffer.length) === 0) return undefined;
+				const end = readBuffer.indexOf(0);
+				return Buffer.from(readBuffer.buffer, 0, (end < 0 ? readBuffer.length : end) * 2).toString("utf16le");
 			},
 			close: () => kernel32.close(),
 		};
@@ -84,6 +100,25 @@ function setWindowsConsoleTitle(title: string): boolean {
 			// Ignore cleanup failures after the native title path has already failed.
 		}
 		windowsConsoleTitleApi = null;
+		return false;
+	}
+}
+
+/**
+ * Whether the live console title differs from `title`, the one omp last set.
+ * The console title is shared by every process attached to the console, so a
+ * child (a worker, `browser-relay`, an npm `.cmd` shim's `title`) can replace
+ * it behind the dedupe cache. Unreadable titles and the latched OSC fallback
+ * report no drift, keeping the dedupe in force.
+ */
+function windowsConsoleTitleDrifted(title: string): boolean {
+	if (terminalTitleRuntime.nativeTitleFailed) return false;
+	const api = getWindowsConsoleTitleApi();
+	if (!api) return false;
+	try {
+		const live = api.get();
+		return live !== undefined && live !== title;
+	} catch {
 		return false;
 	}
 }
@@ -573,7 +608,8 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
 /**
  * Set the terminal title through the native Win32 API or OSC 0.
  *
- * Repeating the same sanitized title is a no-op on every platform.
+ * Repeating the same sanitized title is a no-op on every platform, unless
+ * another process replaced the Windows console title in between.
  */
 export function setTerminalTitle(title: string): void {
 	writeTerminalTitle(title);
@@ -599,7 +635,7 @@ function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): vo
 	if (terminalTitleRuntime.disposed) return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
-	if (next === lastTerminalTitle) return;
+	if (next === lastTerminalTitle && !windowsConsoleTitleDrifted(next)) return;
 	if (!setWindowsConsoleTitle(next)) {
 		// Native path failed on a Windows console: every later frame would cross
 		// ConPTY as OSC and reintroduce the write-loop CPU cost the static
@@ -668,6 +704,12 @@ export function nerdGlyphsActive(): boolean {
 
 /** The OSC 1337 user variable Tern reads the session file from. */
 const TERN_SESSION_FILE_VAR = "omp_session_file";
+/**
+ * The OSC 1337 user variable telling Tern this omp understands `--restore`, set to
+ * `1` before each session file report: Tern's daemon then relaunches it after a
+ * crash with `--restore <file>` instead of `--resume <file>`.
+ */
+const TERN_RESTORE_VAR = "omp_restore";
 
 /** The live session as Tern hears about it (read from the interactive session manager). */
 export interface TerminalSessionSource {
@@ -699,8 +741,8 @@ export function setTerminalSessionSource(source: TerminalSessionSource | undefin
 /**
  * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) what changed about the session:
  * the file as an OSC 1337 user variable holding its absolute path in base64 (no
- * file removes the variable), and the working directory as OSC 7
- * (`file://host/path`), as a shell reports it at each prompt.
+ * file removes the variable), preceded by {@link TERN_RESTORE_VAR}, and the working
+ * directory as OSC 7 (`file://host/path`), as a shell reports it at each prompt.
  */
 export function reportTernSession(): void {
 	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
@@ -710,6 +752,7 @@ export function reportTernSession(): void {
 	if (resolvedFile !== reportedSessionFile) {
 		reportedSessionFile = resolvedFile;
 		const value = resolvedFile ? `=${Buffer.from(resolvedFile).toString("base64")}` : "";
+		if (resolvedFile) writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_RESTORE_VAR}=MQ==\x07`);
 		writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
 	}
 	// Without a session the shell takes the directory back at its next prompt.

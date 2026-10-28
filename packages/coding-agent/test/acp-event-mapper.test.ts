@@ -100,6 +100,8 @@ class ReplayTestSession {
 
 	setClientBridge(_bridge: unknown): void {}
 
+	setMcpServerInstructionsSource(_source: unknown): void {}
+
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}
@@ -488,6 +490,30 @@ describe("ACP event mapper", () => {
 			expect(JSON.stringify(update.content)).not.toContain("blob:sha256:");
 			expect(JSON.stringify(update.rawOutput)).toContain(blobRef);
 		}
+	});
+
+	it("settles a backgrounded call with its job's final frame and keeps running frames in progress", () => {
+		const status = (state: string) => {
+			const [notification] = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_update",
+					toolCallId: "tc-bg",
+					toolName: "bash",
+					args: { command: "hyperfine bench" },
+					partialResult: {
+						content: [{ type: "text", text: "Benchmark 1" }],
+						details: { async: { state, jobId: "bg_2", type: "bash" } },
+					},
+				} as AgentSessionEvent,
+				"session-1",
+			);
+			return (notification!.update as { status?: string }).status;
+		};
+
+		expect(status("running")).toBe("in_progress");
+		expect(status("completed")).toBe("completed");
+		expect(status("failed")).toBe("failed");
+		expect(status("cancelled")).toBe("failed");
 	});
 
 	it("emits locations on tool_execution_update from args", () => {

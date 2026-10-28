@@ -85,13 +85,14 @@ Argument handling:
 | --- | --- |
 | `--continue`, `-c` | Continue the previous session. |
 | `--resume [id]`, `-r`, `--session [id]` | Resume a session by ID prefix or path, or open the picker when no value is given. |
+| `--restore [id]` | Resume a session as `--resume` does, then go on with what its last process left unfinished when it crashed or was killed: the interrupted turn and the subagents it was running. Interactive only; takes no prompt. See [session operations](./session-operations-export-share-fork-resume.md#cli---restore). |
 | `--fork <session>` | Fork a saved session (by ID prefix or path) into a new session. See [session operations](./session-operations-export-share-fork-resume.md). |
 | `--from-claude` | Import a Claude Code session into OMP. |
 | `--from-codex` | Import a Codex session into OMP. |
 | `--export <session>` | Export a session file to HTML and exit. |
 | `--no-title` | Disable title auto-generation (equivalent to the `PI_NO_TITLE` [environment variable](./environment-variables.md)). |
 
-`--continue`, `--resume`, `--fork`, and foreign-session imports require
+`--continue`, `--resume`, `--restore`, `--fork`, and foreign-session imports require
 persistence and cannot use `--no-session`. `--from-claude` and `--from-codex`
 are mutually exclusive and cannot be combined with `--continue`, `--resume`,
 or `--fork`.
@@ -127,7 +128,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | Flag | Description |
 | --- | --- |
 | `--prewalk` | Arm a one-shot handoff at the first eligible edit/write turn, gated on a successful todo call when `todo` is active (default off). See [prewalk](./prewalk.md). |
-| `--no-prewalk` | Disable prewalk even if `prewalk.enabled` is set; incompatible with `--prewalk`/`--prewalk-into`. |
+| `--no-prewalk` | Disable prewalk even if `prewalk.enabled` is set, and keep `prewalk.auto` out of the startup session; incompatible with `--prewalk`/`--prewalk-into`. |
 | `--prewalk-into <id-or-role>` | Arm prewalk with this target instead of the `smol` role. |
 | `--plan-yolo` | Start in read-only plan mode, auto-approve the model's plan proposal, then switch to the execution target to implement it. |
 | `--plan-yolo-into <id-or-role>` | Target model for plan-yolo execution (default the `smol` role); requires `--plan-yolo`. |
@@ -141,10 +142,13 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--no-tools` | Disable all built-in tools. |
 | `--no-lsp` | Disable LSP tools, formatting, and diagnostics. |
 | `--no-pty` | Disable PTY-based interactive bash execution. |
-| `--approval-mode <mode>` | Override `tools.approvalMode` for this session (`always-ask`, `write`, or `yolo`). See [approval mode](./approval-mode.md). |
+| `--approval-mode <mode>` | Override `tools.approvalMode` for this session (`always-ask`, `always-ask-cached`, `write`, or `yolo`). See [approval mode](./approval-mode.md). |
 | `--auto-approve`, `--yolo` | Force yolo tier approval; explicit tool/user policies and provider safety checks still apply. |
 | `--advisor` | Enable the advisor runtime (passively reviews each turn and injects notes). See [advisor / watchdog](./advisor-watchdog.md). |
+| `--wait-async` | Print mode: before exiting, wait for this run's background jobs and start another turn in the same session with each result (`async.printWake`). See [Headless / print mode](#headless--print-mode). |
 | `--max-time <duration>` | Stop the session after this duration (e.g. `600`, `10m`, `1h`). |
+| `--warn-cost <usd>` | Warn once when the session's spend, subagents included, reaches this many USD. Overrides `session.warnCost`. |
+| `--max-cost <usd>` | Stop sending model requests once the session's spend reaches this many USD; a request already in flight can carry spend past it. Overrides `session.maxCost`. |
 
 #### Extensions, hooks, skills, and rules
 
@@ -158,6 +162,7 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--skills <globs>` | Comma-separated glob patterns to filter [skills](./skills.md) (e.g. `git-*,docker`). |
 | `--no-skills` | Disable skills discovery and loading. |
 | `--no-rules` | Disable rules discovery and loading. See [context files](./context-files.md). |
+| `--no-context-files` | Disable [context files](./context-files.md) (`AGENTS.md`, `CLAUDE.md`, ...) for the working directory and every `--add-dir` root. Subagents inherit it. |
 
 #### System prompt
 
@@ -209,11 +214,29 @@ Related flags for headless runs:
 - `--mode json` — emit structured events instead of rendered text.
 - `--no-title` — skip title auto-generation (also `PI_NO_TITLE`).
 - `--max-time <duration>` — bound the run.
+- `--wait-async` — keep the run alive for its background jobs (below).
+- `--warn-cost <usd>` / `--max-cost <usd>` — warn at, or stop sending model requests from, a spend.
+
+Print mode is single-shot by default: once its prompts are answered it disposes
+the session, which cancels background jobs the run started (`bash` or `task`
+calls the model ran asynchronously). With `--wait-async` (or
+`async.printWake: true`) it instead waits for them; each job's result is
+delivered to the same session as it is in the TUI, starting another turn, and a
+turn may start further jobs. The run exits once no owned job or undelivered
+result remains, and text mode prints the answer of the last turn. Bound
+unattended runs with `--max-time`.
+
+```sh
+# Start a long build in the background, then react to its result in the same session
+omp -p --wait-async --max-time 2h "Run the integration suite in the background and fix what fails"
+```
 
 `--mode json` emits a session header followed by events as JSON lines.
 Incremental `message_update` events omit full partial-message snapshots; completed
 messages arrive in `message_end`, and opaque provider replay payloads are omitted.
 Terminal turn failures produce a nonzero exit status in both text and JSON modes.
+A run stopped by `--max-cost` exits with status `3`: the cap message goes to
+stderr (a `cost-gate` notice in JSON mode) and no answer is printed.
 
 `plan.defaultOnStartup` is ignored in print mode because there is no plan-review
 UI. Use `--plan-yolo` for unattended planning and implementation.

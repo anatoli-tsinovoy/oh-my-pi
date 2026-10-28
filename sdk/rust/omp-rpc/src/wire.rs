@@ -185,6 +185,8 @@ pub struct ThinkingContent {
 	pub thinking: Option<String>,
 	pub thinking_signature: Option<String>,
 	pub item_id: Option<String>,
+	/// Prose the model addressed to the user, returned by the provider as thinking; present it as answer text.
+	pub narration: Option<bool>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -201,11 +203,15 @@ impl Serialize for ThinkingContent {
 		if let Some(value) = &self.item_id {
 			map.serialize_entry("itemId", value)?;
 		}
+		if let Some(value) = &self.narration {
+			map.serialize_entry("narration", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"thinking" if self.thinking.is_some() => continue,
 				"thinkingSignature" if self.thinking_signature.is_some() => continue,
 				"itemId" if self.item_id.is_some() => continue,
+				"narration" if self.narration.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -221,6 +227,7 @@ impl<'de> Deserialize<'de> for ThinkingContent {
 			thinking: take(&mut extra, "thinking"),
 			thinking_signature: take(&mut extra, "thinkingSignature"),
 			item_id: take(&mut extra, "itemId"),
+			narration: take(&mut extra, "narration"),
 			extra,
 		})
 	}
@@ -3153,6 +3160,8 @@ pub struct CompactionResult {
 	pub details: Option<Value>,
 	#[serde(rename = "preserveData", default, skip_serializing_if = "Option::is_none")]
 	pub preserve_data: Option<Map<String, Value>>,
+	#[serde(rename = "providerReplayThroughEntryId", default, skip_serializing_if = "Option::is_none")]
+	pub provider_replay_through_entry_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3282,6 +3291,9 @@ pub struct SessionStats {
 	pub credits: Option<SessionCredits>,
 	#[serde(rename = "routedModels", default, skip_serializing_if = "Option::is_none")]
 	pub routed_models: Option<BTreeMap<String, f64>>,
+	/// Failed edits by the engine's `errorKind`.
+	#[serde(rename = "editRejections", default, skip_serializing_if = "Option::is_none")]
+	pub edit_rejections: Option<BTreeMap<String, f64>>,
 	#[serde(rename = "contextUsage", default, skip_serializing_if = "Option::is_none")]
 	pub context_usage: Option<ContextUsage>,
 }
@@ -3420,6 +3432,9 @@ pub struct BtwHistoryTurn {
 	pub created_at: i64,
 	#[serde(rename = "updatedAt")]
 	pub updated_at: i64,
+	/// Images attached to the question.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub images: Option<Vec<ImageContent>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 }
@@ -3437,6 +3452,9 @@ pub struct BtwHistoryRecord {
 	pub id: String,
 	#[serde(rename = "leafId", deserialize_with = "Deserialize::deserialize")]
 	pub leaf_id: Option<String>,
+	/// Images attached to the question.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub images: Option<Vec<ImageContent>>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 	#[serde(rename = "followUps", default, skip_serializing_if = "Option::is_none")]
@@ -3591,7 +3609,11 @@ impl NotifyType {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AgentStartEvent {}
+pub struct AgentStartEvent {
+	/// Calls of an unpaired assistant tail a continued run executes before its first model request.
+	#[serde(rename = "resumedToolCallIds", default, skip_serializing_if = "Option::is_none")]
+	pub resumed_tool_call_ids: Option<Vec<String>>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentEndEvent {
@@ -4028,6 +4050,9 @@ pub struct PromptError {
 	pub model: Option<String>,
 	#[serde(rename = "httpStatus", default, skip_serializing_if = "Option::is_none")]
 	pub http_status: Option<i64>,
+	/// `cost_cap`: the session reached `session.maxCost` (`--max-cost`) and omp did not send the next request.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub code: Option<LitCostCap>,
 }
 
 /// Terminal outcome of one accepted `prompt` / `abort_and_prompt`, keyed by request `id`.
@@ -5719,6 +5744,27 @@ impl LogoutAccountType {
 		match self {
 			Self::ApiKey => "api_key",
 			Self::Oauth => "oauth",
+		}
+	}
+}
+
+/// The constant `"cost_cap"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct LitCostCap;
+
+impl Serialize for LitCostCap {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		serializer.serialize_str("cost_cap")
+	}
+}
+
+impl<'de> Deserialize<'de> for LitCostCap {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let value = Value::deserialize(deserializer)?;
+		if value.as_str() == Some("cost_cap") {
+			Ok(Self)
+		} else {
+			Err(D::Error::custom(format!("expected \"cost_cap\", got {value}")))
 		}
 	}
 }

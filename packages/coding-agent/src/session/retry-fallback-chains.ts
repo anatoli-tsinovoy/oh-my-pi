@@ -180,15 +180,15 @@ export function getRetryFallbackChains(settings: Settings): RetryFallbackChains 
 export interface RetryFallbackRole {
 	/** Selector the role is assigned (the chain's primary). */
 	primary: string;
-	/** Fallback selectors walked after the primary. */
+	/** Fallback selectors walked after the primary; empty explicitly disables fallbacks. */
 	chain: string[];
 }
 
-/** Reads the primary and non-empty chain installed for `role`, if any. */
+/** Reads the primary and chain installed for `role`, including an explicitly empty chain. */
 export function getRetryFallbackRole(settings: Settings, role: string): RetryFallbackRole | undefined {
 	const primary = settings.getModelRole(role);
 	const chain = cfgRetryFallbackChains.get(settings)[role];
-	if (!primary || !Array.isArray(chain) || chain.length === 0) return undefined;
+	if (!primary || !Array.isArray(chain)) return undefined;
 	return { primary, chain };
 }
 
@@ -241,11 +241,12 @@ function providerScopedPool(
  * Validates configured fallback chains and reports each warning via `warn`.
  *
  * `options.isDiscoveryPending` suppresses "unknown model" warnings for
- * selectors whose config-declared discovery provider has not yet populated the
- * registry (a cold discovery cache after `omp update` bumps the cache
- * namespace, #10048). Such selectors are re-checked once background discovery
- * settles. Logging is the caller's responsibility so a post-discovery re-run
- * does not double-log persistent warnings.
+ * selectors whose provider discovery has not settled yet: a cold discovery
+ * cache after `omp update` bumps the cache namespace (#10048), or a startup
+ * cache replay the pending online refresh may still extend. Such selectors
+ * are re-checked once background discovery settles. Logging is the caller's
+ * responsibility so a post-discovery re-run does not double-log persistent
+ * warnings.
  */
 export function validateRetryFallbackChains(
 	settings: Settings,

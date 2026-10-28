@@ -31,6 +31,7 @@ import {
 import { span, text } from "../native/describe";
 import { type DescribeContext, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
 import { NativeImageCache } from "../native/blobs";
+import { imageLinksEnabled, linkedImageSpan, linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
 
 const STREAMING_LINE_CAP = PREVIEW_LINES * 5;
@@ -172,14 +173,18 @@ export class BashExecutionComponent extends Container {
 			this.#expanded,
 			this.#showImages,
 			this.#images.length,
+			// Image nodes and placeholders carry links only under an enabled policy.
+			imageLinksEnabled(),
 		];
 		return this.#native.get(key, () => {
 			const images = this.#images.map((image, index) =>
 				this.#showImages
 					? this.#nativeImages.get(`img${index}`, image.data, image.mimeType)
 					: text([
-							span(
+							linkedImageSpan(
 								imageFallback(image.mimeType, getImageDimensions(image.data, image.mimeType) ?? undefined),
+								image,
+								undefined,
 								"muted",
 							),
 						]),
@@ -248,7 +253,13 @@ export class BashExecutionComponent extends Container {
 	/** Switch to PTY rendering and feed raw terminal bytes through the vterm replay. */
 	appendPtyChunk(chunk: string): void {
 		if (this.#status !== "running" && !this.#ptyWriting && this.#ptyQueue.length === 0) return;
-		this.#ptyMode = true;
+		if (!this.#ptyMode) {
+			this.#ptyMode = true;
+			// The pane's `styleLine` reads `#ptyMode`, so its styled rows change
+			// the moment this flips — with the rows themselves unchanged. The pane
+			// memoizes its styled output, so it has to be told.
+			this.#outputPane.invalidate();
+		}
 		this.#ptyReplayFinalized = false;
 		this.#ptyQueue.push(chunk);
 		if (this.#ptyQueue.length > MAX_PTY_QUEUE_CHUNKS) {
@@ -418,7 +429,7 @@ export class BashExecutionComponent extends Container {
 			} else {
 				const dimensions = getImageDimensions(image.data, image.mimeType) ?? undefined;
 				this.#contentContainer.addChild(
-					new Text(theme.fg("muted", imageFallback(image.mimeType, dimensions)), 1, 0),
+					new Text(theme.fg("muted", linkedImageText(imageFallback(image.mimeType, dimensions), image)), 1, 0),
 				);
 			}
 		}

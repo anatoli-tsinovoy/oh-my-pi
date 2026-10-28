@@ -12,23 +12,33 @@ import * as path from "node:path";
 
 import { isEnoent, logger, pathIsWithin } from "@oh-my-pi/pi-utils";
 import { expandTilde } from "../../../tools/path-utils";
-import { normalizePluginRuntimeConfig } from "../runtime-config";
+import { linkPluginDirectory } from "../directory-link";
+import { normalizePluginRuntimeConfig, writePluginRuntimeConfig } from "../runtime-config";
 import type { PluginRuntimeConfig, PluginRuntimeState } from "../types";
 
 import { cachePlugin, getCachedPluginPath, isValidVersionForCache } from "./cache";
-import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
+import {
+	classifySource,
+	fetchMarketplace,
+	parseMarketplaceCatalog,
+	promoteCloneToCache,
+	pruneAbandonedMarketplaceClones,
+} from "./fetcher";
 import {
 	addInstalledPlugin,
 	addMarketplaceEntry,
 	collectReferencedPaths,
 	getInstalledPlugin,
 	getMarketplaceEntry,
+	getProjectRegistriesIndexPath,
 	readInstalledPluginsRegistry,
 	readMarketplacesRegistry,
+	readProjectRegistriesIndex,
 	removeInstalledPlugin,
 	removeMarketplaceEntry,
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
+	writeProjectRegistriesIndex,
 } from "./registry";
 import { resolvePluginSource, validatePluginSource } from "./source-resolver";
 import type {
@@ -364,7 +374,7 @@ export class MarketplaceManager {
 				otherScopeOldNames.set(entry.installPath, await this.#resolvePluginPackageName(entry.installPath, name));
 			}
 
-			version = await this.#resolvePluginVersion(pluginEntry, sourcePath);
+			version = (await this.#resolveCatalogVersion(pluginEntry, sourcePath)) ?? "0.0.0";
 			packageName = await this.#resolvePluginPackageName(sourcePath, name);
 			// Resolve the runtime names this plugin id currently owns BEFORE cachePlugin
 			// can overwrite the existing cache. A forced reinstall reuses the same cache
@@ -399,21 +409,9 @@ export class MarketplaceManager {
 			// Remove from scope-appropriate registry first, then cross-check refs before disk deletion.
 			const prunedReg = removeInstalledPlugin(await readInstalledPluginsRegistry(registryPath), pluginId);
 			await writeInstalledPluginsRegistry(registryPath, prunedReg);
-
-			// Read both registries AFTER removal — only delete paths no longer referenced by either.
-			const [userReg, projectReg] = await Promise.all([
-				readInstalledPluginsRegistry(this.#opts.installedRegistryPath),
-				this.#opts.projectInstalledRegistryPath
-					? readInstalledPluginsRegistry(this.#opts.projectInstalledRegistryPath)
-					: Promise.resolve({ version: 2 as const, plugins: {} as Record<string, InstalledPluginEntry[]> }),
-			]);
-			const referenced = collectReferencedPaths(userReg, projectReg);
-
-			for (const entry of existing) {
-				if (entry.installPath !== cachePath && !referenced.has(entry.installPath)) {
-					await fs.rm(entry.installPath, { recursive: true, force: true });
-				}
-			}
+			await this.#removeUnreferencedCachePaths(
+				existing.map(entry => entry.installPath).filter(installPath => installPath !== cachePath),
+			);
 		}
 
 		// 6. Build and register the entry, preserving enabled state from previous install
@@ -432,6 +430,7 @@ export class MarketplaceManager {
 		const freshInstReg = await readInstalledPluginsRegistry(registryPath);
 		const newInstReg = addInstalledPlugin(freshInstReg, pluginId, installedEntry);
 		await writeInstalledPluginsRegistry(registryPath, newInstReg);
+		if (scope === "project") await this.#trackProjectRegistry();
 
 		// Carry the renamed-from key's runtime state (feature selection + settings)
 		// so a case-only rename preserves the user's configuration.
@@ -540,38 +539,44 @@ export class MarketplaceManager {
 	}
 
 	/**
-	 * Resolve plugin version from multiple sources:
-	 * 1. Catalog entry version (if set)
-	 * 2. Plugin manifest (.claude-plugin/plugin.json, Agent Plugins root plugin.json, or package.json)
-	 * 3. Git SHA from source (truncated to 7 chars)
-	 * 4. Fallback "0.0.0"
+	 * Resolve the version a catalog entry publishes, so install and {@link checkForUpdates}
+	 * agree. Relative sources (files in the marketplace clone) use Claude Code's precedence:
+	 * 1. Plugin manifest (`.claude-plugin/plugin.json`, then Agent Plugins root `plugin.json`)
+	 * 2. Catalog entry `version`
+	 * 3. `package.json` version
+	 * 4. Pinned git SHA from the source definition (truncated to 7 chars)
+	 *
+	 * Remote sources are readable only after cloning, so an update check sees the catalog
+	 * entry alone (`pluginDir` undefined): installs put the entry's version first and checks
+	 * resolve nothing else, or a manifest/SHA mismatch would report an update forever.
+	 * `undefined` when nothing declares a version.
 	 */
-	async #resolvePluginVersion(entry: MarketplacePluginEntry, sourcePath: string): Promise<string> {
-		// 1. Catalog entry version
-		if (entry.version) return entry.version;
-
-		// 2. Plugin manifest
-		for (const manifestPath of [
-			path.join(sourcePath, ".claude-plugin", "plugin.json"),
-			path.join(sourcePath, "plugin.json"),
-			path.join(sourcePath, "package.json"),
-		]) {
+	async #resolveCatalogVersion(
+		entry: MarketplacePluginEntry,
+		pluginDir: string | undefined,
+	): Promise<string | undefined> {
+		if (typeof entry.source !== "string" && entry.version) return entry.version;
+		if (!pluginDir) return undefined;
+		const readVersion = async (file: string): Promise<string | undefined> => {
 			try {
-				const content = await Bun.file(manifestPath).json();
-				if (typeof content?.version === "string" && content.version) {
-					return content.version;
-				}
+				const content = await Bun.file(path.join(pluginDir, file)).json();
+				return typeof content?.version === "string" && content.version ? content.version : undefined;
 			} catch {
-				// Missing or invalid — try next
+				// Missing or invalid — try next source
+				return undefined;
 			}
-		}
+		};
 
-		// 3. Git SHA from source definition
+		const manifestVersion =
+			(await readVersion(path.join(".claude-plugin", "plugin.json"))) ?? (await readVersion("plugin.json"));
+		if (manifestVersion) return manifestVersion;
+		if (entry.version) return entry.version;
+		const packageVersion = await readVersion("package.json");
+		if (packageVersion) return packageVersion;
 		if (typeof entry.source === "object" && "sha" in entry.source && entry.source.sha) {
 			return entry.source.sha.slice(0, 7);
 		}
-
-		return "0.0.0";
+		return undefined;
 	}
 
 	/** Validates and removes a marketplace plugin, or only validates when `dryRun` is set. */
@@ -622,20 +627,7 @@ export class MarketplaceManager {
 		const updatedReg = removeInstalledPlugin(targetReg, pluginId);
 		await writeInstalledPluginsRegistry(registryPath, updatedReg);
 
-		// Read both registries AFTER removal — only delete paths no longer referenced by either.
-		const [freshUserReg, freshProjectReg] = await Promise.all([
-			readInstalledPluginsRegistry(this.#opts.installedRegistryPath),
-			this.#opts.projectInstalledRegistryPath
-				? readInstalledPluginsRegistry(this.#opts.projectInstalledRegistryPath)
-				: Promise.resolve({ version: 2 as const, plugins: {} as Record<string, InstalledPluginEntry[]> }),
-		]);
-		const referenced = collectReferencedPaths(freshUserReg, freshProjectReg);
-
-		for (const entry of targetEntries) {
-			if (!referenced.has(entry.installPath)) {
-				await fs.rm(entry.installPath, { recursive: true, force: true });
-			}
-		}
+		await this.#removeUnreferencedCachePaths(targetEntries.map(entry => entry.installPath));
 
 		for (const packageName of packageNames) {
 			await this.#removeRuntimePlugin(targetScope, packageName);
@@ -743,6 +735,7 @@ export class MarketplaceManager {
 	// Refresh marketplace catalogs that haven't been updated in more than 24 h.
 	// Per-marketplace failures are silently swallowed — offline is fine.
 	async refreshStaleMarketplaces(): Promise<void> {
+		await pruneAbandonedMarketplaceClones(this.#opts.marketplacesCacheDir);
 		const reg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const staleMs = 24 * 60 * 60 * 1000;
 		for (const entry of reg.marketplaces) {
@@ -756,9 +749,9 @@ export class MarketplaceManager {
 		}
 	}
 
-	// Compare installed plugin versions against their catalog entries.
-	// Returns one entry per (pluginId, scope) pair where the catalog declares a newer version.
-	// Catalog entries without a version field are skipped.
+	// Compare installed plugin versions against the version each catalog entry currently publishes
+	// (see #resolveCatalogVersion). Returns one entry per (pluginId, scope) pair that is outdated.
+	// Plugins whose catalog side declares no version are skipped.
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
@@ -784,7 +777,15 @@ export class MarketplaceManager {
 				let catalogVersion: string | undefined;
 				try {
 					const catalog = await this.#readCatalog(mktEntry);
-					catalogVersion = catalog.plugins.find(p => p.name === parsed.name)?.version;
+					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
+					if (!pluginEntry) continue;
+					// Relative sources resolve into the marketplace clone, whose manifests
+					// `updateMarketplace` refreshes; remote sources yield no local dir.
+					const pluginDir = await validatePluginSource(pluginEntry, {
+						marketplaceClonePath: this.#resolveMarketplaceRoot(mktEntry),
+						catalogMetadata: catalog.metadata,
+					});
+					catalogVersion = await this.#resolveCatalogVersion(pluginEntry, pluginDir);
 				} catch {
 					continue;
 				}
@@ -921,7 +922,7 @@ export class MarketplaceManager {
 	}
 
 	async #writeRuntimeConfig(scope: "user" | "project", config: PluginRuntimeConfig): Promise<void> {
-		await Bun.write(this.#runtimeLockPath(scope), JSON.stringify(config, null, 2));
+		await writePluginRuntimeConfig(this.#runtimeLockPath(scope), config);
 	}
 
 	async #resolvePluginPackageName(installPath: string, fallbackName: string): Promise<string> {
@@ -1058,7 +1059,7 @@ export class MarketplaceManager {
 		const linkPath = this.#runtimePackagePath(scope, packageName);
 		await fs.mkdir(path.dirname(linkPath), { recursive: true });
 		await fs.rm(linkPath, { recursive: true, force: true });
-		await fs.symlink(cachePath, linkPath, process.platform === "win32" ? "junction" : "dir");
+		await linkPluginDirectory(cachePath, linkPath);
 
 		const config = await this.#loadRuntimeConfig(scope);
 		const previous = config.plugins[packageName];
@@ -1105,6 +1106,63 @@ export class MarketplaceManager {
 			return this.#opts.projectInstalledRegistryPath;
 		}
 		return this.#opts.installedRegistryPath;
+	}
+
+	/** Records the cwd project registry in the user-level index so cache cleanup run elsewhere sees its installs. */
+	async #trackProjectRegistry(): Promise<void> {
+		const indexPath = getProjectRegistriesIndexPath(this.#opts.installedRegistryPath);
+		const registryPath = path.resolve(this.#registryPath("project"));
+		const indexed = await readProjectRegistriesIndex(indexPath);
+		if (!indexed.includes(registryPath)) {
+			await writeProjectRegistriesIndex(indexPath, [...indexed, registryPath]);
+		}
+	}
+
+	/**
+	 * Deletes the candidate cache dirs that no installed registry still references.
+	 *
+	 * Project-scope installs link into the shared user cache, so the user registry, the cwd
+	 * project registry, and every indexed project registry count. Indexed registries that no
+	 * longer list any plugin are dropped from the index. An unreadable registry keeps every
+	 * candidate: leaking a cache dir is cheaper than breaking a project install.
+	 */
+	async #removeUnreferencedCachePaths(candidates: readonly string[]): Promise<void> {
+		const indexPath = getProjectRegistriesIndexPath(this.#opts.installedRegistryPath);
+		const indexed = await readProjectRegistriesIndex(indexPath);
+		const projectPaths = new Set(indexed);
+		if (this.#opts.projectInstalledRegistryPath) {
+			projectPaths.add(path.resolve(this.#opts.projectInstalledRegistryPath));
+		}
+		projectPaths.delete(path.resolve(this.#opts.installedRegistryPath));
+
+		const registries = [await readInstalledPluginsRegistry(this.#opts.installedRegistryPath)];
+		const live: string[] = [];
+		let unreadable = false;
+		for (const registryPath of projectPaths) {
+			try {
+				const reg = await readInstalledPluginsRegistry(registryPath);
+				if (Object.keys(reg.plugins).length === 0) continue;
+				registries.push(reg);
+			} catch (err) {
+				logger.warn("Unreadable project plugin registry; keeping cached plugins", {
+					path: registryPath,
+					error: String(err),
+				});
+				unreadable = true;
+			}
+			live.push(registryPath);
+		}
+		if (live.length !== indexed.length || live.some((p, i) => p !== indexed[i])) {
+			await writeProjectRegistriesIndex(indexPath, live);
+		}
+		if (unreadable) return;
+
+		const referenced = collectReferencedPaths(...registries);
+		for (const candidate of candidates) {
+			if (!referenced.has(candidate)) {
+				await fs.rm(candidate, { recursive: true, force: true });
+			}
+		}
 	}
 
 	async #findInBothRegistries(pluginId: string): Promise<{

@@ -45,7 +45,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
 		case "opencode-go":
-			return "https://opencode.ai/zen/go/v1";
+			return "https://opencode.ai/inference/go/v1";
 		case "opencode-zen":
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
@@ -160,6 +160,7 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			// rich-v13 moves `mode: decisions` groups off chat onto the Decisions runner.
 			// rich-v12 invalidates namespaced ids that missed bare catalog references.
 			// rich-v11 excluded ClinePass gateway metadata (issue #10932). rich-v10
 			// filtered known non-conversational LiteLLM modes, unioned compat across
@@ -167,7 +168,7 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// declaration into it; earlier versions invalidated rows whose
 			// `compatConfig` retained a colliding bundled model's provider-specific
 			// transport (e.g. Fireworks `wireModelIdMode`) (issue #9938).
-			return `litellm:rich-v12:${Bun.hash(baseUrl).toString(36)}`;
+			return `litellm:rich-v13:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "gmi-cloud":
 		case "siliconflow":
@@ -217,7 +218,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// v2: rows cached before Fusion pairings carried their lead uid as
 			// `requestModelId` send the composite uid and fail with
 			// `permission_denied: no API providers are available`.
-			return "devin:models-v2";
+			// v3: rows cached before discovery read `ModelInfo.maxTokens` hold a
+			// 200K window on every model.
+			return "devin:models-v3";
 		default:
 			return providerId;
 	}

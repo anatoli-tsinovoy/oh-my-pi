@@ -99,11 +99,12 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 	for (const block of message.content) {
 		if (block.type === "redactedThinking" || block.type === "anthropicServerTool") continue;
 		if (block.type === "thinking") {
-			// Signatures are replay-bound and go; the summary state is provenance and stays.
+			// Signatures are replay-bound and go; summary and narration state are provenance and stay.
 			content.push({
 				type: "thinking",
 				thinking: block.thinking,
 				...(block.summary !== undefined && { summary: block.summary }),
+				...(block.narration && { narration: true }),
 			});
 			continue;
 		}
@@ -395,6 +396,9 @@ export const INTERRUPTED_THINKING_MESSAGE_TYPE = "interrupted-thinking";
 
 /** Custom message type for the transient checkpoint-active reminder. */
 export const CHECKPOINT_ACTIVE_REMINDER_TYPE = "checkpoint-active-reminder";
+
+/** Custom message type carrying a completed rewind's report into model context. */
+export const REWIND_REPORT_MESSAGE_TYPE = "rewind-report";
 
 /** Metadata persisted with a hidden interrupted-thinking continuity message. */
 export interface InterruptedThinkingDetails {

@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, slugify } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
@@ -22,8 +22,10 @@ export type { AdvisorReviewMode, AdvisorSyncBacklog } from "@oh-my-pi/pi-tui/ove
  * Runtime health of a single advisor, surfaced in stats and the status line.
  * - `running` — actively processing primary turns
  * - `paused` — user-toggled off via per-advisor switch (runtime disposed)
- * - `quota_exhausted` — provider returned a quota/rate-limit error; the
- *   runtime auto-retries after a cooldown so it can resume without user action
+ * - `quota_exhausted` — provider returned a quota/usage-limit error that host
+ *   recovery could not absorb; the runtime stays paused, batch retained, until
+ *   it is reset or rebuilt (compaction, image drop, shake, session switch,
+ *   `/advisor` rebuild, config reload, restart). No timer resumes it.
  * - `error` — repeated transient failures; backlog dropped to prevent stall
  * - `no_model` — no model resolved for this advisor's role/explicit model
  */
@@ -124,11 +126,7 @@ function parseWatchdogDoc(
  * survives; callers dedupe collisions.
  */
 export function slugifyAdvisorName(name: string): string {
-	const slug = name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-	return slug || "advisor";
+	return slugify(name) || "advisor";
 }
 
 const UUID_V7_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

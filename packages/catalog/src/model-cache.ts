@@ -10,7 +10,9 @@ import type { Api, Model } from "./types";
 
 // Rows persist fully materialized Models so compatible warm-cache reads do not
 // rerun the compat cascade. Request headers are intentionally omitted:
-// arbitrary provider-defined header names can carry credentials. v13 replaces
+// arbitrary provider-defined header names can carry credentials. v14
+// invalidates Antigravity rows predating per-SKU `antigravityWireProfiles`
+// (model_enum label, output cap, SKU thinking). v13 replaces
 // sparse ModelSpec rows with materialized rows and records the exact app/rules/
 // builder policy that produced them. v12 invalidated Kimi Code rows carrying the blanket
 // maxTokens: 32000 that predate per-family output caps (k3/k3-256k -> 131072,
@@ -25,7 +27,7 @@ import type { Api, Model } from "./types";
 // retired unknown-limit sentinels (222222/8888); v5 invalidated rows predating
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
-const CACHE_SCHEMA_VERSION = 13;
+const CACHE_SCHEMA_VERSION = 14;
 /** Oldest schema whose rows are guaranteed never to carry request headers. */
 const FIRST_HEADERLESS_SCHEMA_VERSION = 11;
 const HEADER_RESTORE_VERSION = 1;
@@ -145,6 +147,13 @@ export interface CacheEntry<TApi extends Api = Api> {
 	models: Model<TApi>[];
 	fresh: boolean;
 	authoritative: boolean;
+	/**
+	 * `authoritative` of the payload row itself, ignoring the
+	 * `model_cache_refresh` side row. A failed refresh flips only the side row
+	 * (freshness plus retry backoff), so this keeps answering "were `models`
+	 * written by an authoritative discovery result?" after such a write.
+	 */
+	payloadAuthoritative: boolean;
 	updatedAt: number;
 	/** Model ids whose live headers were intentionally omitted from disk. */
 	headerOmittedModelIds: readonly string[];
@@ -596,6 +605,7 @@ function parseCacheRow<TApi extends Api>(
 		models,
 		fresh,
 		authoritative,
+		payloadAuthoritative: row.authoritative === 1,
 		updatedAt,
 		headerOmittedModelIds,
 		unrestorableHeaderModelIds,

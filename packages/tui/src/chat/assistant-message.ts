@@ -1,12 +1,16 @@
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
 import {
 	type DefaultTextStyle,
+	holdPartialTableRow,
 	Markdown,
 	type MarkdownTheme,
 	rewriteMarkdownLinkDestinations,
+	speculativeStreamingSource,
+	streamingMarkdownSource,
 } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
@@ -17,9 +21,10 @@ import type { AssistantThinkingRenderer } from "./extension-types";
 import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
-import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import { isNativeRendering } from "../native/state";
-import { NativeImageCache } from "../native/blobs";
+import { NativeImageCache, nativeMediaNode } from "../native/blobs";
+import { linkedImageText } from "../prompt/image-references";
 import { Memo } from "../native/memo";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
@@ -35,7 +40,7 @@ import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
 import { FigureMarkdown } from "./figure-markdown";
 import { svgFigureRendering } from "./svg-figure";
 import { hasSvgFence } from "./svg-source";
-import { describeTableChart, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
+import { chartFence, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
 
 /**
  * Max wrapped rows of a turn-ending provider error rendered inline in the
@@ -110,6 +115,14 @@ interface StableRenderInputs {
 	readonly markdown: MarkdownTheme;
 	readonly color: ((text: string) => string) | undefined;
 }
+
+/**
+ * A partial last thinking line the prose fold may still drop: the start of a
+ * fence marker (`` ` ``, `~`) or of an empty `<!-- -->` sentinel. Once it turns
+ * into either, the fold's ellipsis lands back on the line above it
+ * (`formatThinkingForDisplay`), so that line is not yet settled.
+ */
+const UNSETTLED_THINKING_TAIL = /(?:^|\n)[^\S\n]*(?:`{1,2}|~{1,2}|<(?:!(?:-(?:-[^\S\n]*-{0,2})?)?)?)[^\S\n]*$/;
 
 function isSnapshotExtension(previous: readonly StablePart[], current: readonly StablePart[]): boolean {
 	if (previous.length > current.length) return false;
@@ -250,6 +263,8 @@ export class AssistantMessageComponent extends Container {
 	#lastMessage?: AssistantMessage;
 	#emergencyText?: ProseBlock;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
+	/** File each grouped read showed that Tern's media viewer shows, for native `media` nodes. */
+	#toolMediaPathByCallId = new Map<string, string>();
 	/**
 	 * Payload keys ({@link imagePayloadKey}) whose Kitty PNG conversion this
 	 * component is awaiting, so a re-delivered image neither re-encodes nor
@@ -798,7 +813,8 @@ export class AssistantMessageComponent extends Container {
 	 * head's `title`. With `hideThinkingBlock` only the live head shows (collapsed)
 	 * and a finished thought emits nothing.
 	 */
-	override describe(): NativeNode {
+	override describe(cx?: DescribeContext): NativeNode {
+		const media = cx?.supports("media") === true;
 		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
 		const rate =
 			tail !== undefined && this.#lastUpdateTransient && this.#thinkingRateLive
@@ -813,9 +829,10 @@ export class AssistantMessageComponent extends Container {
 			this.#errorExpanded,
 			this.#nativeViewVersion,
 			rate,
+			media,
 			getThemeEpoch(),
 		];
-		return this.#native.get(key, () => this.#describeMessage(tail, rate));
+		return this.#native.get(key, () => this.#describeMessage(tail, rate, media));
 	}
 
 	/**
@@ -841,7 +858,7 @@ export class AssistantMessageComponent extends Container {
 		this.#nativeViewVersion++;
 	}
 
-	#describeMessage(thinkingTail: number | undefined, rate: number): NativeNode {
+	#describeMessage(thinkingTail: number | undefined, rate: number, media: boolean): NativeNode {
 		const message = this.#displayedMessage;
 		const previousParts = this.#nativeParts;
 		const parts = new Map<string, { text: string; stream: boolean; node: NativeNode }>();
@@ -854,7 +871,13 @@ export class AssistantMessageComponent extends Container {
 					: {
 							text: source,
 							stream,
-							node: node("md", stream ? { text: source, stream: true } : { text: source }, undefined, key),
+							// A streaming node renders its open link or math span as already closed, as the TUI does.
+							node: node(
+								"md",
+								stream ? { text: speculativeStreamingSource(source), stream: true } : { text: source },
+								undefined,
+								key,
+							),
 						};
 			parts.set(slot, entry);
 			return entry.node;
@@ -878,7 +901,9 @@ export class AssistantMessageComponent extends Container {
 				const streaming = live && index === tailIndex;
 				if (content.type === "text" && canonicalizeMessage(content.text)) {
 					answered = true;
-					const source = content.text.trim();
+					// A native terminal sizes table columns by every row it gets: send a growing row once
+					// its line ends. Hold before trimming, which would drop the newline ending a finished row.
+					const source = (streaming ? holdPartialTableRow(content.text) : content.text).trim();
 					// The terminal renders this source itself and would resolve a relative
 					// link against its own idea of the cwd: hand it the session-resolved
 					// targets (resolved once the segment closes, so never while streaming).
@@ -895,7 +920,7 @@ export class AssistantMessageComponent extends Container {
 						children.push(markdown(`t${index}`, `t${index}`, linked(source, streaming), streaming));
 						continue;
 					}
-					// A chart follows its table as an SVG image node; the prose splits around it.
+					// A chart follows its table as an ```svg figure the terminal colors; the prose splits around it.
 					const segments = splitTableCharts(source, streaming);
 					segments.forEach((segment, part) => {
 						const slot = part === 0 ? `t${index}` : `t${index}.${part}`;
@@ -906,7 +931,7 @@ export class AssistantMessageComponent extends Container {
 						}
 						const chart = lookupTableChart(segment.table);
 						if (chart instanceof Promise) this.#awaitChart(chart);
-						else if (chart) children.push(describeTableChart(chart, slot));
+						else if (chart) children.push(markdown(slot, slot, chartFence(chart), false));
 					});
 				} else if (content.type === "thinking") {
 					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
@@ -962,9 +987,26 @@ export class AssistantMessageComponent extends Container {
 				}
 			}
 			if (this.#showImages && this.#showToolResultImages) {
+				// Reads of files Tern's media viewer shows: the host loads each file once by path, no bytes uploaded.
+				const shownPaths = new Set<string>();
+				if (media) {
+					for (const [toolCallId, mediaPath] of this.#toolMediaPathByCallId) {
+						if (shownPaths.has(mediaPath)) continue;
+						shownPaths.add(mediaPath);
+						children.push(nativeMediaNode(mediaPath, `r${toolCallId}`));
+					}
+				}
 				for (const [toolCallId, images] of this.#toolImagesByCallId) {
+					if (media && this.#toolMediaPathByCallId.has(toolCallId)) continue;
 					images.forEach((image, index) => {
-						children.push(this.#nativeImages.get(`r${toolCallId}:${index}`, image.data, image.mimeType));
+						children.push(
+							this.#nativeImages.get(
+								`r${toolCallId}:${index}`,
+								image.data,
+								image.mimeType,
+								this.#toolMediaPathByCallId.get(toolCallId),
+							),
+						);
 					});
 				}
 			}
@@ -1226,17 +1268,23 @@ export class AssistantMessageComponent extends Container {
 					// Streaming child: publish Markdown's frozen prefix, and only
 					// once non-blank content exists past it — the block's last
 					// non-blank line is still being written (thinking's prose fold
-					// may rewrite it) and must stay out of published bytes.
+					// may rewrite it) and must stay out of published bytes. A
+					// partial thinking line the fold may still drop does not count.
+					// The frozen prefix is in streamingMarkdownSource form, so
+					// offsets into the block use that form too.
 					const raw = md.getLastRenderStableText();
 					const frozen = raw.trim();
-					if (frozen.length > 0 && /\S/.test(item.lastText.slice(raw.length))) {
+					let past = streamingMarkdownSource(item.lastText).slice(raw.length);
+					if (item.blockType === "thinking") past = past.replace(UNSETTLED_THINKING_TAIL, "");
+					if (frozen.length > 0 && /\S/.test(past)) {
 						parts.push({ kind: item.blockType, text: frozen });
 					}
 					break;
 				}
 				// Closed child: only the streaming tail may mutate in place, so
-				// everything before it is final.
-				parts.push({ kind: item.blockType, text: item.lastText });
+				// everything before it is final. Same form as the frozen prefix it
+				// published while streaming, so the snapshot still extends.
+				parts.push({ kind: item.blockType, text: streamingMarkdownSource(item.lastText) });
 				itemIndex++;
 				continue;
 			}
@@ -1521,8 +1569,15 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	setToolResultImages(toolCallId: string, images: ImageContent[]): void {
+	/**
+	 * A grouped read's result images, and `mediaPath`: the file it read that Tern's media viewer
+	 * shows (read details), which a native host supporting `media` shows by path instead of the
+	 * images. A media-only result (a model, a PDF) passes no images.
+	 */
+	setToolResultImages(toolCallId: string, images: ImageContent[], mediaPath?: string): void {
 		if (!toolCallId) return;
+		if (mediaPath) this.#toolMediaPathByCallId.set(toolCallId, mediaPath);
+		else this.#toolMediaPathByCallId.delete(toolCallId);
 		const validImages = images.filter(img => img.type === "image" && img.data && img.mimeType);
 		if (validImages.length === 0) {
 			this.#toolImagesByCallId.delete(toolCallId);
@@ -1564,12 +1619,15 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	#renderImageEntries(entries: Array<{ image: ImageContent; key: string }>, withLeadingSpacer: boolean): void {
+	#renderImageEntries(
+		entries: Array<{ image: ImageContent; key: string; sourcePath?: string }>,
+		withLeadingSpacer: boolean,
+	): void {
 		if (!this.#showImages || entries.length === 0) return;
 		this.#convertImagesForKitty(entries);
 
 		if (withLeadingSpacer) this.#contentContainer.addChild(new Spacer(1));
-		for (const { image, key } of entries) {
+		for (const { image, key, sourcePath } of entries) {
 			let displayImage: ImageContent | undefined = image;
 			if (TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png") {
 				displayImage = this.#kittyConversion(image);
@@ -1583,6 +1641,7 @@ export class AssistantMessageComponent extends Container {
 						{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
 						{
 							...resolveImageOptions(),
+							sourcePath,
 							budget: this.#imageBudget,
 							imageKey: key,
 							requestRender: this.#onImageUpdate,
@@ -1591,15 +1650,18 @@ export class AssistantMessageComponent extends Container {
 				);
 				continue;
 			}
-			this.#contentContainer.addChild(new Text(theme.fg("toolOutput", `[Image: ${image.mimeType}]`), 1, 0));
+			this.#contentContainer.addChild(
+				new Text(theme.fg("toolOutput", linkedImageText(`[Image: ${image.mimeType}]`, image, sourcePath)), 1, 0),
+			);
 		}
 	}
 
 	#renderToolImages(): void {
 		if (!this.#showToolResultImages) return;
-		const entries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) =>
-			images.map((image, index) => ({ image, key: `${toolCallId}:${index}` })),
-		);
+		const entries = Array.from(this.#toolImagesByCallId.entries()).flatMap(([toolCallId, images]) => {
+			const sourcePath = this.#toolMediaPathByCallId.get(toolCallId);
+			return images.map((image, index) => ({ image, key: `${toolCallId}:${index}`, sourcePath }));
+		});
 		this.#renderImageEntries(entries, true);
 	}
 
@@ -1742,7 +1804,8 @@ export class AssistantMessageComponent extends Container {
 		this.#lastUpdateTransient = opts?.transient === true;
 		// Everything below renders the display form; #lastMessage keeps the
 		// verbatim message so re-renders re-derive the reaction deterministically.
-		message = this.#displayMessage(message, this.#lastUpdateTransient);
+		// Narration the provider returned as thinking renders as answer text.
+		message = this.#displayMessage(presentNarrationAsAnswer(message), this.#lastUpdateTransient);
 		this.#displayedMessage = message;
 
 		// Streaming-speed gauge: only a live, in-flight render of the single

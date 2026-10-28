@@ -621,7 +621,7 @@ describe("AgentSession advisor toggle", () => {
 		});
 
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
-		expect(await session.dropImages()).toEqual({ removed: 1 });
+		expect(await session.dropImages()).toMatchObject({ removed: 1 });
 		expect(advisor.state.messages).toHaveLength(0);
 		expect(session.getAdvisorCost()).toBeCloseTo(0.5, 8);
 		expect(session.getAdvisorStats().cost).toBeCloseTo(0.5, 8);
@@ -1160,7 +1160,9 @@ describe("AgentSession advisor toggle", () => {
 
 			expect(markUsageLimitReached).toHaveBeenCalledTimes(1);
 			expect(markUsageLimitReached.mock.calls[0]?.[0]).toBe(model.provider);
-			expect(quotaSession.getAdvisorStatusOverview().advisors[0]?.yielded).toBe(true);
+			const quotaStatus = quotaSession.getAdvisorStatusOverview().advisors[0];
+			expect(quotaStatus).toMatchObject({ yielded: true });
+			expect(quotaStatus?.backlog).toBeGreaterThan(0);
 			// A quota-paused runtime cannot accept work either — the streaming
 			// mask must not reopen its eye mid-turn.
 			quotaSession.agent.state.isStreaming = true;

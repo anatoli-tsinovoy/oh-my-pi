@@ -2570,9 +2570,7 @@ use icu_collator::{
 	CollatorBorrowed,
 	options::{AlternateHandling, CollatorOptions, Strength},
 };
-use icu_decimal::provider::{Baked, DecimalSymbolsV1};
 use icu_locale_core::Locale;
-use icu_provider::{DataIdentifierBorrowed, DataLocale, DataProvider, DataRequest};
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
 use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, File, OpenOptions};
@@ -2594,8 +2592,11 @@ use uucore::{
 	version_cmp::version_cmp,
 };
 
+#[cfg(unix)]
+use crate::locale::locale_loadable;
 use crate::{
 	host::{Host, Utility, format_usage, rayon_global_pool_available, util},
+	locale::{numeric_symbols, parse_locale_name, shell_locale},
 	sort::{
 		buffer_hint::automatic_buffer_size,
 		tmp_dir::{TmpDirWrapper, TmpFile},
@@ -3934,34 +3935,6 @@ impl FieldSelector {
 	}
 }
 
-/// The shell's value for locale category `category`: LC_ALL, then the
-/// category, then LANG, with empty values treated as unset (POSIX). Read per
-/// invocation from the shell environment because uucore's getters read the
-/// process environment once and cache it, ignoring `LC_ALL=C sort`.
-fn shell_locale<'h>(host: &'h Host, category: &str) -> Option<&'h str> {
-	["LC_ALL", category, "LANG"]
-		.into_iter()
-		.find_map(|key| host.var(key).filter(|value| !value.is_empty()))
-}
-
-/// Parses a shell locale name the way uucore parses the process one:
-/// `language_TERRITORY[.codeset][@modifier]` becomes a BCP 47 locale plus
-/// whether the codeset is UTF-8. `None` means the C locale: C/POSIX, or a name
-/// ICU cannot read.
-fn parse_locale_name(name: &str) -> Option<(Locale, bool)> {
-	let mut parts = name.split(['.', '@']);
-	let language = parts
-		.next()
-		.filter(|language| !matches!(*language, "C" | "POSIX"))?;
-	let locale = Locale::try_from_str(&language.replace('_', "-"))
-		.ok()
-		.filter(|locale| *locale != Locale::UNKNOWN)?;
-	let utf8 = parts.next().is_some_and(|codeset| {
-		codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
-	});
-	Some((locale, utf8))
-}
-
 /// Collators built so far, by locale. Building one resolves the locale's
 /// tailoring through ICU's fallback chain, which repeated calls skip. `None`
 /// records a locale ICU could not build a collator for.
@@ -3992,45 +3965,12 @@ fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
 		.clone()
 }
 
-/// Decimal point and thousands separator for the shell's LC_NUMERIC, from
-/// ICU's CLDR data for that locale (the data uucore reads for the process
-/// locale). C rules apply when it names C, or on Unix a locale the system
-/// cannot load (GNU's fallback); Windows has no system locale to probe, so any
-/// locale ICU parses uses its CLDR rules.
+/// Decimal point and thousands separator for the shell's LC_NUMERIC.
 fn detect_numeric_locale(host: &Host) -> NumericLocaleSettings {
-	let Some(name) = shell_locale(host, "LC_NUMERIC") else {
-		return NumericLocaleSettings::default();
-	};
-	let Some((locale, utf8)) = parse_locale_name(name) else {
-		return NumericLocaleSettings::default();
-	};
-	#[cfg(unix)]
-	if !locale_loadable(name, nix::libc::LC_NUMERIC_MASK) {
-		return NumericLocaleSettings::default();
-	}
-	let data_locale = DataLocale::from(&locale);
-	let request = DataRequest {
-		id:       DataIdentifierBorrowed::for_locale(&data_locale),
-		metadata: Default::default(),
-	};
-	let Ok(response) = DataProvider::<DecimalSymbolsV1>::load(&Baked, request) else {
-		return NumericLocaleSettings::default();
-	};
-	let symbols = response.payload.get();
+	let symbols = numeric_symbols(host);
 	NumericLocaleSettings {
-		decimal_pt:    match symbols.decimal_separator().as_bytes().first() {
-			Some(b',') => Some(b','),
-			_ => Some(DECIMAL_PT),
-		},
-		// Upstream GNU coreutils ignore multibyte thousands separators
-		// (FIXME in C source). We keep the same single-byte behavior.
-		thousands_sep: match symbols.grouping_separator().as_bytes() {
-			[b] => Some(*b),
-			// ICU returns NBSP as UTF-8 (0xC2 0xA0). In non-UTF8 locales like ISO-8859-1,
-			// the input byte is 0xA0, so map it to a single-byte separator.
-			[0xc2, 0xa0] if !utf8 => Some(0xa0),
-			_ => None,
-		},
+		decimal_pt:    Some(symbols.decimal_point),
+		thousands_sep: symbols.thousands_sep,
 	}
 }
 
@@ -4452,27 +4392,6 @@ fn locale_failed_to_set(host: &Host) -> bool {
 		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
 }
 
-/// Whether the system can load `locale` for the categories in `mask`, probed
-/// with `newlocale` rather than `setlocale`, which would change the C locale
-/// of the whole host process.
-#[cfg(unix)]
-fn locale_loadable(locale: &str, mask: nix::libc::c_int) -> bool {
-	use nix::libc;
-	let Ok(locale) = std::ffi::CString::new(locale) else {
-		return false;
-	};
-	// SAFETY: `locale` is a valid NUL-terminated string; a non-null result is
-	// a fresh locale object owned here and freed immediately.
-	unsafe {
-		let handle = libc::newlocale(mask, locale.as_ptr(), std::ptr::null_mut());
-		if handle.is_null() {
-			return false;
-		}
-		libc::freelocale(handle);
-	}
-	true
-}
-
 fn key_zero_width(selector: &FieldSelector) -> bool {
 	let Some(to) = &selector.to else {
 		return false;
@@ -4712,9 +4631,102 @@ impl clap::Parser for Sort {
 	}
 }
 
+/// Moves a field separator that starts with `=` and is attached to `-t` into
+/// its own argument: `-t=` becomes `-t` `=`, and `-nrt=` becomes `-nrt` `=`.
+///
+/// GNU sort reads every byte after `-t` as the separator, so `-t=` selects
+/// `=`. Clap instead strips the first `=` after an attached short option, which
+/// left `-t=` with an empty separator. Values of other options, operands after
+/// `--`, and the separate value of an option such as `-o` are left untouched.
+fn split_attached_separator(argv: Vec<OsString>) -> Vec<OsString> {
+	let app = uu_app();
+	let takes_value =
+		|arg: &Arg| arg.get_action().takes_values() && !arg.is_require_equals_set();
+	let short_takes_value = |short: u8| {
+		app.get_arguments()
+			.find(|arg| arg.get_short() == Some(char::from(short)))
+			.map(takes_value)
+	};
+	// Mirrors clap's `infer_long_args`: an exact name wins, else a unique prefix.
+	let long_takes_value = |name: &str| {
+		let exact = app.get_arguments().find(|arg| arg.get_long() == Some(name));
+		let arg = exact.or_else(|| {
+			let mut prefixed = app
+				.get_arguments()
+				.filter(|arg| arg.get_long().is_some_and(|long| long.starts_with(name)));
+			let first = prefixed.next();
+			if prefixed.next().is_none() { first } else { None }
+		});
+		arg.is_some_and(takes_value)
+	};
+
+	let mut out = Vec::with_capacity(argv.len() + 1);
+	let mut args = argv.into_iter();
+	out.extend(args.next());
+	while let Some(arg) = args.next() {
+		let bytes = arg.as_encoded_bytes();
+		if bytes == b"--" {
+			out.push(arg);
+			out.extend(args);
+			break;
+		}
+		if let Some(long) = bytes.strip_prefix(b"--") {
+			let value_follows = !long.contains(&b'=')
+				&& std::str::from_utf8(long).is_ok_and(|name| long_takes_value(name));
+			out.push(arg);
+			if value_follows {
+				out.extend(args.next());
+			}
+			continue;
+		}
+		let Some(cluster) = bytes.strip_prefix(b"-") else {
+			out.push(arg);
+			continue;
+		};
+		let mut value_follows = false;
+		let mut split_at = None;
+		for (index, &short) in cluster.iter().enumerate() {
+			match short.is_ascii().then(|| short_takes_value(short)).flatten() {
+				Some(false) => continue,
+				// An unknown option ends the scan; clap reports it unchanged.
+				None => break,
+				Some(true) => {},
+			}
+			let value = &cluster[index + 1..];
+			if value.is_empty() {
+				value_follows = true;
+			} else if short == b't' && value[0] == b'=' {
+				// `-` plus the cluster up to and including `t`.
+				split_at = Some(index + 2);
+			}
+			break;
+		}
+		match split_at {
+			Some(split_at) => {
+				let (option, separator) = bytes.split_at(split_at);
+				// SAFETY: both halves come from `OsStr::as_encoded_bytes`, split
+				// after an ASCII byte.
+				out.push(unsafe { OsString::from_encoded_bytes_unchecked(option.to_vec()) });
+				out.push(unsafe { OsString::from_encoded_bytes_unchecked(separator.to_vec()) });
+			},
+			None => {
+				out.push(arg);
+				if value_follows {
+					out.extend(args.next());
+				}
+			},
+		}
+	}
+	out
+}
+
 impl Utility for Sort {
 	const NAME: &'static str = "sort";
 	const USAGE_ERROR: u8 = 2;
+
+	fn rewrite_argv(argv: Vec<OsString>) -> Result<Vec<OsString>, String> {
+		Ok(split_attached_separator(argv))
+	}
 
 	fn run(self, host: &mut Host) -> i32 {
 		match uu_sort(host, &self.matches, &self.legacy_warnings) {
@@ -6263,5 +6275,35 @@ mod tests {
 				assert!(capture.out() == expected, "{value:?} {stable:?}");
 			}
 		}
+	}
+
+	#[test]
+	fn attached_equals_selects_equals_as_separator() {
+		for args in [&["-t=", "-k2", "-nr"][..], &["-nrt=", "-k2"]] {
+			let (code, capture) = run_util::<Sort>(args, "a=1\nb=3\n", "/");
+			assert_eq!(code, 0, "{args:?}: {}", capture.err());
+			assert_eq!(capture.out(), "b=3\na=1\n", "{args:?}");
+		}
+	}
+
+	#[test]
+	fn attached_separator_keeps_every_byte_after_t() {
+		let (code, capture) = run_util::<Sort>(&["-t==", "-k2"], "a=1\n", "/");
+		assert_eq!(code, 2);
+		assert_eq!(capture.err(), "sort: separator must be exactly one character long: '=='\n");
+	}
+
+	#[test]
+	fn separator_spelling_in_values_and_operands_is_left_alone() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		std::fs::write(dir.path().join("-t="), "b\na\n").expect("fixture");
+		let (code, capture) = run_util::<Sort>(&["--", "-t="], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a\nb\n");
+
+		std::fs::write(dir.path().join("in"), "d\nc\n").expect("fixture");
+		let (code, capture) = run_util::<Sort>(&["-o", "-t=", "in"], "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(std::fs::read_to_string(dir.path().join("-t=")).expect("output"), "c\nd\n");
 	}
 }

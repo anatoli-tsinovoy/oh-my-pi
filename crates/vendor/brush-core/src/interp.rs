@@ -17,6 +17,7 @@ use crate::{
 	env::{EnvironmentLookup, EnvironmentScope, valid_variable_name},
 	error, expansion, extendedtests, extensions, ioutils, jobs, openfiles,
 	openfiles::{OpenFile, OpenFiles},
+	pipetap::{self, PipeTap},
 	results::{ExecutionExitCode, ExecutionResult, ExecutionSpawnResult, ExecutionWaitResult},
 	shell::Shell,
 	sys, timing,
@@ -106,6 +107,8 @@ pub struct ExecutionParameters {
 	pub suppress_errexit:     bool,
 	/// Optional hook reporting spawned external children for scoped teardown.
 	spawn_observer:           Option<Arc<dyn SpawnObserver>>,
+	/// Optional hook mirroring the bytes that cross pipeline pipes.
+	pipe_tap:                 Option<Arc<dyn PipeTap>>,
 	/// Optional flag a command raises when it reports an error yet goes on,
 	/// so its exit status does not show the failure.
 	reported_error:           Option<Arc<AtomicBool>>,
@@ -157,6 +160,16 @@ impl ExecutionParameters {
 	/// Returns the active spawn-observer hook, if any.
 	pub fn spawn_observer(&self) -> Option<&Arc<dyn SpawnObserver>> {
 		self.spawn_observer.as_ref()
+	}
+
+	/// Assigns a hook that mirrors every pipeline pipe of this execution.
+	pub fn set_pipe_tap(&mut self, tap: Arc<dyn PipeTap>) {
+		self.pipe_tap = Some(tap);
+	}
+
+	/// Returns the active pipe-tap hook, if any.
+	pub fn pipe_tap(&self) -> Option<&Arc<dyn PipeTap>> {
+		self.pipe_tap.as_ref()
 	}
 
 	/// Assigns the flag commands raise when they report an error yet go on.
@@ -595,12 +608,18 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 ) -> jobs::Job {
 	// Clone the inputs.
 	let mut cloned_shell = shell.clone();
-	let cloned_params = params.clone();
+	let mut cloned_params = params.clone();
 	let cloned_ao_list = ao_list.clone();
 
 	// Mark the child shell as not interactive; we don't want it messing with the
 	// terminal too much.
 	cloned_shell.options_mut().interactive = false;
+
+	// Let the job flag its own task for cancellation: the interpreter checks
+	// these parameters between commands and loop iterations, so `kill %N` also
+	// stops a body that never yields (a loop of synchronous builtins).
+	let cancellation = CancellationToken::new();
+	cloned_params.set_cancel_token(cancellation.clone());
 
 	let join_handle = tokio::spawn(async move {
 		cloned_ao_list
@@ -613,6 +632,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 		ao_list.to_string(),
 		jobs::JobState::Running,
 	)
+	.with_cancellation(cancellation)
 }
 
 #[async_trait::async_trait]
@@ -778,12 +798,19 @@ async fn spawn_pipeline_processes(
 	let mut process_group_id: Option<i32> = None;
 
 	// Create pipes to use between commands, but only bother doing so if there's
-	// more than one command.
+	// more than one command. Pipe `i` carries stage `i` into stage `i + 1`
+	// (opened in that order, so a tap sees the stages left to right); the
+	// stage loop pops both lists from the back.
 	if pipeline_len > 1 {
-		for _ in 0..(pipeline_len - 1) {
-			let (reader, writer) = std::io::pipe()?;
-			pipe_readers.push(Some(reader.into()));
-			pipe_writers.push(Some(writer.into()));
+		let pipes = pipeline
+			.seq
+			.iter()
+			.tuple_windows()
+			.map(|(producer, consumer)| pipetap::pipe(params.pipe_tap(), producer, consumer))
+			.collect::<Result<Vec<_>, _>>()?;
+		for (reader, writer) in pipes.into_iter().rev() {
+			pipe_readers.push(Some(reader));
+			pipe_writers.push(Some(writer));
 		}
 		// Push `None` to the readers; it will be popped off by the *first* command,
 		// which will mean that command gets its stdin from the execution parameters'
@@ -1147,6 +1174,10 @@ impl Execute for ast::CoprocessCommand {
 
 		let body = self.body.clone();
 		let cancel_token = child_params.cancel_token();
+		// Give the coprocess its own cancellation flag so `kill %N` ends it at its
+		// next interpreter check, even when the body never yields.
+		let cancellation = CancellationToken::new();
+		child_params.set_cancel_token(cancellation.clone());
 		let join_handle = tokio::spawn(async move {
 			let pipeline_context = PipelineExecutionContext {
 				shell:            commands::ShellForCommand::ParentShell(&mut child_shell),
@@ -1162,11 +1193,14 @@ impl Execute for ast::CoprocessCommand {
 			}
 		});
 
-		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
-			[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
-			format!("coproc {name}"),
-			jobs::JobState::Running,
-		));
+		let job = shell.jobs_mut().add_as_current(
+			jobs::Job::new(
+				[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
+				format!("coproc {name}"),
+				jobs::JobState::Running,
+			)
+			.with_cancellation(cancellation),
+		);
 		let job_id = job.id;
 
 		// Fill out the fd variable.

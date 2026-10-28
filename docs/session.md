@@ -58,7 +58,7 @@ Terminal breadcrumb files are written under:
 ~/.omp/agent/terminal-sessions/<terminal-id>
 ```
 
-Breadcrumb content begins with cwd and session file path. Optional extra lines are `fresh` and `cwdstat <device> <inode>`. A fresh breadcrumb preserves an initially created, lazy session whose JSONL file does not exist yet, preventing `continueRecent()` from reopening the previous session. Explicit `newSession()` boundaries materialize their header before returning. The directory identity permits automatic re-rooting after a same-filesystem project rename; a missing cwd alone is not move evidence. Writes are synchronous, ordered, and best-effort.
+Breadcrumb content begins with cwd and session file path. Optional extra lines are `fresh` and `cwdstat <device> <inode>`. A fresh breadcrumb preserves an initially created, lazy session whose JSONL file does not exist yet, preventing `continueRecent()` from reopening the previous session. Explicit `newSession()` boundaries materialize their header before returning, except the lazy successor created by `drop` (`/delete`). The directory identity permits automatic re-rooting after a same-filesystem project rename; a missing cwd alone is not move evidence. Writes are synchronous, ordered, and best-effort.
 
 ## File Format
 
@@ -82,6 +82,7 @@ Session files are JSONL: one JSON object per line. Current files physically begi
   "additionalDirectories": ["/work/shared"],
   "previousSessionFiles": ["/old/location/session.jsonl"],
   "providerPromptCacheKey": "optional inherited cache identity",
+  "taskPromptCacheKey": "optional local-only Task sibling family key",
   "parentSession": "optional lineage marker"
 }
 ```
@@ -92,6 +93,11 @@ Notes:
 - `additionalDirectories` records normalized, deduplicated workspace roots beyond `cwd`.
 - `previousSessionFiles` records prior absolute locations after successful moves.
 - `providerPromptCacheKey` carries an inherited provider prompt-cache identity for eligible full forks.
+- `taskPromptCacheKey` is a local-only Task sibling family key (`<parent cache key>:<agent name>`), omitted from shares and HTML exports.
+  - The executor derives it once the child session exists, regardless of the child's initial model. An empty parent cache lineage derives nothing, so those children keep their own session identity.
+  - Until a request uses it, the key lives in a session-scoped, non-persisted stash. The first primary request on a model that opts into `shared-prompt-cache` writes it to the header, so fork and reopen keep it.
+  - Each request decides consumption against its own model: an explicit session key wins; otherwise the family key applies only on opted-in models.
+  - The stash does not survive a fork, move, branch, new-session reset, or switch to a different session; a rolled-back move or switch restores it.
 - `parentSession` is an opaque lineage string. Current code writes either a session id or a session path depending on flow (`fork`, `forkFrom`, `createBranchedSession`, or explicit `newSession({ parentSession })`). Treat it as metadata, not a typed foreign key.
 
 - `titleSource` is `auto` or `user`; automatic renames cannot overwrite a user title.
@@ -526,10 +532,11 @@ Ordinary completed appends update memory and local file storage synchronously on
 
 - A new ordinary session remains memory-only until it contains an assistant message or a caller invokes `ensureOnDisk()`.
 - Before that gate, entries remain in memory; crossing it writes the full title slot, header, and accumulated entries.
-- Explicit `newSession()` (including `/new`) calls `ensureOnDisk()` before returning, preserving an empty session boundary across terminals.
+- Explicit `newSession()` (including `/new`) calls `ensureOnDisk()` before returning, preserving an empty session boundary across terminals. The `/delete` successor (`drop`) is the exception: it stays lazy, because the fresh terminal breadcrumb already pins this terminal to it and a failed deletion leaves the predecessor as a legitimate resume target; a zero-turn quit must not leave an empty file.
 - Afterwards, entries append incrementally.
 - Saving an editor draft forces a discoverable header and stores `draft.txt` with a marker; if the draft disappears while only startup metadata remains, close removes that draft-only session. Explicit `ensureOnDisk()` sessions remain resumable.
 - Concurrent completed appends supersede an in-flight atomic rewrite with an authoritative full-body rewrite so stale publication cannot clobber them.
+- A queued indexed full rewrite stays non-current until confirmation. When a fenced rewrite lands after a successor supersedes it, the manager validates that durable body and records its byte size before retrying the newer transcript.
 
 ### Durability operations
 
@@ -583,6 +590,13 @@ Implementations and adapters:
 The sessions phase also removes transcript rewrite temps (`.<name>.jsonl.<snowflake>.tmp`, and the same pattern beside registered `--session` files) once they are past the 5-minute write grace. A live rewrite renames its temp into place within milliseconds, so an older one was left by a killed or crashed writer.
 
 The stale-state phase is opt-in: it runs only with `--stale` or when `gc.stale` is enabled (default off), so an unqualified `omp gc --apply` never deletes reports or replicas. It removes `custom-session-files` markers and terminal breadcrumbs whose session file no longer exists once they are a day old (a lazy session's marker names a transcript that is written only on its first turn). A breadcrumb recorded as a fresh `/new` boundary is always kept: `--continue` honors it before its transcript exists, and it is rewritten when the session materializes or replaced by the terminal's next session. For the default agent dir — or a custom agent dir named `agent`, whose parent is treated as the config root — it also expires debug report bundles (`reports/*.tar.gz`) and collab guest replicas (`collab/*.jsonl` plus their artifact directories and custom-session marker) that are both outside the newest `gc.staleRetainNewest` (default 20) and older than `gc.staleRetainDays` (default 30). A replica that a terminal breadcrumb points at, or that a running guest holds open, is kept. Stale state is pruned before the blob sweep, so blobs referenced only by an expired replica are swept in the same run.
+
+The compress phase is opt-in as well: `--compress` or `gc.compress` (default off). It stores every file of a session (the transcript and its artifact tree) with the filesystem's transparent compression once the transcript has been idle for `gc.compressAfterDays` (default 7, `--compress-after-days`); files written more recently are skipped. Session ownership leases are taken only for sessions with files left to compress: a session is skipped while a running process holds the lease of its transcript or of any transcript nested in its artifact tree (subagent sessions, recognized by their session header whatever their file name), and those leases are held while its files are rewritten. Unlike archiving, a session with an interrupted last turn qualifies, since it stays resumable. Paths, bytes, and mtimes are unchanged and no history or stats rows are deleted, so compressed sessions stay listed, resumable, and searchable. A regular file with a single link that spans more than one filesystem block qualifies; already-compressed formats (`.gz`, `.zst`, images) are skipped. The volume holding the sessions root decides the method:
+
+- **APFS (macOS):** detected by matching the directory's device against `apfs` entries in the mount table. `ditto --hfsCompression` writes compressed copies, with the original mtime to the nanosecond, into a fresh `.omp-gc-compress-XXXXXX` scratch directory beside the originals that holds an owner marker. A copy replaces its original only when its size and SHA-256 match and it allocates less space; immediately before the rename, the original's inode, size, and mtime must still match their values at selection and it must still have a single link, and a transcript's check and rename run under the session publish lock that serializes appends. A scratch directory left by a killed run is removed by the next `--compress --apply` run, under the sessions root and the archive root; a directory with that name and no owner marker is removed only when empty. Stats sync and the dashboard watcher skip `.omp-gc-compress-*` directories, so they never ingest a scratch copy. The replaced file is a new inode, so the next stats sync re-reads each compressed transcript once from the start; it replaces the session's rows rather than duplicating them. Appending to a compressed file stores it uncompressed again, which a later run picks up.
+- **NTFS (Windows):** detected with `GetVolumeInformationW`, which must report NTFS with per-file compression support. `compact /c` sets LZNT1 compression on each file in place, keeping its inode and timestamps; later appends are stored compressed too. WOF (`compact /exe`) is not used because a write inflates the whole file.
+
+Other filesystems report the phase as unsupported.
 
 Journal payload I/O is streamed during blob-reference scans, archive history/stats reconciliation, gzip creation, and rollback. Active `.jsonl`, recoverable `.jsonl.*.bak`, and archived `.jsonl.gz` records all participate in reference discovery, including references in malformed JSON text. Compressed scans drain and validate the complete stream before their results can authorize deletion. Archives retain the original JSONL bytes when decompressed, and artifact trees keep their existing layout.
 

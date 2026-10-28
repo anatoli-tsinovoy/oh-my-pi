@@ -17,7 +17,7 @@ export const lspSchema = type({
 	"timeout?": type.number
 		.atLeast(TOOL_TIMEOUTS.lsp.min)
 		.atMost(TOOL_TIMEOUTS.lsp.max)
-		.describe("Timeout in seconds (default 20; range 5–300)."),
+		.describe("Timeout in seconds; raises or lowers the default (range 5–300)."),
 	payload: "string?",
 });
 
@@ -406,6 +406,10 @@ export interface OpenFile {
 	 * reconcile treats the document as dirty and resyncs from disk.
 	 */
 	syncedHash?: number | bigint;
+	/** When an OMP operation last used this document; long-unused documents close before the next open. */
+	lastUsedAt: number;
+	/** When this document was reopened after an idle close; absent for a first open. */
+	reopenedAt?: number;
 }
 
 export interface PendingRequest {
@@ -437,6 +441,11 @@ export interface LspClient {
 	/** Dynamic capability registrations keyed by the server-provided registration ID. */
 	dynamicCapabilityRegistrations?: Map<string, string>;
 	openFiles: Map<string, OpenFile>;
+	/**
+	 * Documents closed for idleness, with the last version the server saw. A reopen
+	 * resumes past that version; absent until the client closes one.
+	 */
+	idleClosedFiles?: Map<string, number>;
 	pendingRequests: Map<number | string, PendingRequest>;
 	isReading: boolean;
 	/** Lifecycle state: "connecting" until initialize completes, then "ready"; "error" on init failure or reader death. */

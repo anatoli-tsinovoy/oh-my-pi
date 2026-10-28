@@ -9,6 +9,7 @@ import { APP_NAME, getPluginsNodeModules, getProjectDir } from "@oh-my-pi/pi-uti
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
 import { PluginManager, parseSettingValue, validateSetting } from "../extensibility/plugins";
+import { setInstalledPluginEnabled } from "../extensibility/plugins/toggle";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
@@ -313,44 +314,9 @@ async function handleUpgrade(
 	args: string[],
 	flags: PluginCommandArgs["flags"],
 ): Promise<void> {
-	let pluginId = args[0];
 	const manager = await makeMarketplaceManager();
-	// Marketplace IDs are `name@marketplace`; anything else is either a bare
-	// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
-	// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
-	if (pluginId && !parsePluginId(pluginId)) {
-		const bareName = pluginId;
-		const candidates = (await manager.listInstalledPlugins())
-			.map(p => p.id)
-			.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
-		const uniqueCandidates = [...new Set(candidates)];
-		if (uniqueCandidates.length > 1) {
-			console.error(
-				chalk.red(
-					`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
-				),
-			);
-			process.exit(1);
-		}
-		if (uniqueCandidates.length === 1) {
-			pluginId = uniqueCandidates[0] as string;
-		} else {
-			await upgradePackagePlugin(pluginManager, bareName, flags);
-			return;
-		}
-	}
 	try {
-		if (pluginId) {
-			if (flags.scope) {
-				const result = await manager.upgradePlugin(pluginId, flags.scope);
-				console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
-			} else {
-				const entries = await manager.upgradePluginAcrossScopes(pluginId);
-				for (const entry of entries) {
-					console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
-				}
-			}
-		} else {
+		if (args.length === 0) {
 			if (flags.scope) {
 				console.error(
 					chalk.yellow(
@@ -364,6 +330,43 @@ async function handleUpgrade(
 			} else {
 				for (const r of results) {
 					console.log(chalk.green(`  ${r.pluginId} (${r.scope}): ${r.from} -> ${r.to}`));
+				}
+			}
+			return;
+		}
+
+		for (let pluginId of args) {
+			// Marketplace IDs are `name@marketplace`; anything else is either a bare
+			// marketplace plugin name or an npm/git-installed plugin (e.g. `ida-mcp`
+			// from `github:HexRaysSA/ida-mcp#latest`, or a scoped `@scope/pkg`).
+			if (!parsePluginId(pluginId)) {
+				const bareName = pluginId;
+				const candidates = (await manager.listInstalledPlugins())
+					.map(p => p.id)
+					.filter(id => id.slice(0, id.lastIndexOf("@")) === bareName);
+				const uniqueCandidates = [...new Set(candidates)];
+				if (uniqueCandidates.length > 1) {
+					console.error(
+						chalk.red(
+							`${bareName} is installed from ${uniqueCandidates.length} marketplaces. Qualify it: ${uniqueCandidates.join(", ")}`,
+						),
+					);
+					process.exit(1);
+				}
+				if (uniqueCandidates.length === 1) {
+					pluginId = uniqueCandidates[0];
+				} else {
+					await upgradePackagePlugin(pluginManager, bareName, flags);
+					continue;
+				}
+			}
+			if (flags.scope) {
+				const result = await manager.upgradePlugin(pluginId, flags.scope);
+				console.log(chalk.green(`Upgraded ${pluginId} (${flags.scope}) to ${result.version}`));
+			} else {
+				const entries = await manager.upgradePluginAcrossScopes(pluginId);
+				for (const entry of entries) {
+					console.log(chalk.green(`Upgraded ${pluginId} (${entry.scope}) to ${entry.version}`));
 				}
 			}
 		}
@@ -1081,23 +1084,14 @@ async function handleSetEnabled(
 	const installedPlugins = new Set((await mktMgr.listInstalledPlugins()).map(p => p.id));
 
 	for (const name of plugins) {
-		if (installedPlugins.has(name)) {
-			try {
-				await mktMgr.setPluginEnabled(name, enabled, flags.scope);
-				if (flags.json) {
-					console.log(JSON.stringify({ [jsonKey]: name }));
-				} else {
-					console.log(chalk.green(`${theme.status.success} ${pastTense} ${name}`));
-				}
-			} catch (err) {
-				console.error(chalk.red(`${theme.status.error} Failed to ${action} ${name}: ${err}`));
-				process.exit(1);
-			}
-			continue;
-		}
-
 		try {
-			await manager.setEnabled(name, enabled);
+			await setInstalledPluginEnabled(name, {
+				enabled,
+				scope: flags.scope,
+				marketplaceIds: installedPlugins,
+				marketplace: mktMgr,
+				npm: manager,
+			});
 			if (flags.json) {
 				console.log(JSON.stringify({ [jsonKey]: name }));
 			} else {

@@ -9,13 +9,15 @@ import {
 	getActiveOrPendingClient,
 	getOrCreateClient,
 	notifyWorkspaceWatchedFiles,
+	reconcileOpenFilesFromDisk,
 	sendRequest,
 } from "./client";
 import { getConfig, getServersForFile } from "./config";
 import {
 	captureDiagnosticVersions,
 	captureOpenFileVersions,
-	DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+	DIAGNOSTICS_PIPELINE_GRACE_MS,
+	deferredDiagnosticsWaitMs,
 	formatContent,
 	getDiagnosticsForFile,
 	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
@@ -93,6 +95,8 @@ export interface WritethroughOptions {
 	deferredSignal?: AbortSignal;
 	/** Transform diagnostics before surfacing them after a successful fetch. */
 	transformDiagnostics?: (absPath: string, result: FileDiagnosticsResult) => FileDiagnosticsResult;
+	/** `lsp.requestTimeout` in seconds; raises the late-diagnostics wait for slow (cold-starting) servers. */
+	requestTimeoutSec?: number;
 }
 
 /** Internal resolved form of {@link WritethroughOptions} that the writethrough machinery operates on. */
@@ -100,6 +104,8 @@ type ResolvedWritethroughOptions = {
 	enableFormat: boolean;
 	enableDiagnostics: boolean;
 	transformDiagnostics?: (absPath: string, result: FileDiagnosticsResult) => FileDiagnosticsResult;
+	/** Per-server wait budget (ms) for diagnostics delivered late through the deferred channel. */
+	deferredWaitMs: number;
 };
 
 /** Per-file deferred LSP diagnostics wiring for {@link WritethroughCallback}. */
@@ -171,6 +177,7 @@ function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughO
 		existing.options.enableFormat ||= options.enableFormat;
 		existing.options.enableDiagnostics ||= options.enableDiagnostics;
 		existing.options.transformDiagnostics ??= options.transformDiagnostics;
+		existing.options.deferredWaitMs = Math.max(existing.options.deferredWaitMs, options.deferredWaitMs);
 		return existing;
 	}
 	const batch: LspWritethroughBatchState = {
@@ -272,17 +279,18 @@ async function scheduleDeferredDiagnosticsFetch(args: {
 	servers: Array<[string, ServerConfig]>;
 	minVersions: ServerVersionMap | undefined;
 	expectedDocumentVersions: ServerVersionMap | undefined;
+	waitMs: number;
 	signal: AbortSignal;
 	callback: (diagnostics: FileDiagnosticsResult) => void;
 }): Promise<void> {
 	try {
-		const deferredTimeout = AbortSignal.timeout(25_000);
+		const deferredTimeout = AbortSignal.timeout(Math.max(25_000, args.waitMs + DIAGNOSTICS_PIPELINE_GRACE_MS));
 		const combined = AbortSignal.any([args.signal, deferredTimeout]);
 		const diagnostics = await getDiagnosticsForFile(args.dst, args.cwd, args.servers, {
 			signal: combined,
 			minVersions: args.minVersions,
 			expectedDocumentVersions: args.expectedDocumentVersions,
-			timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+			timeoutMs: args.waitMs,
 		});
 		if (args.signal.aborted || diagnostics === undefined) return;
 		args.callback(diagnostics);
@@ -312,10 +320,21 @@ async function fetchDiagnosticsWithDeferral(args: {
 	minVersions: ServerVersionMap | undefined;
 	expectedDocumentVersions: ServerVersionMap | undefined;
 	transformDiagnostics?: ResolvedWritethroughOptions["transformDiagnostics"];
+	deferredWaitMs: number;
 	deferred?: { onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void; signal: AbortSignal };
 	signal?: AbortSignal;
 }): Promise<FileDiagnosticsResult | undefined> {
-	const { dst, cwd, servers, minVersions, expectedDocumentVersions, transformDiagnostics, deferred, signal } = args;
+	const {
+		dst,
+		cwd,
+		servers,
+		minVersions,
+		expectedDocumentVersions,
+		transformDiagnostics,
+		deferredWaitMs,
+		deferred,
+		signal,
+	} = args;
 	const apply = (d: FileDiagnosticsResult | undefined) =>
 		d && transformDiagnostics ? transformDiagnostics(dst, d) : d;
 
@@ -335,7 +354,7 @@ async function fetchDiagnosticsWithDeferral(args: {
 		signal: deferred.signal,
 		minVersions,
 		expectedDocumentVersions,
-		timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+		timeoutMs: deferredWaitMs,
 	});
 	const INLINE_TIMEOUT = Symbol("inline-diagnostics-timeout");
 	const raced = await Promise.race([
@@ -445,6 +464,16 @@ async function runLspWritethrough(
 		);
 		operationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		await untilAborted(operationSignal, async () => {
+			if (enableDiagnostics) {
+				// The target overlay leads disk until commit; reconcile only other
+				// open documents before computing diagnostics for the new content.
+				await Promise.all(
+					lspServers.map(async ([, serverConfig]) => {
+						const client = await getActiveOrPendingClient(serverConfig, cwd, operationSignal);
+						if (client) await reconcileOpenFilesFromDisk(client, operationSignal);
+					}),
+				);
+			}
 			if (useCustomFormatter) {
 				// Custom linters operate on on-disk input; the shared pre-write also
 				// supports implementations that inspect the file before formatting.
@@ -528,6 +557,7 @@ async function runLspWritethrough(
 					servers,
 					minVersions,
 					expectedDocumentVersions,
+					waitMs: options.deferredWaitMs,
 					signal: deferred.signal,
 					callback: deferred.onDeferredDiagnostics,
 				});
@@ -550,6 +580,7 @@ async function runLspWritethrough(
 			minVersions,
 			expectedDocumentVersions,
 			transformDiagnostics: options.transformDiagnostics,
+			deferredWaitMs: options.deferredWaitMs,
 			deferred,
 			signal,
 		});
@@ -632,6 +663,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		enableFormat: options?.enableFormat ?? false,
 		enableDiagnostics: options?.enableDiagnostics ?? false,
 		transformDiagnostics: options?.transformDiagnostics,
+		deferredWaitMs: deferredDiagnosticsWaitMs(options?.requestTimeoutSec),
 	};
 	return async (
 		dst: string,

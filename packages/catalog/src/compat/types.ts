@@ -351,7 +351,11 @@ export interface CompiledBehavior {
 	pricingPeers: CompiledPricingPeer[];
 	retryResetTimezones: CompiledRetryResetTimezone[];
 	retiredProviders: string[];
+	/** Hosts whose prefix caches benefit from a stable append-only conversation. */
+	appendOnlyContextProviders: string[];
 	referenceIsolatedProviders: string[];
+	/** Built-in model selector chains per agent role, keyed by role in declaration order. */
+	roleDefaults: Record<string, string[]>;
 }
 
 /**
@@ -668,6 +672,8 @@ export interface CompiledProvider {
 	dynamicModelsAuthoritative?: boolean;
 	/** Generator backfills never copy reasoning/input/limits from same-id rows on other hosts. */
 	skipCrossProviderReferenceFills?: boolean;
+	/** Runtime discovery keeps a bundled row's display name instead of the live one. */
+	keepBundledNames?: boolean;
 	/** Present only for providers enrolled in `generate-models.ts` discovery. */
 	discovery?: CompiledProviderDiscovery;
 	/** Non-chat model kinds mapped to their runtime transport APIs. */

@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
@@ -71,6 +72,7 @@ async function createContext() {
 		"app.thinking.toggle": ["ctrl+t"],
 		"app.history.search": ["ctrl+r"],
 		"app.editor.external": ["ctrl+g"],
+		"app.local.open": ["alt+g"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
@@ -117,6 +119,7 @@ async function createContext() {
 		queuedMessageCount: 0,
 		abort,
 		retry,
+		prewarmModelConnection: vi.fn(),
 	};
 	const updatePendingMessagesDisplay = vi.fn();
 	const handleBtwBranchKey = vi.fn(async () => true);
@@ -227,7 +230,7 @@ async function createContext() {
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
-		handleClearCommand: vi.fn(),
+		handleNewCommand: vi.fn(),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
@@ -1012,6 +1015,7 @@ describe("InputController global editor actions", () => {
 	const CTRL_G = "\x07";
 	const CTRL_SHIFT_O = "\x1b[111;6u";
 	const ALT_L = "\x1bl";
+	const ALT_G = "\x1bg";
 
 	beforeAll(async () => {
 		await initTheme(false);
@@ -1114,6 +1118,35 @@ describe("InputController global editor actions", () => {
 		expect(openExternalEditor).not.toHaveBeenCalled();
 	});
 
+	it("opens the local:// file picker on Alt+G but not while a hook selector is focused", async () => {
+		const context = await createContext();
+		const controller = new context.InputController(context.ctx);
+		const openLocalFilePicker = vi.spyOn(controller, "openLocalFilePicker").mockResolvedValue();
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, ALT_G)).toEqual({ consume: true });
+		expect(openLocalFilePicker).toHaveBeenCalledTimes(1);
+
+		// A second Alt+G while the picker is up must not stack another picker.
+		const selector = {};
+		context.ctx.hookSelector = selector as InteractiveModeContext["hookSelector"];
+		context.setFocused(selector);
+		expect(dispatchInput(listeners, ALT_G)).toBeUndefined();
+		expect(openLocalFilePicker).toHaveBeenCalledTimes(1);
+	});
+
+	it("refuses Alt+G when collabGuest is active", async () => {
+		const context = await createContext();
+		context.ctx.collabGuest = {} as unknown as InteractiveModeContext["collabGuest"];
+		const controller = new context.InputController(context.ctx);
+		controller.setupKeyHandlers();
+		const listeners = registeredInputListeners(context.spies.addInputListener);
+
+		expect(dispatchInput(listeners, ALT_G)).toEqual({ consume: true });
+		expect(context.ctx.showStatus).toHaveBeenCalledWith("/local is host-only during a collab session");
+	});
+
 	it("defers the tree selector's Ctrl+Shift+O filter binding", async () => {
 		const context = await createContext();
 		const controller = new context.InputController(context.ctx);
@@ -1160,6 +1193,25 @@ describe("InputController global tool-output expand (ctrl+o)", () => {
 		setFocused({ handleInput() {} });
 		expect(ctx.toolOutputExpanded).toBe(false);
 
+		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(true);
+	});
+
+	it("lets a focused approval prompt with summarized details take ctrl+o before the transcript", async () => {
+		const { ctx, listeners, setFocused } = await setup();
+		const callbacks = { onApprove: vi.fn(), onDeny: vi.fn() };
+		const summarized = new ApprovalDialogComponent("Allow tool: bash\nCommand: rm -rf build …", callbacks, {
+			fullPrompt: "Allow tool: bash\nCommand: rm -rf build\nrm -rf dist",
+		});
+		setFocused(summarized);
+		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
+		expect(ctx.toolOutputExpanded).toBe(false);
+		expect(summarized.render(80).join("\n")).toContain("rm -rf dist");
+		// The image-paste chord is left to the dialog, which hands it to the composer's tracked paste.
+		expect(dispatchInput(listeners, "\x16")).toBeUndefined();
+
+		// Without a full prompt to show, the key keeps toggling tool previews (#7837).
+		setFocused(new ApprovalDialogComponent("Allow tool: bash\nCommand: ls", callbacks));
 		expect(dispatchInput(listeners, CTRL_O)).toEqual({ consume: true });
 		expect(ctx.toolOutputExpanded).toBe(true);
 	});
