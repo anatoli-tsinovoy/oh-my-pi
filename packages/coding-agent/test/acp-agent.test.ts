@@ -176,7 +176,7 @@ class FakeAgentSession {
 	buildUserSkillPrompt = buildSkillPromptMessage;
 	async refreshSkillsAndCommands(): Promise<void> {}
 	subscribeCommandMetadataChanged(_listener: () => void): () => void {
-		return () => {};
+		return () => { };
 	}
 	planModeState: PlanModeState | undefined;
 	waitForIdleCalls = 0;
@@ -336,7 +336,7 @@ class FakeAgentSession {
 		this.isStreaming = false;
 	}
 
-	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
+	async refreshMCPTools(_tools: unknown[]): Promise<void> { }
 
 	getContextUsage(): undefined {
 		return undefined;
@@ -354,7 +354,7 @@ class FakeAgentSession {
 		await this.sessionManager.close();
 	}
 
-	async reload(): Promise<void> {}
+	async reload(): Promise<void> { }
 
 	async newSession(): Promise<boolean> {
 		await this.sessionManager.newSession();
@@ -379,9 +379,9 @@ class FakeAgentSession {
 		return [];
 	}
 
-	setActiveToolsByName(_toolNames: string[]): void {}
+	setActiveToolsByName(_toolNames: string[]): void { }
 
-	setClientBridge(_bridge: unknown): void {}
+	setClientBridge(_bridge: unknown): void { }
 
 	setMcpServerInstructionsSource(_source: unknown): void {}
 
@@ -435,11 +435,11 @@ class FakeAgentSession {
 		this.forcedToolChoice = toolName;
 	}
 
-	async sendCustomMessage(_message: string, _options?: unknown): Promise<void> {}
+	async sendCustomMessage(_message: string, _options?: unknown): Promise<void> { }
 
-	async sendUserMessage(_content: string, _options?: unknown): Promise<void> {}
+	async sendUserMessage(_content: string, _options?: unknown): Promise<void> { }
 
-	async compact(_instructions?: string, _options?: unknown): Promise<void> {}
+	async compact(_instructions?: string, _options?: unknown): Promise<void> { }
 
 	async fork(): Promise<boolean> {
 		await this.sessionManager.flush();
@@ -725,8 +725,8 @@ describe("ACP agent", () => {
 		const currentModeConfig =
 			configNotification?.update.sessionUpdate === "config_option_update"
 				? (configNotification.update.configOptions.find(option => option.id === "mode") as
-						| { currentValue?: unknown }
-						| undefined)
+					| { currentValue?: unknown }
+					| undefined)
 				: undefined;
 		expect(currentModeConfig?.currentValue).toBe("plan");
 
@@ -1281,6 +1281,13 @@ describe("ACP agent", () => {
 				speeds: Array<{ value: unknown }>;
 			};
 		};
+		const expectedSttDefault = process.platform === "android" ? "local/whisper-base" : "local/parakeet-tdt-0.6b-v3";
+		const expectedSttModels = [
+			"local/whisper-base",
+			"local/whisper-small",
+			"local/whisper-large-v3-turbo",
+			...(process.platform === "android" ? [] : ["local/parakeet-tdt-0.6b-v3", "local/nemotron-streaming-en-0.6b"]),
+		];
 
 		expect(result).toMatchObject({
 			settings: {
@@ -1292,14 +1299,14 @@ describe("ACP agent", () => {
 				speechSpeed: "speech.speed",
 			},
 			defaults: {
-				speechToTextModel: "local/parakeet-tdt-0.6b-v3",
+				speechToTextModel: expectedSttDefault,
 				textToSpeechModel: "local/kokoro",
 				voice: "af_heart",
 				speed: 1,
 			},
 			speechToText: {
 				setting: "modelRoles.dictation",
-				defaultValue: "local/parakeet-tdt-0.6b-v3",
+				defaultValue: expectedSttDefault,
 			},
 			textToSpeech: {
 				modelSetting: "modelRoles.speech",
@@ -1313,9 +1320,7 @@ describe("ACP agent", () => {
 				speedRange: { min: 0.5, max: 2.5 },
 			},
 		});
-		expect(result.speechToText.models).toContainEqual(
-			expect.objectContaining({ value: "local/nemotron-streaming-en-0.6b" }),
-		);
+		expect(result.speechToText.models.map(model => model.value)).toEqual(expectedSttModels);
 		expect(result.textToSpeech.models.map(model => model.value)).toEqual(["local/kokoro"]);
 		expect(result.textToSpeech.models[0]?.voices).toEqual(result.textToSpeech.voices);
 		// Speed presets are numbers so clients can write them straight into the numeric settings.
@@ -2365,9 +2370,9 @@ describe("ACP agent", () => {
 		(session as unknown as { extensionRunner: unknown }).extensionRunner = {
 			getRegisteredCommands(reserved?: Set<string>) {
 				return [
-					{ name: "my-ext-cmd", description: "Extension command", handler: async () => {} },
-					{ name: "fast", description: "Would shadow builtin", handler: async () => {} },
-					{ name: "model:foo", description: "Colon-shadowed by /model", handler: async () => {} },
+					{ name: "my-ext-cmd", description: "Extension command", handler: async () => { } },
+					{ name: "fast", description: "Would shadow builtin", handler: async () => { } },
+					{ name: "model:foo", description: "Colon-shadowed by /model", handler: async () => { } },
 				].filter(cmd => !reserved?.has(cmd.name));
 			},
 		};

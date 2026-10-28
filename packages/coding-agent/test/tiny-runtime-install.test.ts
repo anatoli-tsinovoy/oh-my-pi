@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ensureOnnxRuntimeCudaProviders, formatOnnxRuntimeCudaDiagnostics } from "../src/subprocess/worker-runtime";
+import {
+	ensureOnnxRuntimeCudaProviders,
+	formatOnnxRuntimeCudaDiagnostics,
+	TRANSFORMERS_PACKAGE,
+	transformersRuntimePlan,
+} from "../src/subprocess/worker-runtime";
 
 const tempDirs: string[] = [];
 const CUDA_PROVIDER_FILES = [
@@ -37,6 +42,34 @@ async function makeRuntimeWithOnnxInstallScript(): Promise<string> {
 	);
 	return runtimeDir;
 }
+
+describe("Transformers runtime selection", () => {
+	it("uses the web bundle and stubs native-only dependencies on Android", () => {
+		expect(transformersRuntimePlan("android", false)).toEqual({
+			useSideRuntime: true,
+			entrySpecifier: `${TRANSFORMERS_PACKAGE}/dist/transformers.web.js`,
+			overrides: {
+				"onnxruntime-node": "npm:onnxruntime-common@1.24.3",
+				sharp: "npm:is-even@1.0.0",
+			},
+			trustedDependencies: undefined,
+		});
+	});
+	it("preserves ambient and compiled native Node runtimes on desktop", () => {
+		expect(transformersRuntimePlan("linux", false)).toEqual({
+			useSideRuntime: false,
+			entrySpecifier: TRANSFORMERS_PACKAGE,
+			overrides: undefined,
+			trustedDependencies: ["onnxruntime-node"],
+		});
+		expect(transformersRuntimePlan("darwin", true)).toEqual({
+			useSideRuntime: true,
+			entrySpecifier: TRANSFORMERS_PACKAGE,
+			overrides: undefined,
+			trustedDependencies: ["onnxruntime-node"],
+		});
+	});
+});
 
 describe("tiny runtime CUDA provider repair", () => {
 	it("runs onnxruntime-node's cuda12 installer when compiled runtime sidecars are missing", async () => {
