@@ -19,10 +19,11 @@ import { Image, type ImageBudget } from "../../components/image";
 import { clampScrollOffset, scrollOffsetForRow, viewportRange } from "../../components/scroll-viewport";
 import { centerLine, sliceWithWidth, truncateToWidth, visibleWidth } from "../../utils";
 import { formatBytes } from "@oh-my-pi/pi-utils";
+import { mixHex } from "@oh-my-pi/pi-utils/color";
 import { sanitizeDisplayText } from "../../overlays/extensions/display-text";
 import { getLanguageFromPath } from "../../lang-from-path";
 import { createHighlightStream, getThemeEpoch, theme } from "../../theme/theme";
-import { bgAnsiHex, canvasHex, fgAnsiHex, mixHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
+import { bgAnsiHex, canvasHex, fgAnsiHex, pill, selectionBgAnsi, textHex, withBg } from "./colors";
 import { DIFF_CONTEXT_LINES, type FileAssetSide, type FileStreamUpdate } from "./state";
 
 /** Column ranges (inclusive start, exclusive end) carrying intraline emphasis. */
@@ -569,6 +570,43 @@ interface AssetDocument {
 
 /** Result of a left click inside the pane. */
 export type PaneClick = { type: "hunk-action"; hunk: HunkBlock; action: HunkAction } | { type: "handled" } | null;
+
+/**
+ * The heading of one side of a media/binary change (`Before · PNG · Git LFS`):
+ * `label` plus the side's kind, shared by the ANSI pane and the native compare.
+ */
+export function assetTitle(label: string, side: FileAssetSide): string {
+	let kind: string;
+	let lfs = false;
+	switch (side.kind) {
+		case "empty":
+			return label;
+		case "image":
+			kind =
+				side.image.sourceMimeType === "image/svg+xml"
+					? "SVG"
+					: side.image.sourceMimeType.replace(/^image\//, "").toUpperCase();
+			lfs = side.image.lfsOid !== undefined;
+			break;
+		case "text":
+			kind = "Text";
+			lfs = side.lfsOid !== undefined;
+			break;
+		case "binary":
+			kind = "Binary";
+			lfs = side.lfsOid !== undefined;
+			break;
+		case "tooLarge":
+			kind = "Too large";
+			lfs = side.lfsOid !== undefined;
+			break;
+		case "lfsMissing":
+			kind = "LFS missing";
+			lfs = true;
+			break;
+	}
+	return `${label} · ${kind}${lfs ? " · Git LFS" : ""}`;
+}
 
 /**
  * Scrollable diff viewport. The root component feeds it key/mouse input and
@@ -1129,11 +1167,11 @@ export class DiffPane {
 		for (let index = 0; index < height; index++) {
 			const leftSource =
 				index === 0
-					? centerLine(theme.bold(this.#assetTitle("Before", asset.old)), leftWidth).trimEnd()
+					? centerLine(theme.bold(assetTitle("Before", asset.old)), leftWidth).trimEnd()
 					: (oldLines[index - 1] ?? "");
 			const rightSource =
 				index === 0
-					? centerLine(theme.bold(this.#assetTitle("After", asset.new)), rightWidth).trimEnd()
+					? centerLine(theme.bold(assetTitle("After", asset.new)), rightWidth).trimEnd()
 					: (newLines[index - 1] ?? "");
 			const left = truncateToWidth(leftSource, leftWidth);
 			const right = truncateToWidth(rightSource, rightWidth);
@@ -1206,39 +1244,6 @@ export class DiffPane {
 		}
 		const top = Math.max(0, Math.floor((height - content.length) / 2));
 		return Array.from({ length: height }, (_, index) => content[index - top] ?? "");
-	}
-
-	#assetTitle(label: string, side: FileAssetSide): string {
-		let kind: string;
-		let lfs = false;
-		switch (side.kind) {
-			case "empty":
-				return label;
-			case "image":
-				kind =
-					side.image.sourceMimeType === "image/svg+xml"
-						? "SVG"
-						: side.image.sourceMimeType.replace(/^image\//, "").toUpperCase();
-				lfs = side.image.lfsOid !== undefined;
-				break;
-			case "text":
-				kind = "Text";
-				lfs = side.lfsOid !== undefined;
-				break;
-			case "binary":
-				kind = "Binary";
-				lfs = side.lfsOid !== undefined;
-				break;
-			case "tooLarge":
-				kind = "Too large";
-				lfs = side.lfsOid !== undefined;
-				break;
-			case "lfsMissing":
-				kind = "LFS missing";
-				lfs = true;
-				break;
-		}
-		return `${label} · ${kind}${lfs ? " · Git LFS" : ""}`;
 	}
 
 	#renderStreaming(width: number, height: number): string[] {

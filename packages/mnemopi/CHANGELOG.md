@@ -2,6 +2,107 @@
 
 ## [Unreleased]
 
+## [18.21.0] - 2026-11-16
+
+### Changed
+
+- Improved file memory bank performance by reducing unnecessary disk synchronization during checkpointing, lowering per-turn I/O overhead for banks shared across multiple processes.
+
+## [18.20.3] - 2026-11-16
+
+### Added
+
+- Added configurable embedding query prefixes and input types for instruction-tuned and asymmetric embedding models, including Qwen3-Embedding, E5, and NVIDIA NIM.
+- Added the `embeddings.onRequestFailed` callback, allowing hosts to handle and surface failed embedding API requests.
+
+## [18.20.0] - 2026-11-12
+
+### Fixed
+
+- Fixed fact extraction storing decimals, prices, and IP-address fragments as `version` facts and leaving symbols such as `→` in `metric` fact keys ([#18886](https://github.com/can1357/oh-my-pi/issues/18886))
+
+## [18.18.4] - 2026-11-09
+
+### Fixed
+
+- Fixed late background embedding writes overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18503](https://github.com/can1357/oh-my-pi/pull/18503) by [@eggpeat](https://github.com/eggpeat))
+- Fixed a second `Mnemopi` instance configured for a different local embedding model silently reusing the first instance's encoder while stamping its vectors with the configured model: local encoders are now cached per model, and a failed load evicts only that model's entry ([#18562](https://github.com/can1357/oh-my-pi/pull/18562) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.2] - 2026-11-08
+
+### Fixed
+
+- Fixed recall returning episodic summaries for working memories that had been invalidated.
+
+## [18.18.1] - 2026-11-08
+
+### Fixed
+
+- Fixed recall scoring memories against vectors from a previous embedding model while a model-change rebuild was still running or had failed: dense search now only uses vectors stamped with the active model, falling back to lexical matching for memories awaiting re-embedding ([#18442](https://github.com/can1357/oh-my-pi/pull/18442) by [@eggpeat](https://github.com/eggpeat))
+- Fixed model-change embedding rebuilds overwriting newer vectors for updated memories or recreating vectors for deleted memories ([#18441](https://github.com/can1357/oh-my-pi/pull/18441) by [@eggpeat](https://github.com/eggpeat))
+
+## [18.18.0] - 2026-11-07
+
+### Fixed
+
+- Fixed embedding rebuilds failing on hosted APIs that cap the inputs per request: `embed()` now splits large lists into requests of at most `MNEMOPI_EMBEDDING_BATCH_SIZE` texts (default 64; set `10` for DashScope) or the `embeddings.batchSize` runtime option, and returns `null` when the API returns a different number of vectors than texts ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+- Fixed an embedding model change deleting every stored vector when the new provider had no key, did not answer, or rejected a batch partway through: the store now embeds the whole corpus with the new model before replacing anything, keeps the old vectors if any request fails, and tries again on the next open ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+- Fixed rejected embedding API requests leaving no trace: the status and the first 300 characters of the response body now go to the log at `debug`, or at `warn` when runtime debug is on ([#18278](https://github.com/can1357/oh-my-pi/pull/18278) by [@aleister1102](https://github.com/aleister1102))
+
+## [18.17.0] - 2026-11-06
+
+### Changed
+
+- Development installs reuse fastembed’s ONNX Runtime instead of installing a duplicate native runtime.
+
+## [18.14.2] - 2026-10-31
+
+### Fixed
+
+- Fixed heuristic episodic facts storing word fragments (`Drafting is active.` → `ctive`), truncated multiword objects, or nothing for `has an …` sentences ([#17511](https://github.com/can1357/oh-my-pi/issues/17511))
+
+## [18.13.3] - 2026-10-28
+
+### Changed
+
+- Updated Bun engine requirement to ≥1.4.4
+
+## [18.13.2] - 2026-10-27
+
+### Fixed
+
+- Fixed local embeddings using one spinning CPU thread per core, so a single recall query cost several CPU-seconds on a many-core machine ([#17109](https://github.com/can1357/oh-my-pi/pull/17109) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.13.0] - 2026-10-26
+
+### Fixed
+
+- Fixed polyphonic recall's graph voice finding no memories for non-English names (e.g. `Hà Nội`) or names of three or more words, and Vietnamese words like `tôi` being stored as the participant `i` ([#16723](https://github.com/can1357/oh-my-pi/issues/16723))
+
+## [18.12.4] - 2026-10-20
+
+### Fixed
+
+- Fixed background fact extraction storing only the first 5 facts of a plain-line extractor answer; it now keeps up to 20, matching JSON answers ([#16377](https://github.com/can1357/oh-my-pi/pull/16377) by [@alphastorm](https://github.com/alphastorm))
+
+## [18.11.2] - 2026-10-16
+
+### Fixed
+
+- Fixed `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` having no effect on recall ranking ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
+
+## [18.11.1] - 2026-10-15
+
+### Fixed
+
+- Fixed a failing `mnemopi` CLI command or MCP memory call dropping the embeddings of memories it had just stored ([#15804](https://github.com/can1357/oh-my-pi/pull/15804) by [@yuzu-octopus](https://github.com/yuzu-octopus))
+
+## [18.11.0] - 2026-10-14
+
+### Fixed
+
+- Fixed polyphonic recall ranking unrelated memories above relevant ones when the query shared only a common word such as "that" with an extracted fact subject ([#15512](https://github.com/can1357/oh-my-pi/issues/15512)).
+
 ## [18.9.0] - 2026-10-11
 
 ### Added

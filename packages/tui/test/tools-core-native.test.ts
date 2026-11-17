@@ -3,6 +3,9 @@ import type { NativeChild, NativeNode } from "../src/native/node";
 import { editToolRenderer } from "../src/tools/edit";
 import { grepToolRenderer } from "../src/tools/grep";
 import { readToolRenderer } from "../src/tools/read";
+import { writeToolRenderer } from "../src/tools/write";
+import { describeCodeCell } from "../src/render/code-cell";
+import { theme } from "../src/theme/theme";
 import { getNativeBlob } from "../src/native/blobs";
 import type { RenderResultOptions } from "../src/tools/renderer";
 
@@ -42,12 +45,50 @@ describe("core tool native views", () => {
 			path?: string;
 			lang?: string;
 		};
-		expect(props.path).toBeUndefined();
-		expect(props.lang).toBe("typescript");
+		expect(props.path).toBe("/tmp/a.ts");
+		expect(props.lang).toBeUndefined();
 		expect(props.hunks?.[0]?.oldStart).toBe(4);
 		expect(props.hunks?.[0]?.newStart).toBe(4);
 		expect(props.hunks?.[0]?.lines.map(line => line[0])).toEqual([" ", "-", "+"]);
 		expect(view.tone).toBeUndefined();
+	});
+
+	it("diffs an edit as hunks at their real lines, without the model's block-context anchors", () => {
+		// What `editDiffString` returns for a one-line Markdown edit plus a distant one:
+		// enclosing-block lines between blank rows, and edits joined where lines jump.
+		const compactDiff = [
+			" 197|# 2. Verify",
+			"",
+			" 199|- UI: verify the actual surface.",
+			"",
+			" 215|",
+			" 216|# 3. Cleanup",
+			"-217|Permanent fix.",
+			"+217|After smoke proof: permanent fix.",
+			"+218|Then report.",
+			" 218|",
+			" 219|⁂ Delivery",
+			" 228|- Match the output.",
+			"-229|old tail",
+			"+230|new tail",
+			"",
+			" 232|</critical>",
+		].join("\n");
+		const view = editToolRenderer.describeResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: { diff: compactDiff, path: "/tmp/a.md", firstChangedLine: 217 },
+			},
+			done,
+			{ path: "a.md" },
+		);
+		const props = collect(view.body, "diff")[0]!.p as {
+			hunks: { oldStart: number; newStart: number; lines: string[] }[];
+		};
+		expect(props.hunks.map(h => [h.oldStart, h.newStart, h.lines.length])).toEqual([
+			[215, 215, 7],
+			[228, 229, 3],
+		]);
 	});
 
 	it("describes an image read as an image node backed by a registered blob", () => {
@@ -77,10 +118,27 @@ describe("core tool native views", () => {
 			{ pattern: "hit" },
 		);
 		const blocks = collect(view.body, "code").map(
-			n => n.p as { start?: number; text?: string; marks?: { line: number }[] },
+			n => n.p as { start?: number; nums?: number[]; text?: string; marks?: { line: number }[] },
 		);
-		expect(blocks.map(b => b.start)).toEqual([9, 40]);
-		expect(blocks[0]!.text).toBe("ctx\nhit here\nafter");
-		expect(blocks.flatMap(b => (b.marks ?? []).map(m => m.line))).toEqual([10, 40]);
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0]!.start).toBeUndefined();
+		expect(blocks[0]!.nums).toEqual([9, 10, 11, 40]);
+		expect(blocks[0]!.text).toBe("ctx\nhit here\nafter\nfar hit");
+		expect((blocks[0]!.marks ?? []).map(m => m.line)).toEqual([10, 40]);
+	});
+
+	it("wraps long lines of read, write, and code-cell source as their ANSI renderers do (#15823)", () => {
+		const long = `const x = "${"y".repeat(300)}";`;
+		const read = readToolRenderer.describeResult({ content: [{ type: "text", text: long }] }, done, { path: "a.ts" });
+		const write = writeToolRenderer.describeResult?.({ content: [{ type: "text", text: "ok" }] }, done, {
+			path: "a.ts",
+			content: long,
+		});
+		const cell = describeCodeCell({ code: long, language: "ts", codeStartLine: 1 }, theme);
+		for (const children of [read.body, write?.body, [cell]]) {
+			const blocks = collect(children, "code");
+			expect(blocks).toHaveLength(1);
+			expect(blocks[0]!.p).toMatchObject({ text: long, wrap: true });
+		}
 	});
 });

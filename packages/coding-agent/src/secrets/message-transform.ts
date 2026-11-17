@@ -542,7 +542,13 @@ function deobfuscateTextBlocks(
 /**
  * Re-obfuscate assistant content before it returns to a provider after session
  * restoration, removing friendly prefixes made unsafe by this batch. A changed
- * thinking block loses its byte-bound replay signature.
+ * thinking block loses its byte-bound replay signature, and so does a tool call
+ * whose arguments changed: the Gemini `thoughtSignature` is an encrypted
+ * attestation over the function call it rides on, so replaying obfuscated
+ * arguments under a signature issued for the raw ones pairs a valid signature
+ * with a payload it does not cover. `intent` and `rawBlock` are harness-side
+ * fields the signed part never carries, so they keep it.
+ * https://ai.google.dev/gemini-api/docs/thought-signatures
  */
 function obfuscateAssistantContentForReplay(
 	obfuscator: SecretObfuscator,
@@ -574,7 +580,9 @@ function obfuscateAssistantContentForReplay(
 			const rawBlock = block.rawBlock === undefined ? undefined : obfuscate(block.rawBlock);
 			if (args === block.arguments && intent === block.intent && rawBlock === block.rawBlock) return block;
 			changed = true;
-			return { ...block, arguments: args, intent, rawBlock };
+			return args === block.arguments
+				? { ...block, intent, rawBlock }
+				: { ...block, arguments: args, intent, rawBlock, thoughtSignature: undefined };
 		}
 		return block;
 	});
@@ -649,11 +657,7 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 			}
 			continue;
 		}
-		if (
-			message.role !== "user" &&
-			message.role !== "toolResult" &&
-			!(message.role === "developer" && message.attribution === "user")
-		) {
+		if (message.role !== "user" && message.role !== "toolResult" && message.role !== "developer") {
 			continue;
 		}
 		const target = message as UserFacingMessage;
@@ -670,7 +674,9 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
 
 /**
  * Redact secrets from outbound messages. User messages, tool results, and
- * user-authored developer messages (e.g. `@file` mentions) are obfuscated.
+ * developer messages of any attribution are obfuscated: agent-attributed
+ * notices (background job results, hook and extension messages) carry command
+ * text and output just like tool results do.
  * Assistant replay content is re-obfuscated too, because session restoration
  * expands keyed placeholders locally before the next provider request. Inline
  * image bytes are never walked.
@@ -704,11 +710,7 @@ function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]
 				current = replay;
 			}
 		}
-		if (
-			current.role !== "user" &&
-			current.role !== "toolResult" &&
-			!(current.role === "developer" && current.attribution === "user")
-		) {
+		if (current.role !== "user" && current.role !== "toolResult" && current.role !== "developer") {
 			if (current.role !== "assistant") return current;
 			const content = obfuscateAssistantContentForReplay(obfuscator, current.content, sharedRegexSecretValues);
 			if (content === current.content) return current;

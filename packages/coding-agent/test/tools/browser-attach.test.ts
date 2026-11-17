@@ -18,14 +18,18 @@ import {
 	attachPageWithTimeout,
 	findFreeCdpPort,
 	findReusableCdp,
+	gracefulKillTreeOnce,
 	pickElectronTarget,
 	probeCdpStatus,
 	resolveSpawnArgs,
-	shouldPreserveConnectedBrowserFocus,
 	waitForCdp,
 	waitForMainFrame,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
-import { ensureChromiumExecutable } from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
+import {
+	ensureChromiumExecutable,
+	loadPuppeteer,
+	RENDERER_PRIORITY_ARGS,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import {
 	acquireBrowser,
 	type BrowserHandle,
@@ -34,7 +38,14 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, getTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import type { Browser, HTTPRequest, Page, Target } from "puppeteer-core";
+import {
+	type Browser,
+	type ConnectionTransport,
+	type HTTPRequest,
+	type Page,
+	type Target,
+	TimeoutError,
+} from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
 import { chromiumAvailable } from "./chromium-probe";
 
@@ -48,6 +59,8 @@ function makeSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
+			// Managed Chromium, whether or not omp's WebKit engine is installed on this machine.
+			"browser.webkit": false,
 			"browser.enabled": true,
 			"browser.headless": true,
 		}),
@@ -80,6 +93,7 @@ function makeTarget(id: string, page: Page | null = null, pageDelayMs = 0) {
 		type: () => "page",
 		page: pageSpy,
 	} as unknown as Target & { _targetId: string };
+	if (page) Object.assign(page, { target: () => target });
 	return { target, pageSpy };
 }
 
@@ -115,6 +129,7 @@ const RELAY_ENTRIES = [
 interface FakePageOptions {
 	url: string;
 	title: string;
+	id?: string;
 	visible?: boolean;
 }
 
@@ -122,6 +137,7 @@ function fakePage(options: FakePageOptions): Page {
 	return {
 		url: () => options.url,
 		title: async () => options.title,
+		target: () => ({ _targetId: options.id ?? "" }),
 		evaluate: async () => options.visible === true,
 	} as unknown as Page;
 }
@@ -219,6 +235,7 @@ describe("pickElectronTarget", () => {
 					"--no-default-browser-check",
 					"--use-mock-keychain",
 					"--password-store=basic",
+					...RENDERER_PRIORITY_ARGS,
 					`--user-data-dir=${root}`,
 					`--remote-debugging-port=${port}`,
 				],
@@ -254,7 +271,7 @@ describe("pickElectronTarget", () => {
 							name,
 							url: "data:text/html,<title>First attached page</title>",
 							timeout: 15,
-							app: { cdp_url: cdpUrl },
+							app: cdpUrl,
 						},
 						{ ...context, signal: controller.signal },
 					)
@@ -282,7 +299,7 @@ describe("pickElectronTarget", () => {
 				restoreWait?.();
 				await prelude.invoke({ action: "close", name }, context).catch(() => {});
 				if (attached) await releaseBrowser(attached, { kill: false });
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
@@ -290,15 +307,34 @@ describe("pickElectronTarget", () => {
 		30_000,
 	);
 
-	test("reports available pages when the matcher misses", async () => {
-		const page = fakePage({ url: "https://example.com/", title: "Example" });
+	test("adopts a fresh blank CDP page by its exact id when URLs and titles repeat", async () => {
+		const first = fakePage({ id: "PAGE_FIRST", url: "about:blank", title: "" });
+		const fresh = fakePage({ id: "PAGE_FRESH", url: "about:blank", title: "" });
 		const browser = {
-			targets: () => [fakeTarget("page", page)],
-			pages: async () => [],
+			targets: () => [fakeTarget("page", first), fakeTarget("page", fresh)],
 		} as unknown as Browser;
 
-		await expect(pickElectronTarget(browser, { matcher: "missing" })).rejects.toThrow(
-			'No page target matched "missing". Available pages:\n- Example  https://example.com/',
+		await expect(pickElectronTarget(browser, { matcher: "PAGE_FRESH" })).resolves.toBe(fresh);
+	});
+
+	test("prioritizes an exact CDP id over a URL substring on another page", async () => {
+		const first = fakePage({ id: "PAGE_FIRST", url: "https://example.com/PAGE_SECOND", title: "First" });
+		const second = fakePage({ id: "PAGE_SECOND", url: "about:blank", title: "" });
+		const browser = {
+			targets: () => [fakeTarget("page", first), fakeTarget("page", second)],
+		} as unknown as Browser;
+
+		await expect(pickElectronTarget(browser, { matcher: "PAGE_SECOND" })).resolves.toBe(second);
+	});
+
+	test("reports page ids with their URLs when a target id is missing", async () => {
+		const page = fakePage({ id: "PAGE_AVAILABLE", url: "https://example.com/", title: "Example" });
+		const browser = {
+			targets: () => [fakeTarget("page", page)],
+		} as unknown as Browser;
+
+		await expect(pickElectronTarget(browser, { matcher: "PAGE_MISSING" })).rejects.toThrow(
+			'No page target matched "PAGE_MISSING". Available pages:\n- PAGE_AVAILABLE  Example  https://example.com/',
 		);
 	});
 
@@ -325,14 +361,9 @@ describe("pickElectronTarget", () => {
 		await expect(pickElectronTarget(browser, { preferVisible: true })).resolves.toBe(first);
 	});
 
-	test("preserves connected-browser focus only for automatic target selection", () => {
-		expect(shouldPreserveConnectedBrowserFocus()).toBe(true);
-		expect(shouldPreserveConnectedBrowserFocus("example.com")).toBe(false);
-	});
-
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {
 		expect(() => normalizeConnectedCdpUrl("ws://127.0.0.1:9222/devtools/browser/id")).toThrow(
-			"browser app.cdp_url must be the HTTP CDP discovery endpoint",
+			"browser app CDP URL must be the HTTP CDP discovery endpoint",
 		);
 		expect(normalizeConnectedCdpUrl("http://127.0.0.1:9222/")).toBe("http://127.0.0.1:9222");
 	});
@@ -472,6 +503,57 @@ describe("pickElectronTarget", () => {
 		}
 	});
 
+	test.skipIf(process.platform === "win32")(
+		"reuses Chromium started by a compiled launcher through its profile lock",
+		async () => {
+			// Arch's /usr/bin/chromium is an ELF that execs /usr/lib/chromium/chromium.
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-launcher-"));
+			const launcher = path.join(root, "chromium");
+			const browser = path.join(root, "lib", "chromium");
+			const profile = path.join(root, "profile");
+			const cdp = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("{}") });
+			await Bun.write(launcher, new Uint8Array([0x7f, 0x45, 0x4c, 0x46]));
+			await Bun.write(browser, Bun.file(process.execPath));
+			await fs.chmod(launcher, 0o755);
+			await fs.chmod(browser, 0o755);
+			await fs.mkdir(profile);
+			const staleProfile = path.join(root, "stale");
+			await fs.mkdir(staleProfile);
+			const child = Bun.spawn(
+				[
+					browser,
+					"--eval",
+					'process.stdout.write("ready\\n"); await Bun.stdin.text()',
+					`--user-data-dir=${profile}`,
+					`--remote-debugging-port=${cdp.port}`,
+				],
+				{ stdin: "pipe", stdout: "pipe", stderr: "ignore" },
+			);
+			const readiness = child.stdout.getReader();
+			await readiness.read();
+			readiness.releaseLock();
+			try {
+				await fs.symlink(`${os.hostname()}-${child.pid}`, path.join(profile, "SingletonLock"));
+				expect(await findReusableCdp(launcher, { appArgs: [`--user-data-dir=${profile}`] })).toEqual({
+					cdpUrl: `http://127.0.0.1:${cdp.port}`,
+					pid: child.pid,
+				});
+				// Another Chromium-family browser holding the profile is refused, not adopted.
+				await expect(
+					findReusableCdp(path.join(root, "chrome"), { appArgs: [`--user-data-dir=${profile}`] }),
+				).rejects.toThrow(`held by another browser, ${browser} (pid ${child.pid})`);
+				// A stale lock whose pid now belongs to a browser on another profile.
+				await fs.symlink(`${os.hostname()}-${child.pid}`, path.join(staleProfile, "SingletonLock"));
+				expect(await findReusableCdp(launcher, { appArgs: [`--user-data-dir=${staleProfile}`] })).toBeNull();
+			} finally {
+				child.kill();
+				await child.exited;
+				cdp.stop(true);
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
+
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"keeps profile tabs isolated and never kills a borrowed Chrome on close",
 		async () => {
@@ -489,6 +571,9 @@ describe("pickElectronTarget", () => {
 				"--no-default-browser-check",
 				"--use-mock-keychain",
 				"--password-store=basic",
+				// `open` always adds this to a spawned app; without it the open keys a second browser.
+				"--allow-file-access-from-files",
+				...RENDERER_PRIORITY_ARGS,
 			];
 			const child = Bun.spawn(
 				[exe, ...flags, `--user-data-dir=${borrowedProfile}`, `--remote-debugging-port=${port}`],
@@ -502,17 +587,26 @@ describe("pickElectronTarget", () => {
 			const ownedName = `owned-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
+				const existing = await acquireBrowser(
+					{ kind: "spawned", path: exe, args: [...flags, `--user-data-dir=${borrowedProfile}`] },
+					{ cwd: session.cwd },
+				);
+				if (!("browser" in existing)) throw new Error("Expected Chromium browser");
+				const original = await existing.browser.newPage();
+				await original.goto("data:text/html,<title>Original user tab</title>");
 				await invoke({
 					action: "open",
 					name: borrowedName,
 					url: "data:text/html,<title>Borrowed</title>",
-					app: { path: exe, args: [...flags, "--user-data-dir", borrowedProfile] },
+					app: exe,
+					argv: [...flags, "--user-data-dir", borrowedProfile],
 				});
 				await invoke({
 					action: "open",
 					name: ownedName,
 					url: "data:text/html,<title>Owned</title>",
-					app: { path: exe, args: [...flags, "--user-data-dir", path.join(root, "owned")] },
+					app: exe,
+					argv: [...flags, "--user-data-dir", path.join(root, "owned")],
 				});
 				const borrowedTab = getTab(borrowedName);
 				const ownedTab = getTab(ownedName);
@@ -524,6 +618,7 @@ describe("pickElectronTarget", () => {
 				expect(ownedTab.browser.subprocess).toBeDefined();
 				const ownedTitle = await invoke({ action: "run", name: ownedName, code: "return await tab.title();" });
 				expect(ownedTitle.details).toMatchObject({ value: "Owned" });
+				expect(await original.title()).toBe("Original user tab");
 				const title = await invoke({ action: "run", name: borrowedName, code: "return await tab.title();" });
 				expect(title.details).toMatchObject({ value: "Borrowed" });
 				await invoke({ action: "close", name: borrowedName, kill: true });
@@ -531,7 +626,7 @@ describe("pickElectronTarget", () => {
 			} finally {
 				await invoke({ action: "close", name: ownedName, kill: true }).catch(() => {});
 				await invoke({ action: "close", name: borrowedName, kill: true }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
@@ -540,7 +635,57 @@ describe("pickElectronTarget", () => {
 	);
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"reports a connected browser's own viewport on open and observe",
+		"opens and owns a page in an empty custom Chrome profile",
+		async () => {
+			const exe = await ensureChromiumExecutable();
+			if (!exe) throw new Error("Expected a Chromium executable");
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-browser-empty-profile-"));
+			const profile = path.join(root, "fresh");
+			const flags = [
+				"--headless=new",
+				"--no-sandbox",
+				"--no-startup-window",
+				"--no-first-run",
+				"--use-mock-keychain",
+				"--password-store=basic",
+				// `open` always adds this to a spawned app; without it the open keys a second browser.
+				"--allow-file-access-from-files",
+				...RENDERER_PRIORITY_ARGS,
+				`--user-data-dir=${profile}`,
+			];
+			const session = makeSession();
+			const prelude = createBrowserPrelude(session);
+			const invoke = (parameters: unknown) => prelude.invoke(parameters, { session, toolCallId: "empty-profile" });
+			const name = `empty-profile-${crypto.randomUUID()}`;
+			try {
+				const handle = await acquireBrowser({ kind: "spawned", path: exe, args: flags }, { cwd: session.cwd });
+				if (!("browser" in handle)) throw new Error("Expected Chromium browser");
+				for (const page of await handle.browser.pages()) await page.close();
+				expect(handle.browser.targets().filter(target => String(target.type()) === "page")).toEqual([]);
+				await invoke({
+					action: "open",
+					name,
+					app: exe,
+					argv: flags,
+					url: "data:text/html,<title>Fresh profile</title>",
+				});
+				const tab = getTab(name);
+				if (tab?.backend !== "worker") throw new Error("Expected Chromium worker tab");
+				expect(tab.ownsPage).toBe(true);
+				expect(tab.browser).toBe(handle);
+				expect((await invoke({ action: "run", name, code: "return await tab.title();" })).details).toMatchObject({
+					value: "Fresh profile",
+				});
+			} finally {
+				await invoke({ action: "close", name, kill: true }).catch(() => {});
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
+
+	test.skipIf(!CHROMIUM_AVAILABLE)(
+		"reports a connected browser's own viewport on open and observe, and applies one an open asks for",
 		async () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
@@ -555,6 +700,7 @@ describe("pickElectronTarget", () => {
 					"--use-mock-keychain",
 					"--window-size=900,700",
 					"--force-device-scale-factor=2",
+					...RENDERER_PRIORITY_ARGS,
 					`--user-data-dir=${root}`,
 					`--remote-debugging-port=${port}`,
 				],
@@ -567,12 +713,17 @@ describe("pickElectronTarget", () => {
 			const name = `connected-viewport-${crypto.randomUUID()}`;
 			try {
 				await waitForCdp(`http://127.0.0.1:${port}`, 15_000);
-				const opened = await invoke({
-					action: "open",
-					name,
-					url: "data:text/html,<title>Viewport</title>",
-					app: { cdp_url: `http://127.0.0.1:${port}` },
-				});
+				const app = `http://127.0.0.1:${port}`;
+				// No `scale`: the window keeps its own device scale (2 here).
+				const viewport = { width: 390, height: 844 };
+				// An open that fails after adopting the page (a file where the downloads folder goes) leaves no size
+				// behind. No `url` after it: Chrome drops a leftover size when the page navigates.
+				const notAFolder = path.join(root, "not-a-folder");
+				await Bun.write(notAFolder, "");
+				expect(
+					await rejectionOf(invoke({ action: "open", name, app, viewport, downloads: notAFolder })),
+				).toBeInstanceOf(Error);
+				const opened = await invoke({ action: "open", name, app });
 				const result = await invoke({
 					action: "run",
 					name,
@@ -589,11 +740,27 @@ describe("pickElectronTarget", () => {
 				// The window's chrome eats into --window-size differently per OS, so pin only the forced
 				// pixel ratio; it differs from DEFAULT_VIEWPORT's 1.25, which main reported here.
 				expect(window).toMatchObject({ deviceScaleFactor: 2 });
+				expect(window).not.toMatchObject({ width: viewport.width, height: viewport.height });
 				expect(observed).toEqual(window);
 				expect(opened.details).toMatchObject({ viewport: window });
+				await invoke({ action: "close", name });
+				const pageSize = {
+					action: "run",
+					name,
+					code: "return await tab.evaluate(() => ({ width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio }));",
+				};
+				const sized = await invoke({ action: "open", name, app, viewport });
+				const asked = { width: 390, height: 844, deviceScaleFactor: 2 };
+				expect(sized.details).toMatchObject({ viewport: asked });
+				expect((await invoke(pageSize)).details).toMatchObject({ value: asked });
+				// Reopening the live tab resizes it the same way.
+				await invoke({ action: "open", name, app, viewport: { width: 400, height: 800 } });
+				expect((await invoke(pageSize)).details).toMatchObject({
+					value: { width: 400, height: 800, deviceScaleFactor: 2 },
+				});
 			} finally {
 				await invoke({ action: "close", name }).catch(() => {});
-				child.kill();
+				await gracefulKillTreeOnce(child.pid);
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
 			}
@@ -607,7 +774,7 @@ describe("pickElectronTarget", () => {
 		async () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
-			const endpoint = new URL(launched.browser.wsEndpoint());
+			const endpoint = new URL(launched.wsEndpoint);
 			const session = makeSession();
 			const prelude = createBrowserPrelude(session);
 			const invokeBrowser = (parameters: unknown) =>
@@ -623,7 +790,7 @@ describe("pickElectronTarget", () => {
 					action: "open",
 					name: tabName,
 					url: requested,
-					app: { cdp_url: `http://${endpoint.host}` },
+					app: `http://${endpoint.host}`,
 				});
 				opened = true;
 
@@ -652,7 +819,7 @@ describe("pickElectronTarget", () => {
 			// navigate again and read 2.
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
-			const endpoint = new URL(launched.browser.wsEndpoint());
+			const endpoint = new URL(launched.wsEndpoint);
 			const targetPage = (await launched.browser.pages())[0];
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
@@ -722,7 +889,7 @@ describe("pickElectronTarget", () => {
 					{
 						action: "open",
 						name: `refused-${crypto.randomUUID()}`,
-						app: { cdp_url: `http://127.0.0.1:${cdp.port}` },
+						app: `http://127.0.0.1:${cdp.port}`,
 					},
 					{ session, toolCallId: "refused-websocket" },
 				),
@@ -856,6 +1023,60 @@ describe("pickElectronTarget relay path", () => {
 		expect(second.pageSpy).not.toHaveBeenCalled();
 	});
 
+	it("adopts an exact relay id before a URL substring on another tab", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_FIRST",
+				type: "page",
+				title: "First",
+				url: "https://example.com/PAGE_SECOND",
+				active: "false",
+				discarded: "false",
+			},
+			{ id: "PAGE_SECOND", type: "page", title: "Second", url: "about:blank", active: "false", discarded: "false" },
+		];
+		const first = makeTarget("PAGE_FIRST", makePage([() => {}], relayEntries[0]!.url).page);
+		const blank = makePage([() => {}], "about:blank").page;
+		const second = makeTarget("PAGE_SECOND", blank);
+
+		expect(
+			await pickElectronTarget(makeBrowser([first.target, second.target]), {
+				relayJson,
+				matcher: "PAGE_SECOND",
+			}),
+		).toBe(blank);
+		expect(first.pageSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not adopt another relay tab when an exact id names a discarded tab", async () => {
+		relayEntries = [
+			{
+				id: "PAGE_FIRST",
+				type: "page",
+				title: "First",
+				url: "https://example.com/PAGE_DISCARDED",
+				active: "false",
+				discarded: "false",
+			},
+			{
+				id: "PAGE_DISCARDED",
+				type: "page",
+				title: "Second",
+				url: "about:blank",
+				active: "false",
+				discarded: "true",
+			},
+		];
+		const browser = makeBrowser([
+			makeTarget("PAGE_FIRST", makePage([() => {}]).page).target,
+			makeTarget("PAGE_DISCARDED", makePage([() => {}]).page).target,
+		]);
+
+		await expect(pickElectronTarget(browser, { relayJson, matcher: "PAGE_DISCARDED" })).rejects.toThrow(
+			"was discarded by Chrome",
+		);
+	});
+
 	it("waits for a just-opened tab to reach /json before failing the matcher", async () => {
 		const opened = {
 			id: "PAGE_NEW",
@@ -876,14 +1097,14 @@ describe("pickElectronTarget relay path", () => {
 		expect(served).toBe(2);
 	});
 
-	it("names the missing tab and what to pass when no tab ever matches", async () => {
-		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "omp-probe=none" }));
+	it("lists relay page ids with their URLs when a target id is missing", async () => {
+		const error = await rejectionOf(pickElectronTarget(makeBrowser([]), { relayJson, matcher: "PAGE_MISSING" }));
 
 		expect(error).toBeInstanceOf(Error);
 		const message = (error as Error).message;
-		expect(message).toContain('No page target matched "omp-probe=none" after waiting 2s for a newly opened tab');
-		expect(message).toContain("omit it to use the active tab");
-		expect(message).toContain("- Docs  https://docs.example.com");
+		expect(message).toContain('No page target matched "PAGE_MISSING"');
+		expect(message).toContain("PAGE10  Docs  https://docs.example.com");
+		expect(message).toContain("PAGE11  Whole Foods Market Shopping Cart  https://www.amazon.com/cart/localmarket");
 	});
 
 	it("waits for Puppeteer to see a tab that /json already lists", async () => {
@@ -900,17 +1121,35 @@ describe("pickElectronTarget relay path", () => {
 		expect(await pickElectronTarget(browser, { relayJson, matcher: "whole foods" })).toBe(cartPage);
 	});
 
-	it("tells the model to retry when Puppeteer never sees the selected tab", async () => {
-		const browser = Object.assign(makeBrowser([]), {
-			waitForTarget: async () => {
-				throw Object.assign(new Error("Waiting for target failed"), { name: "TimeoutError" });
+	it("tells the model to retry when Puppeteer never sees the selected tab, with release-build class names", async () => {
+		// A connected browser with no targets, so Puppeteer's own wait times out and builds its own error.
+		const transport: ConnectionTransport = {
+			send(message) {
+				const { id, method } = JSON.parse(message) as { id: number; method: string };
+				const result = method === "Target.getBrowserContexts" ? { browserContextIds: [] } : {};
+				queueMicrotask(() => transport.onmessage?.(JSON.stringify({ id, result })));
 			},
-		});
+			close() {
+				transport.onclose?.();
+			},
+		};
+		const puppeteerBrowser = await (await loadPuppeteer()).connect({ transport, defaultViewport: null });
+		const nameDescriptor = Object.getOwnPropertyDescriptor(TimeoutError, "name")!;
+		// Release builds minify class names, so Puppeteer names its timeout like this there.
+		Object.defineProperty(TimeoutError, "name", { ...nameDescriptor, value: "Og" });
+		try {
+			const browser = Object.assign(makeBrowser([]), {
+				waitForTarget: (predicate: (target: Target) => boolean) =>
+					puppeteerBrowser.waitForTarget(predicate, { timeout: 50 }),
+			});
 
-		const error = await rejectionOf(pickElectronTarget(browser, { relayJson, matcher: "whole foods" }));
+			const error = await rejectionOf(pickElectronTarget(browser, { relayJson, matcher: "whole foods" }));
 
-		expect(error).toBeInstanceOf(Error);
-		expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
+			expect((error as Error).message).toMatch(/^Selected tab did not become available.*retry, or reopen it/);
+		} finally {
+			Object.defineProperty(TimeoutError, "name", nameDescriptor);
+			await puppeteerBrowser.disconnect();
+		}
 	});
 
 	it("falls back to target enumeration at once when /json lists no pages", async () => {

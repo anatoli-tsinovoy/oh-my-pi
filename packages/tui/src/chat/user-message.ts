@@ -18,13 +18,13 @@ import {
 	skillChipStyle,
 } from "../prompt/composer-attachments";
 import { MODEL_MENTION_TAG_RE } from "../prompt/model-mention-syntax";
-import { expandKeyHint, fileHyperlink } from "../render";
-import { imageReferenceHyperlink } from "../prompt/image-references";
+import { expandKeyHint, fileHyperlink, fileLinkSpan } from "../render";
+import { imageLinksEnabled, imageReferenceHyperlink } from "../prompt/image-references";
 import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
 import { card, md, node, row, span, text } from "../native/describe";
-import { base64ImageNode } from "../native/blobs";
-import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import { base64ImageNode, openableImageProps } from "../native/blobs";
+import { hasTranscriptActions, runTranscriptAction, runTurnAction, turnHoldEntries } from "./transcript-actions";
 import {
 	type DescribeContext,
 	type NativeChild,
@@ -55,6 +55,19 @@ const OSC133_ZONE_END = "\x1b]133;B\x07";
 const OSC133_COMMAND_START = "\x1b]133;C\x07";
 const OSC133_COMMAND_DONE = "\x1b]133;D;0\x07";
 const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAND_DONE;
+
+let promptZonesEnabled = true;
+
+/**
+ * Turn the OSC 133 zone marks on user bubbles on or off; bubbles pick it up on
+ * their next render. The host turns them off while a known OSC 7501 terminal
+ * holds a `working` or `blocked` record: `133;A` starts a shell prompt, which
+ * makes the terminal drop that record. A terminal may announce the drop as a
+ * finished command (#17307), once per repaint of a bubble.
+ */
+export function setPromptZonesEnabled(enabled: boolean): void {
+	promptZonesEnabled = enabled;
+}
 
 /** How a user bubble styles its prose and chips (see {@link userBubbleColor}). */
 export interface UserBubbleOptions {
@@ -128,11 +141,12 @@ export function userBubbleColor(
 export class UserMessageComponent extends Container implements ReactionTarget, TranscriptPresentationTarget {
 	#allocation = Number.POSITIVE_INFINITY;
 	// Memoized OSC 133 zone wrapping keyed on the underlying container render
-	// (same source ref ⇒ identical rows ⇒ reuse the wrapped copy). Keeps this
-	// component reference-stable for the transcript's incremental assembly and
-	// never mutates the container's cached array.
+	// (same source ref ⇒ identical rows ⇒ reuse the wrapped copy) and on whether
+	// zones were enabled. Keeps this component reference-stable for the
+	// transcript's incremental assembly and never mutates the container's cached array.
 	#zoneSource: readonly string[] | undefined;
 	#zoneLines: string[] | undefined;
+	#zoneMarked = false;
 	readonly #bgColor: (value: string) => string;
 	readonly #liveSteered: boolean;
 	readonly #synthetic: boolean;
@@ -145,8 +159,9 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	readonly #tokens: RegExp;
 	#reaction: string | undefined;
 	#native: NativeNode | undefined;
-	/** The terminal's clock {@link #native} was described with. */
+	/** The terminal's clock and the image link policy {@link #native} was described with. */
 	#nativeHour12: boolean | undefined;
+	#nativeLinked = false;
 
 	constructor(text: string, options: UserBubbleOptions = {}) {
 		super();
@@ -204,8 +219,11 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 	override describe(cx?: DescribeContext): NativeNode {
 		// The terminal's clock: Bun's own default locale ignores the user's.
 		const hour12 = cx?.hour12;
-		if (this.#native && this.#nativeHour12 === hour12) return this.#native;
+		// Chip marks and thumbnails carry links only under an enabled policy.
+		const linked = imageLinksEnabled();
+		if (this.#native && this.#nativeHour12 === hour12 && this.#nativeLinked === linked) return this.#native;
 		this.#nativeHour12 = hour12;
+		this.#nativeLinked = linked;
 		const children: NativeChild[] = [];
 		if (!this.#synthetic && hasTranscriptActions()) {
 			const tools: NativeChild[] = [
@@ -253,16 +271,14 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 			this.#images.forEach((image, i) => {
 				if (!image.mimeType.startsWith("image/")) return;
 				const label = `#${i + 1}`;
-				const link = this.#imageLinks?.[i];
-				// A click zooms the image in the terminal; the file opens from its context menu.
-				const open = link ? { href: link, actions: { menu: ["open"] } } : {};
+				const open = openableImageProps(linked ? this.#imageLinks?.[i] : undefined);
 				thumbs.push(base64ImageNode(image.data, image.mimeType, { alt: label, title: label, ...open }, label));
 			});
 		}
 		if (thumbs.length > 0) {
 			children.push(row(thumbs, { gap: "sm", wrap: true, align: "start", role: "omp.user.images" }));
 		}
-		const marks = this.#synthetic ? [] : tokenMarks(this.#text, this.#tokens);
+		const marks = this.#synthetic ? [] : tokenMarks(this.#text, this.#tokens, this.#imageLinks);
 		children.push(md(this.#text, marks.length > 0 ? { marks } : undefined));
 		const badges: NativeChild[] = [];
 		if (this.#liveSteered) {
@@ -277,18 +293,33 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 		if (this.#reaction !== undefined) badges.push(node("badge", { text: this.#reaction, role: "omp.reaction" }));
 		if (badges.length > 0)
 			children.push(node("row", { gap: "xs", justify: "end", role: "omp.user.badges" }, badges, "badges"));
+		// A phone's long press lists the turn's actions (a desktop keeps the hover toolbar): they need the
+		// prompt's timestamp to find its entry.
+		const hold =
+			!this.#synthetic && hasTranscriptActions() && this.#timestamp !== undefined
+				? {
+						actions: {
+							hold: turnHoldEntries("user", { id: "copy-message", label: "Copy message", icon: "copy" }),
+						},
+					}
+				: {};
 		this.#native = card(
-			{ role: this.#synthetic ? "omp.user.synthetic" : "omp.user", tone: this.#synthetic ? "muted" : "user" },
+			{
+				role: this.#synthetic ? "omp.user.synthetic" : "omp.user",
+				tone: this.#synthetic ? "muted" : "user",
+				...hold,
+			},
 			children,
 		);
 		return this.#native;
 	}
 
-	/** Hover toolbar clicks: omp's own copy and rewind commands. */
+	/** Hover toolbar and hold-menu choices: omp's own copy, rewind, edit, retry and fork commands. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type !== "action") return;
 		if (event.act === "copy-message") runTranscriptAction({ act: "copy", text: this.#text });
 		else if (event.act === "rewind") runTranscriptAction({ act: "rewind" });
+		else if (this.#timestamp !== undefined) runTurnAction(event.act, { role: "user", at: this.#timestamp });
 	}
 
 	/**
@@ -343,15 +374,18 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 			const emergency = this.#selectEmergencyRow(lines);
 			if (emergency !== undefined) return [emergency];
 		}
-		if (this.#zoneSource === lines && this.#zoneLines !== undefined) {
+		if (this.#zoneSource === lines && this.#zoneLines !== undefined && this.#zoneMarked === promptZonesEnabled) {
 			return this.#zoneLines;
 		}
 		const wrapped = lines.slice();
 		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(width);
-		wrapped[0] = OSC133_ZONE_START + wrapped[0];
-		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		if (promptZonesEnabled) {
+			wrapped[0] = OSC133_ZONE_START + wrapped[0];
+			wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
+		}
 		this.#zoneSource = lines;
 		this.#zoneLines = wrapped;
+		this.#zoneMarked = promptZonesEnabled;
 		return wrapped;
 	}
 }
@@ -359,13 +393,13 @@ export class UserMessageComponent extends Container implements ReactionTarget, T
 /**
  * The composer tokens in `text` as `md` marks, styled as the composer
  * decorates them (`CustomEditor.describeDecorations`), so a sent prompt keeps
- * its chips highlighted.
+ * its chips highlighted. Image and video chips link to their file, as in text mode.
  */
-function tokenMarks(text: string, tokens: RegExp): TspSpan[] {
+function tokenMarks(text: string, tokens: RegExp, imageLinks: readonly (string | undefined)[] | undefined): TspSpan[] {
 	// One mark per distinct token: Tern styles every occurrence of its text.
-	const styles = new Map<string, string>();
+	const marks = new Map<string, TspSpan>();
 	const mark = (s: string) => (label: string) => {
-		styles.set(label, s);
+		marks.set(label, { t: label, s });
 		return "";
 	};
 	renderPlaceholders(
@@ -374,11 +408,16 @@ function tokenMarks(text: string, tokens: RegExp): TspSpan[] {
 			renderText: () => "",
 			renderSkill: mark("customMessageLabel strong"),
 			renderMention: mark("statusLineModel strong"),
-			renderReference: mark("accent strong"),
+			renderReference: (label, kind, index) => {
+				const s = "accent strong";
+				const link = kind === "image" || kind === "video" ? imageLinks?.[index - 1] : undefined;
+				marks.set(label, link ? fileLinkSpan(link, label, s) : { t: label, s });
+				return "";
+			},
 		},
 		tokens,
 	);
-	return [...styles].map(([t, s]) => ({ t, s }));
+	return [...marks.values()];
 }
 
 /**

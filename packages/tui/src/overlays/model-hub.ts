@@ -56,6 +56,7 @@ import {
 	ModelBrowser,
 	type ModelBrowserItem,
 	modelSearchText,
+	providerMark,
 	thinkingDotToken,
 	type RoleAssignments,
 	resolveRoleAssignments,
@@ -160,6 +161,10 @@ export interface ModelHubCallbacks {
 	onFallbackChainChange?: (role: string, chain: string[]) => void;
 	/** Locked provider activation: forward to the /login flow. */
 	onLoginRequest?: (providerId: string) => void;
+	/** Returns the rebuilt `--models` scope for the hub to list; `undefined` keeps the current one. */
+	onCatalogRefreshed?: (
+		providerId?: string,
+	) => ReadonlyArray<ScopedModelItem> | undefined | Promise<ReadonlyArray<ScopedModelItem> | undefined>;
 	/** Save the current role assignments and default thinking level as a named model preset. */
 	onSavePreset?: (name: string) => void;
 	/**
@@ -313,14 +318,6 @@ const MODEL_KIND_LABELS: Record<"all" | ModelKind, string> = {
 	rerank: "Rerank",
 	video: "Video",
 };
-
-/** A provider mark's initials: `amazon-bedrock` → `AB`, `anthropic` → `An`. */
-function providerInitials(providerId: string): string {
-	const words = providerId.split(/[-_\s.]+/).filter(word => word.length > 0);
-	if (words.length >= 2) return `${words[0]!.charAt(0)}${words[1]!.charAt(0)}`.toUpperCase();
-	const word = words[0] ?? providerId;
-	return `${word.charAt(0).toUpperCase()}${word.charAt(1)}`;
-}
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
@@ -557,7 +554,7 @@ export class ModelHubComponent implements Component {
 			this.#catalogRefreshing = true;
 			this.#registry
 				.refresh("online")
-				.then(() => this.#syncFromRegistryState())
+				.then(() => this.#afterRegistryRefresh())
 				.catch(error => {
 					this.#configError = error instanceof Error ? error.message : String(error);
 				})
@@ -880,18 +877,22 @@ export class ModelHubComponent implements Component {
 	}
 
 	/**
-	 * Push the active scope's items into the browser. While assigning a role,
-	 * the role's `accepts` predicate is re-applied here so a scope hop
-	 * (provider/all/recent) can never surface a model the role rejects — role
-	 * resolution and the runtime candidate pool filter the same way, so an
-	 * unaccepted pick would persist a selector that never resolves.
+	 * Push the active scope's items into the browser. While assigning a role or
+	 * a role-keyed fallback, the role's `accepts` predicate is re-applied here so
+	 * a scope hop (provider/all/recent) can never surface a model the role
+	 * rejects — role resolution and the runtime candidate pool filter the same
+	 * way, so an unaccepted pick would persist a selector that never resolves.
+	 * Model-keyed chains (`provider/model-id`, `provider/*`) have no role
+	 * predicate and stay unfiltered.
 	 */
 	#setCandidateItems(items: ReadonlyArray<ModelBrowserItem>): void {
 		const assigning = this.#assigning;
+		const role =
+			assigning?.kind === "role" || (assigning?.kind === "fallback" && !assigning.role.includes("/"))
+				? assigning.role
+				: undefined;
 		const scoped =
-			assigning?.kind === "role"
-				? items.filter(item => this.#settings.getRoleInfo(assigning.role).accepts(item.model))
-				: items;
+			role !== undefined ? items.filter(item => this.#settings.getRoleInfo(role).accepts(item.model)) : items;
 		this.#candidateItems = [...scoped];
 		this.#candidateCatalog = scoped === this.#availableItems ? this.#availableItems : undefined;
 		this.#applyModelKind();
@@ -1146,6 +1147,12 @@ export class ModelHubComponent implements Component {
 		this.#scheduledProviderRefreshes.set(providerId, timer);
 	}
 
+	async #afterRegistryRefresh(providerId?: string): Promise<void> {
+		const scope = await this.#callbacks.onCatalogRefreshed?.(providerId);
+		if (scope) this.#scopedModels = scope;
+		this.#syncFromRegistryState();
+	}
+
 	async #refreshProviderInBackground(providerId: string, refreshCommandCredentials = false): Promise<void> {
 		try {
 			if (refreshCommandCredentials) {
@@ -1155,7 +1162,7 @@ export class ModelHubComponent implements Component {
 			}
 			// The provider refresh already updated the registry snapshot;
 			// re-reading it here stays purely in-memory.
-			this.#syncFromRegistryState();
+			await this.#afterRegistryRefresh(providerId);
 		} catch (error) {
 			this.#configError = error instanceof Error ? error.message : String(error);
 		} finally {
@@ -1335,6 +1342,7 @@ export class ModelHubComponent implements Component {
 	 */
 	#thinkingOptionsFor(model: Model): ConfiguredThinkingLevel[] {
 		if (!model.reasoning) return [];
+		if (model.thinking?.unverified) return [ThinkingLevel.Inherit, ThinkingLevel.Off, ...getSupportedEfforts(model)];
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
 	}
 
@@ -3052,7 +3060,8 @@ export class ModelHubComponent implements Component {
 				this.#browser,
 			);
 		}
-		return node("col", { gap: "sm", grow: 1 }, children, "body");
+		// Zero basis: the body takes the space left of the sidebar instead of sizing to its widest line.
+		return node("col", { gap: "sm", grow: 1, basis: 0, min: { w: 0 } }, children, "body");
 	}
 
 	#describeStatus(): NativeNode {
@@ -3375,13 +3384,7 @@ export class ModelHubComponent implements Component {
 				...props,
 				tabs: this.#pickerKindTabs(),
 				tab: this.#modelKindTab,
-				columns: MODEL_PICKER_COLUMNS,
-				...catalogue,
-				order: view.order,
-				...(view.hits ? { hits: view.hits } : {}),
-				selected: this.#browser.pickerSelected,
-				...(current ? { current } : {}),
-				total: this.#browser.baseCount,
+				...this.#browser.pickerRows(catalogue, view, this.#currentSelector),
 				state,
 				...(state === "error" && this.#configError ? { message: this.#configError } : {}),
 				empty:
@@ -3458,7 +3461,7 @@ export class ModelHubComponent implements Component {
 					break;
 				case "provider": {
 					const providerId = entry.providerId ?? entry.label;
-					const mark = { text: providerInitials(providerId), seed: providerId };
+					const mark = providerMark(providerId);
 					if (entry.locked) {
 						const envVars = providerEntry(providerId)?.envVars ?? [];
 						scopes.push({

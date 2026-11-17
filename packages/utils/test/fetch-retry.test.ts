@@ -1,6 +1,16 @@
 import { describe, expect, it } from "bun:test";
 import { extractRetryHint, fetchWithRetry, isUnexpectedSocketCloseMessage } from "@oh-my-pi/pi-utils/fetch-retry";
 
+/** Await a rejection and narrow it to `Error` without asserting a shape. */
+async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
+	const value = await promise.then(
+		() => undefined,
+		(err: unknown) => err,
+	);
+	if (!(value instanceof Error)) throw new Error(`Expected a rejected Error, got ${String(value)}`);
+	return value;
+}
+
 describe("isUnexpectedSocketCloseMessage", () => {
 	it.each(["Socket is closed", "Error: Socket is closed.", "The socket connection was closed unexpectedly"])(
 		"recognizes %s",
@@ -121,6 +131,38 @@ describe("fetchWithRetry", () => {
 			message: "Request was aborted",
 		});
 	});
+
+	it("keeps the rejected fetch error reachable as the wrapped error's cause", async () => {
+		const errno = Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8080"), { code: "ECONNREFUSED" });
+		const fetchFailed = new TypeError("fetch failed", { cause: new AggregateError([errno]) });
+
+		const error = await rejectionOf(
+			fetchWithRetry("http://127.0.0.1:8080/v1/chat/completions", {
+				fetch: async () => {
+					throw fetchFailed;
+				},
+				maxAttempts: 1,
+			}),
+		);
+
+		// The AggregateError carries no message, so the flattened text alone names
+		// no failure; downstream classifiers reach ECONNREFUSED only through `cause`.
+		expect(error.cause).toBe(fetchFailed);
+	});
+
+	it("keeps the flattened `Network error:` wording for a direct cause", async () => {
+		const dns = Object.assign(new Error("getaddrinfo ENOTFOUND api.openai.com"), { code: "ENOTFOUND" });
+		const error = await rejectionOf(
+			fetchWithRetry("https://api.openai.com/v1/chat/completions", {
+				fetch: async () => {
+					throw new TypeError("fetch failed", { cause: dns });
+				},
+				maxAttempts: 1,
+			}),
+		);
+
+		expect(error.message).toBe("Network error: getaddrinfo ENOTFOUND api.openai.com");
+	});
 });
 
 describe("extractRetryHint", () => {
@@ -162,6 +204,44 @@ describe("extractRetryHint", () => {
 			3 * 24 * 60 * 60_000,
 		);
 		expect(extractRetryHint(undefined, "429 Monthly usage limit reached. Resets in 1 day.")).toBe(24 * 60 * 60_000);
+	});
+
+	it("keeps a Cloud Code credential blocked for the full 71h48m47s reset instead of retrying it early", () => {
+		expect(
+			extractRetryHint(
+				undefined,
+				"Cloud Code Assist API error (429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 71h48m47s.",
+			),
+		).toBe(((71 * 60 + 48) * 60 + 47) * 1000);
+	});
+
+	it("honors a compound quotaResetDelay so an exhausted Cloud Code credential is not retried early", () => {
+		expect(extractRetryHint(undefined, '{"metadata":{"quotaResetDelay":"17h48m25.5s"}}')).toBe(64105500);
+	});
+
+	it("honors a millisecond quotaResetDelay", () => {
+		expect(extractRetryHint(undefined, '{"metadata":{"quotaResetDelay":"835.150299ms"}}')).toBeCloseTo(835.150299, 3);
+	});
+
+	it.each([
+		[
+			"retryDelay before quotaResetDelay",
+			'{"details":[{"retryDelay":"5s"},{"metadata":{"quotaResetDelay":"3600s"}}]}',
+		],
+		[
+			"quotaResetDelay before retryDelay",
+			'{"details":[{"metadata":{"quotaResetDelay":"3600s"}},{"retryDelay":"5s"}]}',
+		],
+	])("waits for the longer structured delay when %s", (_label, body) => {
+		expect(extractRetryHint(undefined, body)).toBe(3_600_000);
+	});
+
+	it("honors quotaResetTimeStamp so an exhausted Cloud Code credential is not retried early", () => {
+		const future = new Date(Date.now() + 3_600_000).toISOString();
+		const hint = extractRetryHint(undefined, `{"metadata":{"quotaResetTimeStamp":"${future}"}}`);
+		expect(hint).toBeDefined();
+		expect(hint).toBeGreaterThan(3_500_000);
+		expect(hint).toBeLessThanOrEqual(3_600_000);
 	});
 
 	// A quota body can carry both a generic retry hint and the account reset

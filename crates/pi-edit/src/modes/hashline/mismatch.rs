@@ -8,7 +8,7 @@ use super::{
 	format::HL_FILE_HASH_EXAMPLES,
 	messages::{format_anchored_context, json_quote},
 };
-use crate::error::EditError;
+use crate::error::{EditError, Rejection};
 
 static LINE_REF_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^\s*[>+\-*]*\s*(\d+)(?::.*)?\s*$").expect("valid regex"));
@@ -30,7 +30,7 @@ pub struct MismatchDetails {
 
 /// Format the required shape of a tagged line anchor.
 pub fn format_full_anchor_requirement(raw: Option<&str>) -> String {
-	let received = raw.map_or_else(String::new, |value| format!(" Received {}.", json_quote(value)));
+	let received = raw.map_or_default(|value| format!(" Received {}.", json_quote(value)));
 	format!(
 		"a bare line number from read/search output plus the section header content-hash tag (for \
 		 example [src/foo.ts#{}] and line \"160\"){received}",
@@ -76,7 +76,8 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 	let path = details
 		.path
 		.as_ref()
-		.map_or_else(String::new, |path| format!(" for {path}"));
+		.map_or_default(|path| format!(" for {path}"));
+	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
 	let mut lines = if details.hash_recognized {
 		vec![
 			format!("Edit rejected{path}: file changed between read and edit."),
@@ -88,10 +89,17 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 			),
 		]
 	} else {
-		let mut lines = vec![format!(
-			"Edit rejected{path}: hash #{} is not from this session.",
-			details.expected_file_hash
-		)];
+		let mut lines = vec![if details.expected_file_hash.is_empty() {
+			format!(
+				"Edit rejected{path}: the header needs this file's current tag, #{}.",
+				details.actual_file_hash
+			)
+		} else {
+			format!(
+				"Edit rejected{path}: hash #{} is not from this session.",
+				details.expected_file_hash
+			)
+		}];
 		// Name the absolute paths this session has already issued the tag for,
 		// so a lane that pasted a tag from a sibling file (typically the parent
 		// checkout) doesn't follow the suggestion into a wrong-tree write.
@@ -103,14 +111,13 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 				details.expected_file_hash
 			));
 		}
-		lines.push(format!(
-			"The current file hashes to #{}. Re-read the file with `read` to copy a current \
-			 [path#tag] header — never invent the tag and never reuse one from a prior session.",
-			details.actual_file_hash
-		));
+		// A tag issued for another file (often the same rows in a sibling
+		// checkout) must not be resent here: that is the wrong-tree write the
+		// origin lines above guard against.
+		let offer_resend = !context.is_empty() && details.tag_origin_paths.is_empty();
+		lines.push(current_tag_advice(&details.actual_file_hash, offer_resend));
 		lines
 	};
-	let context = format_anchored_context(&details.anchor_lines, &details.file_lines);
 	if !context.is_empty() {
 		lines.push(String::new());
 		lines.extend(context);
@@ -118,7 +125,47 @@ pub fn format_mismatch_message(details: &MismatchDetails) -> String {
 	lines.join("\n")
 }
 
-/// Construct a match failure from mismatch details.
+/// What to do with an unknown tag. It may be real (a restart or store
+/// eviction forgets issued tags), so when the rows are shown the advice
+/// offers the current tag for them instead of sending the model back to
+/// output it already copied from.
+fn current_tag_advice(actual_file_hash: &str, offer_resend: bool) -> String {
+	if offer_resend {
+		format!(
+			"The current file hashes to #{actual_file_hash}. If the rows below are the ones you \
+			 mean, resend the edit under #{actual_file_hash}; otherwise re-read the file with `read` \
+			 and copy its [path#tag] header verbatim."
+		)
+	} else {
+		format!(
+			"The current file hashes to #{actual_file_hash}. Re-read the file with `read` and copy \
+			 its [path#tag] header verbatim."
+		)
+	}
+}
+
+/// Diagnostic for input whose only content is a section header.
+///
+/// With no ops to apply, it names the file's current tag to put them under. No
+/// rows are shown, so ops on rows the model has not seen still hit the
+/// seen-line guard.
+pub fn format_header_only_message(path: &str, actual_file_hash: &str) -> String {
+	format!(
+		"Edit rejected for {path}: no ops follow the header; put them under this file's current \
+		 tag, #{actual_file_hash}."
+	)
+}
+
+/// Construct a tag rejection from mismatch details.
 pub fn mismatch_error(details: &MismatchDetails) -> EditError {
-	EditError::matched(format_mismatch_message(details))
+	let reason = if details.hash_recognized {
+		Rejection::StaleTag
+	} else if details.expected_file_hash.is_empty() {
+		Rejection::MissingTag
+	} else if details.tag_origin_paths.is_empty() {
+		Rejection::UnknownTag
+	} else {
+		Rejection::OtherFileTag
+	};
+	EditError::rejected(reason, format_mismatch_message(details))
 }

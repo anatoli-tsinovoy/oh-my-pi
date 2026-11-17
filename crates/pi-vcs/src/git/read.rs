@@ -14,7 +14,7 @@ use super::{
 use crate::{
 	error::{Error, Result},
 	types::{
-		CommitAuthor, CommitDetails, HeadState, ShowResult, StatusOptions, StatusSummary,
+		CommitAuthor, CommitDetails, HeadState, ShowResult, StatusOptions, StatusSummary, TreeEntry,
 		UntrackedMode, WorktreeEntry,
 	},
 };
@@ -223,31 +223,48 @@ impl GitRepo {
 	/// Whether a merge, rebase, cherry-pick, revert, or `am` is underway in
 	/// this checkout: the index holds unmerged entries, or the operation's
 	/// state files remain because it is resolved but not yet committed or
-	/// aborted (a phase `git ls-files --unmerged` no longer reports).
+	/// aborted (a phase `git ls-files --unmerged` no longer reports). A rebase
+	/// is underway while its state directory exists; git leaves `REBASE_HEAD`
+	/// behind after one finishes.
 	pub fn operation_in_progress(&self) -> Result<bool> {
-		const STATE: [&str; 6] = [
-			"MERGE_HEAD",
-			"CHERRY_PICK_HEAD",
-			"REVERT_HEAD",
-			"REBASE_HEAD",
-			"rebase-merge",
-			"rebase-apply",
-		];
-		if STATE
-			.iter()
-			.any(|name| self.info.git_dir.join(name).exists())
+		Ok(self.operation_kind()?.is_some())
+	}
+
+	/// Name the operation underway in this checkout, or `unmerged-index` for
+	/// unresolved index entries without an operation's state files.
+	///
+	/// Rebase state takes precedence over individual replayed commits. The
+	/// `applying` marker distinguishes `git am` from the apply rebase backend.
+	pub fn operation_kind(&self) -> Result<Option<&'static str>> {
+		let git_dir = &self.info.git_dir;
+		if git_dir.join("rebase-merge").exists() {
+			return Ok(Some("rebase"));
+		}
+		if git_dir.join("rebase-apply").exists() {
+			return Ok(Some(if git_dir.join("rebase-apply/applying").exists() {
+				"am"
+			} else {
+				"rebase"
+			}));
+		}
+		for (marker, kind) in
+			[("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")]
 		{
-			return Ok(true);
+			if git_dir.join(marker).exists() {
+				return Ok(Some(kind));
+			}
 		}
 		if self.is_reftable() {
-			return Ok(!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty());
+			return Ok((!cli_text(self.root(), &["ls-files", "--unmerged"])?.is_empty())
+				.then_some("unmerged-index"));
 		}
 		let repo = self.gix()?;
 		let index = load_index_or_empty(&repo, "git ls-files")?;
 		Ok(index
 			.entries()
 			.iter()
-			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted))
+			.any(|entry| entry.stage() != gix::index::entry::Stage::Unconflicted)
+			.then_some("unmerged-index"))
 	}
 
 	/// Render git status in porcelain-v1 form.
@@ -440,6 +457,19 @@ impl GitRepo {
 		Ok(summary)
 	}
 
+	/// Whether the repository's own config file contains `key`, without
+	/// includes, global configuration, or environment overrides. Never invokes
+	/// git.
+	pub fn config_has_local(&self, key: &str) -> Result<bool> {
+		let path = self.info().common_dir.join("config");
+		if !path.exists() {
+			return Ok(false);
+		}
+		let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
+			.map_err(|e| Error::backend("git config", e))?;
+		Ok(config.string(key).is_some())
+	}
+
 	/// Read a scalar git config value.
 	pub fn config_get(&self, key: &str) -> Result<Option<String>> {
 		if self.is_reftable() {
@@ -544,13 +574,25 @@ impl GitRepo {
 		}
 		let repo = self.gix()?;
 		let mut out = Vec::new();
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", count)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
 			out.push(commit_subject(&commit).map_err(|err| Error::backend("git log", err))?);
 		}
 		Ok(out)
+	}
+
+	/// Return each stash entry's commit subject, `stash@{0}` first: git's
+	/// `WIP on <branch>: …` or `On <branch>: <message>`.
+	pub fn stash_subjects(&self) -> Result<Vec<String>> {
+		if !self.ref_exists("refs/stash")? {
+			return Ok(Vec::new());
+		}
+		Ok(cli_text(self.root(), &["log", "--walk-reflogs", "--format=%s", "refs/stash"])?
+			.lines()
+			.map(str::to_owned)
+			.collect())
 	}
 
 	/// Return recent commits as `<short-sha> <subject>` lines.
@@ -565,7 +607,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids("HEAD")?.into_iter().take(count) {
+		for id in self.walk_commit_ids("HEAD", count)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git log", err))?;
@@ -657,7 +699,7 @@ impl GitRepo {
 		}
 		let mut out = Vec::new();
 		let repo = self.gix()?;
-		for id in self.walk_commit_ids(rev)? {
+		for id in self.walk_commit_ids(rev, usize::MAX)? {
 			let commit = repo
 				.find_commit(id)
 				.map_err(|err| Error::backend("git rev-list", err))?;
@@ -852,25 +894,26 @@ impl GitRepo {
 		Ok(out)
 	}
 
-	/// List recursive blob paths in a tree, optionally filtered by pathspec-like
-	/// prefixes.
-	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<String>> {
+	/// List the blobs and symlinks of a tree recursively with their modes,
+	/// sorted by path, optionally filtered by pathspec-like prefixes.
+	pub fn ls_tree(&self, rev: &str, paths: &[String]) -> Result<Vec<TreeEntry>> {
 		if self.is_reftable() {
-			let mut owned = vec![
-				"ls-tree".to_owned(),
-				"--name-only".to_owned(),
-				"-r".to_owned(),
-				"-z".to_owned(),
-				rev.to_owned(),
-			];
+			let mut owned =
+				vec!["ls-tree".to_owned(), "-r".to_owned(), "-z".to_owned(), rev.to_owned()];
 			if !paths.is_empty() {
 				owned.push("--".to_owned());
 				owned.extend(paths.iter().cloned());
 			}
+			// Records are `<mode> SP <type> SP <id> TAB <path>`; gitlinks have
+			// type `commit`.
 			return Ok(cli_text_owned(self.root(), &owned, super::cli::SYNC_TIMEOUT)?
 				.split('\0')
-				.filter(|s| !s.is_empty())
-				.map(str::to_owned)
+				.filter_map(|record| {
+					let (meta, path) = record.split_once('\t')?;
+					let mut fields = meta.split(' ');
+					let mode = u32::from_str_radix(fields.next()?, 8).ok()?;
+					(fields.next()? == "blob").then(|| TreeEntry { path: path.to_owned(), mode })
+				})
 				.collect());
 		}
 		let repo = self.gix()?;
@@ -888,10 +931,13 @@ impl GitRepo {
 			.map_err(|e| Error::backend("git ls-tree", e))?
 			.into_iter()
 			.filter(|e| e.mode.is_blob() || e.mode.is_link())
-			.map(|e| bytes_to_path(e.filepath.as_bstr()))
-			.filter(|p| paths.is_empty() || paths.iter().any(|wanted| path_matches(p, wanted)))
+			.map(|e| TreeEntry {
+				path: bytes_to_path(e.filepath.as_bstr()),
+				mode: u32::from(e.mode.value()),
+			})
+			.filter(|e| paths.is_empty() || paths.iter().any(|wanted| path_matches(&e.path, wanted)))
 			.collect();
-		out.sort();
+		out.sort_by(|a, b| a.path.cmp(&b.path));
 		Ok(out)
 	}
 
@@ -1017,7 +1063,10 @@ impl GitRepo {
 		Ok(None)
 	}
 
-	fn walk_commit_ids(&self, rev: &str) -> Result<Vec<gix::ObjectId>> {
+	/// The first `limit` commits reachable from `rev`, newest first. Like
+	/// `git log -n<limit>`, the walk stops there, so older history is never
+	/// read.
+	fn walk_commit_ids(&self, rev: &str, limit: usize) -> Result<Vec<gix::ObjectId>> {
 		let repo = self.gix()?;
 		let id = repo
 			.rev_parse_single(rev)
@@ -1030,6 +1079,7 @@ impl GitRepo {
 			))
 			.all()
 			.map_err(|err| Error::backend("git rev-list", err))?
+			.take(limit)
 			.map(|item| {
 				item
 					.map(|info| info.id)
@@ -1300,6 +1350,9 @@ fn path_matches(path: &str, wanted: &str) -> bool {
 			.strip_prefix(wanted)
 			.is_some_and(|rest| rest.starts_with('/'))
 }
+/// `path =` values from `.gitmodules`, keeping only plain relative paths:
+/// like Git, reject absolute, `.`, and `..` components, which could escape
+/// the checkout or make the recursive walk revisit a parent forever.
 fn parse_gitmodules(path: &Path) -> Vec<String> {
 	let Ok(content) = std::fs::read_to_string(path) else {
 		return Vec::new();
@@ -1309,7 +1362,13 @@ fn parse_gitmodules(path: &Path) -> Vec<String> {
 		.filter_map(|line| {
 			let line = line.trim();
 			let (key, value) = line.split_once('=')?;
-			(key.trim().eq_ignore_ascii_case("path")).then(|| value.trim().to_owned())
+			let value = value.trim();
+			(key.trim().eq_ignore_ascii_case("path")
+				&& !value.is_empty()
+				&& Path::new(value)
+					.components()
+					.all(|component| matches!(component, std::path::Component::Normal(_))))
+			.then(|| value.to_owned())
 		})
 		.collect()
 }
@@ -1355,6 +1414,123 @@ mod tests {
 		fs::write(cwd.join(name), contents)?;
 		git(cwd, &["add", name])?;
 		git(cwd, &["commit", "-m", subject])?;
+		Ok(())
+	}
+
+	#[test]
+	fn operation_kind_names_state_files_and_distinguishes_am_from_rebase() -> TestResult {
+		let (_dir, repo) = repo()?;
+		let git_dir = &repo.info().git_dir;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		for (marker, kind) in
+			[("MERGE_HEAD", "merge"), ("CHERRY_PICK_HEAD", "cherry-pick"), ("REVERT_HEAD", "revert")]
+		{
+			fs::write(git_dir.join(marker), "")?;
+			assert_eq!(repo.operation_kind()?, Some(kind));
+			assert!(repo.operation_in_progress()?);
+			fs::remove_file(git_dir.join(marker))?;
+		}
+		fs::create_dir(git_dir.join("rebase-merge"))?;
+		assert_eq!(repo.operation_kind()?, Some("rebase"));
+		assert!(repo.operation_in_progress()?);
+		fs::remove_dir(git_dir.join("rebase-merge"))?;
+		fs::create_dir(git_dir.join("rebase-apply"))?;
+		assert_eq!(repo.operation_kind()?, Some("rebase"));
+		assert!(repo.operation_in_progress()?);
+		fs::write(git_dir.join("rebase-apply/applying"), "")?;
+		assert_eq!(repo.operation_kind()?, Some("am"));
+		assert!(repo.operation_in_progress()?);
+		fs::remove_dir_all(git_dir.join("rebase-apply"))?;
+		// Git can retain REBASE_HEAD after the rebase has finished.
+		fs::write(git_dir.join("REBASE_HEAD"), "")?;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		Ok(())
+	}
+
+	#[test]
+	fn operation_kind_detects_unmerged_index_without_state_files() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "conflict.txt", "base\n", "base")?;
+		fs::write(root.join("conflict.txt"), "stashed\n")?;
+		git(root, &["stash", "push", "-m", "stashed"])?;
+		commit(root, "conflict.txt", "main\n", "main")?;
+		assert!(git(root, &["stash", "pop"]).is_err());
+		assert!(!git(root, &["ls-files", "--unmerged"])?.is_empty());
+		for marker in
+			["MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply"]
+		{
+			assert!(!repo.info().git_dir.join(marker).exists());
+		}
+		assert_eq!(repo.operation_kind()?, Some("unmerged-index"));
+		assert!(repo.operation_in_progress()?);
+		fs::write(root.join("conflict.txt"), "resolved\n")?;
+		git(root, &["add", "conflict.txt"])?;
+		assert_eq!(repo.operation_kind()?, None);
+		assert!(!repo.operation_in_progress()?);
+		Ok(())
+	}
+
+	#[test]
+	fn bounded_logs_read_only_the_requested_prefix_like_git_log() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "one", "one\n", "first")?;
+		let first = repo.head_sha()?.ok_or("missing HEAD")?;
+		commit(dir.path(), "two", "two\n", "second")?;
+		commit(dir.path(), "three", "three\n", "third")?;
+		assert_eq!(repo.log_subjects(1)?, ["third"]);
+		assert!(repo.log_subjects(0)?.is_empty());
+		assert!(repo.log_onelines(0)?.is_empty());
+		assert_eq!(
+			repo.log_onelines(1)?,
+			git(dir.path(), &["log", "-1", "--oneline", "--no-decorate"])?
+				.lines()
+				.map(str::to_owned)
+				.collect::<Vec<_>>()
+		);
+		fs::remove_file(
+			dir.path()
+				.join(".git/objects")
+				.join(&first[..2])
+				.join(&first[2..]),
+		)?;
+		// A fresh handle cannot satisfy the missing ancestor from an object
+		// cache. A prefix that stops before it never reads it, as `git log -1`
+		// does not; a walk that reaches it reports it.
+		let repo = GitRepo::require(dir.path())?;
+		assert_eq!(repo.log_subjects(1)?, ["third"]);
+		assert_eq!(repo.log_onelines(1)?.len(), 1);
+		assert!(repo.log_subjects(0)?.is_empty());
+		for result in [repo.log_subjects(3), repo.log_onelines(3)] {
+			assert!(matches!(result, Err(Error::Backend { context: "git rev-list", .. })));
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn submodule_paths_skip_escaping_and_self_referential_entries() -> TestResult {
+		let outer = tempfile::tempdir()?;
+		let root = outer.path().join("root");
+		fs::create_dir_all(root.join("sub"))?;
+		fs::create_dir_all(outer.path().join("victim"))?;
+		git(&root, &["init", "-q"])?;
+		git(&root.join("sub"), &["init", "-q"])?;
+		git(&outer.path().join("victim"), &["init", "-q"])?;
+		// `.` and `a/..` would re-enqueue the root forever; `../victim` and the
+		// absolute path point at a real checkout outside the repository.
+		let absolute = outer.path().join("victim");
+		fs::write(
+			root.join(".gitmodules"),
+			format!(
+				"[submodule \"self\"]\n\tpath = .\n[submodule \"up\"]\n\tpath = sub/..\n[submodule \
+				 \"escape\"]\n\tpath = ../victim\n[submodule \"abs\"]\n\tpath = {}\n[submodule \
+				 \"sub\"]\n\tpath = sub\n",
+				absolute.display()
+			),
+		)?;
+		assert_eq!(GitRepo::require(&root)?.submodule_paths()?, ["sub"]);
 		Ok(())
 	}
 
@@ -1624,7 +1800,10 @@ mod tests {
 				.collect();
 		assert_eq!(repo.log_onelines(2)?, expected_onelines);
 		assert_eq!(repo.rev_list_touching("HEAD", "two", 10)?, vec![second.clone()]);
-		assert_eq!(repo.ls_tree("HEAD", &[])?, vec!["one", "two"]);
+		assert_eq!(repo.ls_tree("HEAD", &[])?, vec![
+			TreeEntry { path: "one".to_owned(), mode: 0o100644 },
+			TreeEntry { path: "two".to_owned(), mode: 0o100644 },
+		]);
 		let shown = repo.show_blob("HEAD:two", Some(3))?;
 		assert_eq!(shown.bytes, b"two");
 		assert!(shown.truncated);

@@ -1,7 +1,15 @@
-import type { Database, SQLQueryBindings, Statement } from "bun:sqlite";
+import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { checkpointWal, getHistoryDbPath, logger, openSqliteDatabaseSync, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	checkpointWal,
+	getHistoryDbPath,
+	logger,
+	openSqliteDatabaseSync,
+	postmortem,
+	readSalvageableRows,
+} from "@oh-my-pi/pi-utils";
+import { closeSessionIndex, salvageSessionIndex } from "./session-index";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -48,6 +56,20 @@ function historyFilterClause(table: string, first: number): string {
 	return `(?${first} IS NULL OR ${table}cwd = ?${first}) AND (?${session} IS NULL OR ${table}session_id = ?${session})`;
 }
 
+/**
+ * Rows a reader may hand to callers. A damaged page cross-linked into
+ * `history` decodes foreign bytes as rows (BLOB prompts and counters), which
+ * would reach the editor as `Uint8Array`s.
+ */
+function readableRowClause(table: string): string {
+	return `typeof(${table}prompt) = 'text' AND typeof(${table}created_at) = 'integer' AND typeof(${table}use_count) = 'integer'`;
+}
+
+/** A query term's letter and digit runs, as FTS5's unicode61 tokenizer splits stored prompts. */
+function ftsTokens(term: string): string[] {
+	return term.split(/[^\p{L}\p{N}]+/u).filter(token => token.length > 0);
+}
+
 // Escape LIKE wildcards so user input is treated as literal text.
 // Matches the `ESCAPE '\\'` clause used by substring-search statements.
 function escapeLikePattern(text: string): string {
@@ -85,6 +107,9 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS idx_history_created_at ON history(created_at DESC);
 `;
+
+/** Rows {@link HistoryStorage.getRecent} reads first; checked on open for decoded foreign rows. */
+const RECENT_WINDOW = 100;
 
 let cancelExitCleanup: (() => void) | undefined;
 
@@ -127,6 +152,9 @@ CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(prompt, content='histo
 CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history BEGIN
 	INSERT INTO history_fts(rowid, prompt) VALUES (new.id, new.prompt);
 END;
+CREATE TRIGGER IF NOT EXISTS history_ad AFTER DELETE ON history BEGIN
+	INSERT INTO history_fts(history_fts, rowid, prompt) VALUES ('delete', old.id, old.prompt);
+END;
 		`);
 
 		if (rebuilt || !hadFts) {
@@ -136,11 +164,12 @@ END;
 				logger.warn("HistoryStorage FTS rebuild failed", { error: String(error) });
 			}
 		}
+		this.#assertRecentWindowReadable();
 		this.#recentStmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?3`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${historyFilterClause("", 1)} ORDER BY created_at DESC, id DESC LIMIT ?3`,
 		);
 		this.#searchStmt = this.#db.prepare(
-			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?4`,
+			`SELECT h.id, h.prompt, h.created_at, h.cwd, h.session_id, h.use_count FROM history_fts f JOIN history h ON h.id = f.rowid WHERE history_fts MATCH ?1 AND ${readableRowClause("h.")} AND ${historyFilterClause("h.", 2)} ORDER BY h.created_at DESC, h.id DESC LIMIT ?4`,
 		);
 		this.#upsertRowStmt = this.#db.prepare(`
 INSERT INTO history (prompt, created_at, cwd, session_id)
@@ -153,13 +182,20 @@ ON CONFLICT(prompt) DO UPDATE SET
 		`);
 	}
 
-	/** Opens the process-wide prompt history database, quarantining a corrupt store once. */
+	/**
+	 * Opens the process-wide prompt history database. A corrupt store is
+	 * quarantined once and the rows it can still decode are copied into the
+	 * replacement.
+	 */
 	static open(dbPath: string = getHistoryDbPath()): HistoryStorage {
 		const existing = HistoryStorage.#instance;
 		if (existing) return existing;
 
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-		return openSqliteDatabaseSync(
+		// Windows cannot move history.db aside while the session index holds it open.
+		closeSessionIndex();
+		let backupPath = undefined as string | undefined;
+		const instance = openSqliteDatabaseSync(
 			dbPath,
 			db => {
 				const instance = new HistoryStorage(db);
@@ -172,8 +208,15 @@ ON CONFLICT(prompt) DO UPDATE SET
 				HistoryStorage.#instance = instance;
 				return instance;
 			},
-			{ recoverCorruption: true },
+			{
+				recoverCorruption: true,
+				onCorruptionPreserved: preserved => {
+					backupPath = preserved;
+				},
+			},
 		);
+		if (backupPath) instance.#salvage(backupPath);
+		return instance;
 	}
 
 	/** Checkpoints and closes the process-wide database, and permits reopening it. */
@@ -249,6 +292,11 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return Promise.resolve();
 	}
 
+	/** Deletes a stored prompt and its search index entry. */
+	delete(id: number): void {
+		this.#db.query("DELETE FROM history WHERE id = ?").run(id);
+	}
+
 	/** Returns unique prompts ordered by their most recent submission. */
 	getRecent(limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
@@ -263,18 +311,19 @@ ON CONFLICT(prompt) DO UPDATE SET
 		}
 	}
 
-	/** Finds unique prompts matching every query token, newest first. */
+	/** Finds unique prompts matching every whitespace-delimited query term, newest first. */
 	search(query: string, limit: number, filter: HistoryFilter = {}): HistoryEntry[] {
 		const safeLimit = this.#normalizeLimit(limit);
 		if (safeLimit === 0) return [];
 
-		const tokens = this.#tokenize(query);
-		if (tokens.length === 0) return [];
+		const terms = this.#terms(query);
+		if (terms.length === 0) return [];
 
-		// 1. FTS5 prefix match (token AND, prefix-wildcard per token).
-		//    Handles punctuation by tokenizing query the same way unicode61 tokenizer
-		//    indexed the stored text, so "git-commit" -> "git"* "commit"*.
-		const ftsQuery = tokens.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
+		// 1. FTS5 prefix match (term AND). Each term is one phrase of its letter
+		//    and digit runs, split the way the unicode61 tokenizer indexed the
+		//    stored text, so "git-commit" -> "git commit"*: the runs must be
+		//    adjacent tokens, not two words anywhere in the prompt.
+		const ftsQuery = terms.map(term => `"${ftsTokens(term).join(" ")}"*`).join(" ");
 		let ftsRows: HistoryRow[] = [];
 		try {
 			ftsRows = this.#searchStmt.all(
@@ -288,12 +337,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 			logger.debug("HistoryStorage FTS query failed, using substring only", { error: String(error) });
 		}
 
-		// 2. Substring fallback (token-AND LIKE). Catches infix matches FTS5's
-		//    prefix-only wildcard cannot reach (e.g. "mit" -> "commit"). Bounded
-		//    by safeLimit, ordered by recency - no full-table load into JS.
+		// 2. Substring fallback (term-AND LIKE, each term literal). Catches infix
+		//    matches FTS5's prefix-only wildcard cannot reach (e.g. "mit" ->
+		//    "commit"). Bounded by safeLimit, ordered by recency - no full-table
+		//    load into JS.
 		let subRows: HistoryRow[] = [];
 		try {
-			subRows = this.#searchSubstring(tokens, safeLimit, filter);
+			subRows = this.#searchSubstring(terms, safeLimit, filter);
 		} catch (error) {
 			logger.error("HistoryStorage substring search failed", { error: String(error) });
 		}
@@ -362,7 +412,9 @@ ON CONFLICT(prompt) DO UPDATE SET
 		try {
 			const sessionIdSelection = this.#historySchemaHasColumn("session_id") ? "session_id" : "NULL AS session_id";
 			rows = this.#db
-				.query(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
+				.query(
+					`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history WHERE typeof(prompt) = 'text'`,
+				)
 				.all() as HistoryRow[];
 		} catch (error) {
 			logger.error("HistoryStorage rebuild dump failed", { error: String(error) });
@@ -404,6 +456,94 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return true;
 	}
 
+	/**
+	 * Recall reads the newest window first, so foreign rows there are what crash
+	 * the editor. When the window holds any and `quick_check` confirms damage,
+	 * failing with SQLITE_CORRUPT hands the store to quarantine and salvage.
+	 * A clean check means only odd but intact values, which reads filter.
+	 */
+	#assertRecentWindowReadable(): void {
+		const window = this.#db
+			.query(
+				`SELECT count(*) AS foreign_rows FROM (SELECT prompt, created_at, use_count FROM history ORDER BY created_at DESC, id DESC LIMIT ${RECENT_WINDOW}) WHERE NOT (${readableRowClause("")})`,
+			)
+			.get() as { foreign_rows: number };
+		if (window.foreign_rows === 0) return;
+		const check = this.#db.query("PRAGMA quick_check(1)").get() as { quick_check: string };
+		if (check.quick_check === "ok") return;
+		throw Object.assign(new Error(`database disk image is malformed (${check.quick_check})`), {
+			code: "SQLITE_CORRUPT",
+		});
+	}
+
+	/**
+	 * Copies every prompt, session title, and recap the quarantined store at
+	 * `backupPath` can still decode into this replacement. Runs once per
+	 * quarantine; a peer that wrote to the replacement first keeps its rows, and
+	 * a prompt both hold merges like a resubmission. Best-effort: the backup
+	 * stays on disk whatever happens here.
+	 */
+	#salvage(backupPath: string): void {
+		let source: Database | undefined;
+		try {
+			source = new Database(backupPath, { readonly: true });
+			const prompts = readSalvageableRows<Record<keyof HistoryRow, unknown>>(
+				source,
+				"history",
+				"id, prompt, created_at, cwd, session_id, use_count",
+			).filter(
+				row =>
+					Number.isSafeInteger(row.id) &&
+					typeof row.prompt === "string" &&
+					row.prompt.trim() !== "" &&
+					Number.isSafeInteger(row.created_at) &&
+					Number.isSafeInteger(row.use_count),
+			);
+			let sequence: number | undefined;
+			try {
+				sequence = source
+					.query<{ seq: number }, []>("SELECT seq FROM sqlite_sequence WHERE name = 'history'")
+					.get()?.seq;
+			} catch {}
+			const target = this.#db;
+			const counts = target.transaction(() => {
+				using insert = target.prepare(`
+INSERT INTO history (id, prompt, created_at, cwd, session_id, use_count)
+VALUES (CASE WHEN EXISTS (SELECT 1 FROM history WHERE id = ?1) THEN NULL ELSE ?1 END, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(prompt) DO UPDATE SET
+	use_count = history.use_count + excluded.use_count,
+	created_at = max(history.created_at, excluded.created_at),
+	cwd = iif(excluded.created_at > history.created_at, excluded.cwd, history.cwd),
+	session_id = iif(excluded.created_at > history.created_at, excluded.session_id, history.session_id)
+				`);
+				for (const row of prompts) {
+					insert.run(
+						row.id as number,
+						row.prompt as string,
+						row.created_at as number,
+						typeof row.cwd === "string" ? row.cwd : null,
+						typeof row.session_id === "string" ? row.session_id : null,
+						row.use_count as number,
+					);
+				}
+				// Keep ids above every id the damaged store handed out: the prediction
+				// daemon's cursor reads `id > cursor` and would skip lower new ids.
+				if (Number.isSafeInteger(sequence)) {
+					target.run("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'history'", [sequence as number]);
+				}
+				return { prompts: prompts.length, ...salvageSessionIndex(source as Database, target) };
+			})();
+			logger.warn("Salvaged readable rows from a damaged history database", { backupPath, ...counts });
+		} catch (error) {
+			logger.error("HistoryStorage salvage failed; the damaged store is preserved", {
+				backupPath,
+				error: String(error),
+			});
+		} finally {
+			source?.close();
+		}
+	}
+
 	#normalizeLimit(limit: number): number {
 		if (!Number.isFinite(limit)) return 0;
 		const clamped = Math.max(0, Math.floor(limit));
@@ -411,20 +551,19 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	/**
-	 * Split on non-alphanumeric runs, mirroring FTS5's `unicode61` tokenizer so
-	 * query tokens align with how stored prompts were indexed. Lowercases for
-	 * stable substring matching.
+	 * Whitespace-delimited query terms, lowercased for stable substring matching.
+	 * A term without a letter or digit matches nothing and is dropped.
 	 */
-	#tokenize(query: string): string[] {
+	#terms(query: string): string[] {
 		return query
 			.toLowerCase()
-			.split(/[^\p{L}\p{N}]+/u)
-			.filter(tok => tok.length > 0);
+			.split(/\s+/u)
+			.filter(term => /[\p{L}\p{N}]/u.test(term));
 	}
 
-	#searchSubstring(tokens: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
-		const stmt = this.#getSubstringStmt(tokens.length);
-		const params: SQLQueryBindings[] = tokens.map(tok => `%${escapeLikePattern(tok)}%`);
+	#searchSubstring(terms: string[], limit: number, filter: HistoryFilter): HistoryRow[] {
+		const stmt = this.#getSubstringStmt(terms.length);
+		const params: SQLQueryBindings[] = terms.map(term => `%${escapeLikePattern(term)}%`);
 		params.push(filter.cwd ?? null, filter.sessionId ?? null, limit);
 		return stmt.all(...params) as HistoryRow[];
 	}
@@ -438,7 +577,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 		);
 		const whereClause = [...tokenClauses, historyFilterClause("", tokenCount + 1)].join(" AND ");
 		stmt = this.#db.prepare(
-			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + 3}`,
+			`SELECT id, prompt, created_at, cwd, session_id, use_count FROM history WHERE ${readableRowClause("")} AND ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?${tokenCount + 3}`,
 		);
 		this.#substringStmts.set(tokenCount, stmt);
 		return stmt;

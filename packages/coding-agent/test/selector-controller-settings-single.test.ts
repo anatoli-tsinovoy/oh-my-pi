@@ -42,13 +42,13 @@ function overlayUi(): {
 	return { shown, setFocus, overlayStack, ui: { overlayStack, setFocus, showOverlay } };
 }
 
-/** A context whose session-model picker reads an empty, current catalog. */
 function pickerContext(ui: OverlayUi) {
 	return createInteractiveModeContext({
 		session: {
 			model: undefined,
 			scopedModels: [],
 			getContextUsage: () => undefined,
+			effectiveServiceTier: () => undefined,
 			getRoleModelCycle: () => undefined,
 			modelRegistry: {
 				getError: () => undefined,

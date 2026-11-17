@@ -49,6 +49,11 @@ export interface SessionSwitchEvent {
 	previousSessionFile: string | undefined;
 }
 
+/** Fired after successfully clearing the live/model context without changing session identity. */
+export interface SessionClearEvent {
+	type: "session_clear";
+}
+
 /**
  * What a branch transition does with {@link SessionBeforeBranchEvent.entryId}:
  * - `"branch"`: rewinds to a user message; `entryId` and everything after it are dropped.
@@ -99,6 +104,13 @@ export interface SessionCompactEvent {
 	compactionEntry: CompactionEntry;
 	/** Whether the compaction entry was provided by an extension/hook */
 	fromExtension: boolean;
+}
+
+/** Fired before the operator ends the session through a close the host can still refuse (can be cancelled). */
+export interface SessionBeforeShutdownEvent {
+	type: "session_before_shutdown";
+	/** Aborted when the close stops waiting: another close request, a signal, or the UI stopping. */
+	signal: AbortSignal;
 }
 
 /** Fired on process exit (SIGINT/SIGTERM) */
@@ -166,12 +178,14 @@ export type SessionEvent =
 	| SessionStartEvent
 	| SessionBeforeSwitchEvent
 	| SessionSwitchEvent
+	| SessionClearEvent
 	| SessionBeforeBranchEvent
 	| SessionBranchEvent
 	| SessionBeforeCompactEvent
 	| SessionCompactingEvent
 	| SessionCompactEvent
 	| SessionStopEvent
+	| SessionBeforeShutdownEvent
 	| SessionShutdownEvent
 	| SessionBeforeTreeEvent
 	| SessionTreeEvent
@@ -207,11 +221,17 @@ export interface AgentEndEvent {
 	type: "agent_end";
 	messages: AgentMessage[];
 	/**
-	 * When true, the session has already scheduled an automatic continuation
-	 * (auto-retry, empty/unexpected-stop retry, etc.). Subscribers must not
-	 * treat this as a user-visible terminal settle.
+	 * When true, this is not a terminal settle: an automatic continuation is
+	 * scheduled, or background work may resume the session. See
+	 * `awaitingAsyncWork` to distinguish the latter.
 	 */
 	willContinue?: boolean;
+	/**
+	 * True when this settle is awaiting background work rather than an
+	 * agent-owned continuation. Prompt unwinding may still be in progress,
+	 * and a background result may already be queued.
+	 */
+	awaitingAsyncWork?: boolean;
 }
 
 /** Fired at the start of each turn */
@@ -480,6 +500,12 @@ export interface SessionCompactingResult {
 	prompt?: string;
 	/** Custom data to store in compaction entry */
 	preserveData?: Record<string, unknown>;
+}
+
+/** Return type for `session_before_shutdown` handlers */
+export interface SessionBeforeShutdownResult {
+	/** If true, cancel this shutdown attempt. */
+	cancel?: boolean;
 }
 
 /** Return type for `session_stop` handlers */

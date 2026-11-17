@@ -63,6 +63,7 @@ use std::{
 
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
+use xutf::Text;
 
 use self::{
 	config::{Decoder, LlamaConfig, LlamaWeights},
@@ -141,7 +142,7 @@ fn load_decoder(weights: LlamaWeights<std::fs::File>) -> anyhow::Result<Box<dyn 
 }
 
 fn utf16_len(text: &str) -> usize {
-	text.chars().map(char::len_utf16).sum()
+	text.transcoded_len::<u16>()
 }
 
 /// Last `units` UTF-16 units of `before`, starting after a whitespace so no
@@ -174,7 +175,7 @@ fn is_anchor(text: &str) -> bool {
 	let hash = word
 		.bytes()
 		.fold(0x811c_9dc5u32, |h, b| (h ^ u32::from(b)).wrapping_mul(0x0100_0193));
-	hash % ANCHOR_EVERY == 0
+	hash.is_multiple_of(ANCHOR_EVERY)
 }
 
 /// The context `before` a word: the last [`CONTEXT_UNITS`] UTF-16 units,

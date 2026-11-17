@@ -22,6 +22,7 @@ export interface VcsError extends Error {
 	code:
 		| "NotARepository"
 		| "RefNotFound"
+		| "HeadMoved"
 		| "ObjectNotFound"
 		| "EmptyCherryPick"
 		| "Conflict"
@@ -80,6 +81,9 @@ export declare function detachGitDir(
 	sourceCommonDir: string,
 	signal?: AbortSignal,
 ): Promise<"no-git" | "independent" | "detached">;
+
+/** Preserve isolation-local Git objects in the source without changing its refs or index. */
+export declare function copyGitObjects(isolationRoot: string, sourceRoot: string): Promise<void>;
 
 /** Run Git's checkout hook in a new linked worktree and return its output and exit status. */
 export declare function runPostCheckoutHook(

@@ -26,6 +26,7 @@ There are two active integration styles:
    - Unrestricted session bootstrap discovers and loads config/provider/plugin tool modules, then registers them through a generated extension.
    - These functions and the combined `discoverAndLoadCustomTools` helper are also library APIs in `packages/coding-agent/src/extensibility/custom-tools/loader.ts`.
    - Subagents can reuse `preloadedCustomToolPaths` to skip discovery, but factories are rebound to each session's own API.
+   - Discovered tools load per working directory. After `/move` (or resuming a session from another project) the top-level session discovers the destination's tools, binds them to the destination cwd, and suspends the previous directory's; moving back resumes them. Subagents spawned afterwards inherit the destination's paths.
 
 ```text
 Model tool call flow
@@ -72,48 +73,46 @@ A custom tool module must export a function (default export preferred):
 ```ts
 import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 
-const factory: CustomToolFactory = (pi) => ({
-  name: "repo_stats",
-  label: "Repo Stats",
-  description: "Counts tracked TypeScript files",
-  parameters: pi.zod.object({
-    glob: pi.zod.string().optional(),
-  }),
+const factory: CustomToolFactory = pi => ({
+	name: "repo_stats",
+	label: "Repo Stats",
+	description: "Counts tracked TypeScript files",
+	parameters: pi.zod.object({
+		glob: pi.zod.string().optional(),
+	}),
 
-  async execute(toolCallId, params, onUpdate, ctx, signal) {
-    onUpdate?.({
-      content: [{ type: "text", text: "Scanning files..." }],
-      details: { phase: "scan" },
-    });
+	async execute(toolCallId, params, onUpdate, ctx, signal) {
+		onUpdate?.({
+			content: [{ type: "text", text: "Scanning files..." }],
+			details: { phase: "scan" },
+		});
 
-    const result = await pi.exec(
-      "git",
-      ["ls-files", params.glob ?? "**/*.ts"],
-      { signal, cwd: pi.cwd },
-    );
-    if (result.killed) {
-      throw new Error("Scan was cancelled");
-    }
-    if (result.code !== 0) {
-      throw new Error(result.stderr || "git ls-files failed");
-    }
+		const result = await pi.exec("git", ["ls-files", params.glob ?? "**/*.ts"], { signal, cwd: pi.cwd });
+		if (result.killed) {
+			throw new Error("Scan was cancelled");
+		}
+		if (result.code !== 0) {
+			throw new Error(result.stderr || "git ls-files failed");
+		}
 
-    const files = result.stdout.split("\n").filter(Boolean);
-    return {
-      content: [{ type: "text", text: `Found ${files.length} files` }],
-      details: { count: files.length, sample: files.slice(0, 10) },
-    };
-  },
+		const files = result.stdout.split("\n").filter(Boolean);
+		return {
+			content: [{ type: "text", text: `Found ${files.length} files` }],
+			details: { count: files.length, sample: files.slice(0, 10) },
+		};
+	},
 
-  onSession(event) {
-    if (event.reason === "shutdown") {
-      // cleanup resources if needed
-    }
-  },
+	onSession(event) {
+		if (event.reason === "shutdown") {
+			// cleanup resources if needed
+		}
+	},
 });
 
 export default factory;
 ```
+
+Value imports of `@oh-my-pi/*` host packages (and their legacy `@mariozechner/*` / `@earendil-works/*` scopes) resolve to the copy omp itself runs, including in the compiled binary; the tool's other dependencies resolve from its own location. A tool module and its relative imports are evaluated once per process; each session calls the factory again.
 
 Parameter schemas may use the Zod-compatible omptype builder (`pi.zod`), native omptype builder (`pi.arktype`), or legacy-compatible TypeBox shim (`pi.typebox`) and flow through the shared validation/wire pipeline.
 

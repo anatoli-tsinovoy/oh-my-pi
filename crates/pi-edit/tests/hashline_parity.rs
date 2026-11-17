@@ -253,9 +253,9 @@ fn compact_diff_preview_matches_all_diff_preview_cases() {
 			0,
 		),
 		(
-			"dedupes blank gap rows left adjacent by omitted removed lines and trims edge separators",
+			"marks hunk gaps left adjacent by omitted removed lines once and trims edge separators",
 			"\n 1|alpha\n\n-5|beta\n\n 9|gamma\n\n-12|omitted",
-			"1:alpha\n\n8:gamma",
+			"1:alpha\n…\n8:gamma",
 			0,
 			2,
 		),
@@ -530,24 +530,18 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 				.contains("Input header must be")
 		);
 	}
+	// A non-hex word where the tag belongs parses as an untagged section, so
+	// staging can answer with the current tag instead of a header error.
 	for input in [
 		"[src/a.ts#1A2]\nPUT 1-1:\n+after",
 		"[src/a.ts#1A2G]\nPUT 1-1:\n+after",
 		"[src/a.ts#1A2B5]\nPUT 1-1:\n+after",
+		"[Update File: src/a.ts#1A2G]\nPUT 1-1:\n+after",
 	] {
-		assert!(
-			Patch::parse(input, &SplitOptions::default())
-				.expect_err("rejects malformed snapshot tags")
-				.to_string()
-				.contains("Input header must be")
-		);
+		let patch = Patch::parse(input, &SplitOptions::default()).expect("placeholder tag parses");
+		assert_eq!(patch.sections[0].path, "src/a.ts", "{input}");
+		assert_eq!(patch.sections[0].file_hash, None, "{input}");
 	}
-	assert!(
-		Patch::parse("[Update File: src/a.ts#1A2G]\nPUT 1-1:\n+after", &SplitOptions::default())
-			.expect_err("rejects malformed snapshot tags even with apply_patch noise")
-			.to_string()
-			.contains("Input header must be")
-	);
 	let missing = Patch::parse("CUT 38-40", &SplitOptions::default())
 		.expect_err("reports bracket syntax with a 4-hex example when the header is missing")
 		.to_string();
@@ -562,7 +556,7 @@ fn pure_format_input_and_streaming_contracts_cover_uncaptured_cases() {
 #[test]
 fn hashline_inspection_matches_streaming_matcher_cases() {
 	let root = fixture("parity_streaming_matcher_paths.json");
-	let engine = engine_for(EditMode::Hashline, true, 0.95, false);
+	let engine = engine_for(EditMode::Hashline, true, 0.95, false, 512);
 	for case in root["cases"].as_array().expect("matcher cases") {
 		let name = case["name"].as_str().expect("matcher name");
 		let args = json!({ "input": case["input"].as_str().expect("matcher input") }).to_string();
@@ -1164,6 +1158,49 @@ async fn edit_of_first_line_with_prior_read_applies() {
 	);
 }
 
+#[tokio::test]
+async fn edit_result_after_a_formatting_write_shows_the_written_lines() {
+	const SOURCE: &str = "const x = { a: 1 };\nlet y = \"q\";\n";
+	const FORMATTED: &str = "const x = { a: 1 };\nlet z = { b: 3 };\nlet w = [1, 2];\n";
+
+	let mut workspace = Workspace::new(EditMode::Hashline);
+	workspace.config.enforce_seen_lines = true;
+	workspace.write("zz.ts", SOURCE);
+	let tag = workspace.snapshot("zz.ts", SOURCE, Some(&[1, 2]));
+	let writer = common::DiskWriter {
+		rewrite: Some(Box::new(|_| FORMATTED.to_owned())),
+		..Default::default()
+	};
+
+	let outcome = workspace
+		.apply_json(
+			&json!({ "input": format!("[zz.ts#{tag}]\nPUT 2.=2:\n+let z={{b:3}};;\n+let w=[1,\n+2];") }),
+			&writer,
+		)
+		.await
+		.expect("applies the edit");
+	let text = &outcome.text;
+	let tag = file_hash(FORMATTED);
+	assert!(text.starts_with(&format!("[zz.ts#{tag}]")), "{text}");
+	assert!(text.contains("2:let z = { b: 3 };\n3:let w = [1, 2];"), "{text}");
+	assert!(!text.contains("let z={b:3};;"), "result shows sent lines: {text}");
+	assert!(!text.contains("4:"), "result shows a line the written file lacks: {text}");
+	assert!(!text.contains("editor/IDE"), "blames an editor: {text}");
+
+	// The displayed rows are anchorable under the returned tag.
+	workspace
+		.apply_json(
+			&json!({ "input": format!("[zz.ts#{tag}]\nPUT 3.=3:\n+let w = [3];") }),
+			&common::DiskWriter::default(),
+		)
+		.await
+		.expect("edits a line shown by the formatted result");
+	assert_eq!(
+		workspace.read("zz.ts").as_deref(),
+		Some("const x = { a: 1 };\nlet z = { b: 3 };\nlet w = [3];\n")
+	);
+}
+
 fn preview_for(
 	workspace: &Workspace,
 	input: String,
@@ -1277,7 +1314,7 @@ fn hashline_streaming_preview_cases_preserve_partial_and_final_contracts() {
 	let batch = preview_for(&workspace, format!("{header_a}\nPUT 2-2:\n"), false);
 	assert!(batch.files.is_empty(), "{}", scenarios["empty-body"]);
 
-	let engine = engine_for(EditMode::Hashline, true, 0.95, false);
+	let engine = engine_for(EditMode::Hashline, true, 0.95, false, 512);
 	let digest_args =
 		json!({ "input": "[a.ts#AB12]\nPUT 1-2:\n+const x = 1;\n+const y = 2;\nCUT 5\n" })
 			.to_string();

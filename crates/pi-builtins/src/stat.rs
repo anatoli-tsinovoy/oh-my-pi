@@ -2,18 +2,14 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use brush_core::{ShellExtensions, builtins::Registration};
-
-use crate::host::util;
-
 #[cfg(not(any(unix, windows)))]
 use crate::host::{self, Host, Utility, matches_parser};
 
 #[cfg(any(unix, windows))]
-use imp::Stat;
+pub(crate) use imp::Stat;
 
 #[cfg(not(any(unix, windows)))]
-struct Stat {
+pub(crate) struct Stat {
 	matches: clap::ArgMatches,
 }
 
@@ -39,30 +35,31 @@ fn app() -> clap::Command {
 		.override_usage(host::format_usage("stat [OPTION]... FILE..."))
 }
 
-/// Creates the `stat` builtin registration.
-pub(crate) fn stat_builtin<SE: ShellExtensions>() -> Registration<SE> {
-	util::<Stat, SE>()
-}
-
 #[cfg(any(unix, windows))]
 mod imp {
 	use std::{
 		borrow::Cow,
 		cell::OnceCell,
 		ffi::{OsStr, OsString},
+		fmt::NumBuffer,
 		io::{self, Write},
 		path::Path,
 		time::SystemTime,
 	};
 
 	use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
+	use jiff::{
+		Timestamp,
+		fmt::strtime::{BrokenDownTime, Config},
+		tz::TimeZone,
+	};
 	use pi_vfs::{BlockingFs, FileType, Metadata, StatFs};
 	use thiserror::Error;
 	use uucore::{
 		display::Quotable,
 		fs::display_permissions_unix,
 		fsext::MetadataTimeField,
-		time::{FormatSystemTimeFallback, format_system_time, system_time_to_sec},
+		time::system_time_to_sec,
 	};
 	#[cfg(unix)]
 	use uucore::{
@@ -75,6 +72,7 @@ mod imp {
 	use crate::{
 		fsmeta::metadata_get_time,
 		host::{self, Host, Utility, matches_parser, strip_errno},
+		time_zone::shell_time_zone,
 	};
 
 	const ABOUT: &str = "Display file or file system status.";
@@ -403,6 +401,7 @@ for details about the options it supports.";
 		from_user:          bool,
 		files:              Vec<OsString>,
 		time_format:        Option<String>,
+		time_zone:          TimeZone,
 		#[cfg_attr(not(unix), allow(dead_code))]
 		mount_list:         OnceCell<Option<Vec<OsString>>>,
 		#[cfg_attr(not(unix), allow(dead_code))]
@@ -699,12 +698,9 @@ for details about the options it supports.";
 		precision: Precision,
 		padding_char: Padding,
 	) {
-		let num = num.to_string();
-		let arg = if flags.group {
-			group_num(&num)
-		} else {
-			Cow::Borrowed(num.as_str())
-		};
+		let mut buf = NumBuffer::new();
+		let num = num.format_into(&mut buf);
+		let arg = if flags.group { group_num(num) } else { Cow::Borrowed(num) };
 		let prefix = if flags.sign {
 			"+"
 		} else if flags.space {
@@ -775,12 +771,9 @@ for details about the options it supports.";
 		precision: Precision,
 		padding_char: Padding,
 	) {
-		let num = num.to_string();
-		let s = if flags.group {
-			group_num(&num)
-		} else {
-			Cow::Borrowed(num.as_str())
-		};
+		let mut buf = NumBuffer::new();
+		let num = num.format_into(&mut buf);
+		let s = if flags.group { group_num(num) } else { Cow::Borrowed(num) };
 		let s = match precision {
 			Precision::NotSpecified => s,
 			Precision::NoNumber => s,
@@ -1080,8 +1073,7 @@ for details about the options it supports.";
 		fn new(matches: &ArgMatches, host: &mut Host) -> Result<Self, StatError> {
 			let files: Vec<OsString> = matches
 				.get_many::<OsString>(options::FILES)
-				.map(|v| v.map(OsString::from).collect())
-				.unwrap_or_default();
+				.map_or_default(|v| v.map(OsString::from).collect());
 			if files.is_empty() {
 				return Err(StatError::MissingOperand);
 			}
@@ -1128,6 +1120,7 @@ for details about the options it supports.";
 				from_user: !format_str.is_empty(),
 				files,
 				time_format: matches.get_one::<String>(options::BSD_TIMEFMT).cloned(),
+				time_zone: shell_time_zone(host),
 				mount_list: OnceCell::new(),
 				mount_list_needed,
 				default_tokens,
@@ -1299,30 +1292,27 @@ for details about the options it supports.";
 						'u' => unsigned(meta.uid().map(u64::from)),
 						// user name of owner
 						#[cfg(unix)]
-						'U' => match meta.uid() {
-							Some(uid) => OutputType::Str(
-								entries::uid2usr(uid).unwrap_or_else(|_| "UNKNOWN".to_owned()),
-							),
-							None => OutputType::Unknown,
+						'U' if let Some(uid) = meta.uid() => {
+							OutputType::Str(entries::uid2usr(uid).unwrap_or_else(|_| "UNKNOWN".to_owned()))
 						},
 						// no user database on Windows
 						#[cfg(windows)]
 						'U' => OutputType::Str("UNKNOWN".to_string()),
 
 						// time of file birth, human-readable; - if unknown
-						'w' => OutputType::Str(pretty_time(meta, MetadataTimeField::Birth, self.time_fmt())),
+						'w' => OutputType::Str(pretty_time(meta, MetadataTimeField::Birth, self.time_fmt(), &self.time_zone)),
 						// time of file birth, seconds since Epoch; 0 if unknown
 						'W' => epoch_time(meta, MetadataTimeField::Birth),
 						// time of last access, human-readable
-						'x' => OutputType::Str(pretty_time(meta, MetadataTimeField::Access, self.time_fmt())),
+						'x' => OutputType::Str(pretty_time(meta, MetadataTimeField::Access, self.time_fmt(), &self.time_zone)),
 						// time of last access, seconds since Epoch
 						'X' => epoch_time(meta, MetadataTimeField::Access),
 						// time of last data modification, human-readable
-						'y' => OutputType::Str(pretty_time(meta, MetadataTimeField::Modification, self.time_fmt())),
+						'y' => OutputType::Str(pretty_time(meta, MetadataTimeField::Modification, self.time_fmt(), &self.time_zone)),
 						// time of last data modification, seconds since Epoch
 						'Y' => epoch_time(meta, MetadataTimeField::Modification),
 						// time of last status change, human-readable
-						'z' => OutputType::Str(pretty_time(meta, MetadataTimeField::Change, self.time_fmt())),
+						'z' => OutputType::Str(pretty_time(meta, MetadataTimeField::Change, self.time_fmt(), &self.time_zone)),
 						// time of last status change, seconds since Epoch
 						'Z' => epoch_time(meta, MetadataTimeField::Change),
 						'R' => unsigned_hex(meta.rdev()),
@@ -1836,8 +1826,7 @@ for details about the options it supports.";
 	fn bsd_shell_exec(matches: &ArgMatches, host: &mut Host) -> i32 {
 		let files: Vec<OsString> = matches
 			.get_many::<OsString>(options::FILES)
-			.map(|v| v.cloned().collect())
-			.unwrap_or_default();
+			.map_or_default(|v| v.cloned().collect());
 		if files.is_empty() {
 			host.error(StatError::MissingOperand, 1);
 			return 1;
@@ -2087,21 +2076,23 @@ for details about the options it supports.";
 		}
 	}
 
-	fn pretty_time(meta: &Metadata, md_time_field: MetadataTimeField, fmt: &str) -> String {
-		if let Some(time) = file_time(meta, md_time_field) {
-			let mut tmp = Vec::new();
-			if format_system_time(
-				&mut tmp,
-				time,
-				fmt,
-				FormatSystemTimeFallback::Float,
-			)
-			.is_ok()
-			{
-				return String::from_utf8(tmp).unwrap();
+	fn pretty_time(meta: &Metadata, md_time_field: MetadataTimeField, fmt: &str, time_zone: &TimeZone) -> String {
+		let Some(time) = file_time(meta, md_time_field) else {
+			return "-".to_string();
+		};
+		let Ok(timestamp) = Timestamp::try_from(time) else {
+			// Keep uucore's float fallback for timestamps outside jiff's range.
+			let (mut sec, mut nsec) = system_time_to_sec(time);
+			if sec < 0 && nsec != 0 {
+				sec -= 1;
+				nsec = 1_000_000_000 - nsec;
 			}
-		}
-		"-".to_string()
+			return format!("{sec}.{nsec:09}");
+		};
+		let zoned = timestamp.to_zoned(time_zone.clone());
+		BrokenDownTime::from(&zoned)
+			.to_string_with_config(&Config::new().lenient(true), fmt)
+			.unwrap_or_else(|_| "-".to_string())
 	}
 
 	/// Timestamp behind a time directive. Windows has no POSIX status-change
@@ -2286,13 +2277,25 @@ for details about the options it supports.";
 
 #[cfg(all(test, unix))]
 mod tests {
-	use std::{fs, path::PathBuf};
+	use std::{ffi::OsString, fs, path::PathBuf, time::Duration};
+
+	use clap::Parser as _;
 
 	use super::Stat;
-	use crate::host::run_util;
+	use crate::host::{Host, Utility, run_caught, run_util};
 
 	fn run_in(cwd: PathBuf, args: Vec<&str>) -> (i32, String, String) {
 		let (code, capture) = run_util::<Stat>(&args, "", cwd);
+		(code, capture.out(), capture.err())
+	}
+
+	fn run_in_time_zone(cwd: &std::path::Path, args: &[&str], time_zone: &str) -> (i32, String, String) {
+		let (mut host, capture) = Host::for_test("stat", "", cwd);
+		host.set_test_var("TZ", time_zone);
+		let argv: Vec<OsString> = std::iter::once("stat").chain(args.iter().copied()).map(OsString::from).collect();
+		let argv = Stat::rewrite_argv(argv).expect("BSD options rewrite");
+		let parsed = Stat::try_parse_from(argv).expect("arguments parse");
+		let code = run_caught::<Stat>(parsed, &mut host);
 		(code, capture.out(), capture.err())
 	}
 
@@ -2596,6 +2599,41 @@ mod tests {
 		assert_eq!(stderr, "");
 		let year: u32 = stdout.trim_end().parse().expect("year only");
 		assert!((1970..=9999).contains(&year), "unexpected stdout: {stdout:?}");
+	}
+
+	#[test]
+	fn bsd_timefmt_uses_the_shell_time_zone() {
+		let (_dir, root) = canonical_tempdir();
+		let file = fs::File::create(root.join("data.bin")).unwrap();
+		file.set_times(fs::FileTimes::new().set_modified(
+			std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000),
+		))
+		.unwrap();
+
+		assert_eq!(
+			run_in_time_zone(&root, &["-f", "%Sm", "-t", "%H:%M:%S", "data.bin"], "Asia/Tokyo"),
+			(0, "07:13:20\n".to_string(), String::new()),
+		);
+	}
+
+	#[test]
+	fn gnu_timestamps_use_the_shell_time_zone() {
+		let (_dir, root) = canonical_tempdir();
+		let file = fs::File::create(root.join("data.bin")).unwrap();
+		let time = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+		file.set_times(fs::FileTimes::new().set_accessed(time).set_modified(time)).unwrap();
+
+		let (code, stdout, stderr) =
+			run_in_time_zone(&root, &["-c", "%x\n%y\n%z\n%w", "data.bin"], "Asia/Tokyo");
+		assert_eq!((code, stderr.as_str()), (0, ""));
+		let mut lines = stdout.lines();
+		for _ in 0..2 {
+			assert_eq!(lines.next(), Some("2023-11-15 07:13:20.000000000 +0900"));
+		}
+		let changed = lines.next().unwrap();
+		assert!(changed.ends_with(" +0900"), "got: {changed}");
+		let birth = lines.next().unwrap();
+		assert!(birth == "-" || birth.ends_with(" +0900"), "got: {birth}");
 	}
 
 	#[test]

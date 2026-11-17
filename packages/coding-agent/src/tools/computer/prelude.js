@@ -1,4 +1,5 @@
 {
+	/* COMPUTER_OPTION_VALIDATOR */
 	const validateOptions = (label, options) => {
 		if (options === undefined) return {};
 		if (options === null || typeof options !== "object" || Array.isArray(options)) {
@@ -28,7 +29,7 @@
 	const invoke = async (action, options) => {
 		const response = await globalThis.__omp_prelude__("computer", { ...options, action });
 		if (response && typeof response.text === "string" && response.text.length > 0) {
-			globalThis.__omp_display__(response.text);
+			globalThis.__omp_log__("log", response.text);
 		}
 		return response && typeof response.details === "object" && response.details !== null ? response.details : {};
 	};
@@ -66,11 +67,13 @@
 	const elementValueMethods = [
 		"value",
 		"setValue",
+		"selectText",
 		"bounds",
 		"attributes",
 		"actions",
 		"perform",
 		"press",
+		"type",
 		"click",
 		"doubleClick",
 		"focus",
@@ -171,7 +174,7 @@
 			foundElements((await callValue(via(step("find", [query])))).map(makeElement)),
 		);
 		// A non-silent observe() already printed its tree; `ax` stays readable but is left out
-		// of display, spread and serialization, so a trailing `await win.observe()` shows it once.
+		// of printing, spread and serialization, so a trailing `await win.observe()` shows it once.
 		defineMethod(win, "observe", async options => {
 			const silent = Boolean(options?.silent);
 			const observation = await callValue(via(step("observe", [options])));
@@ -204,12 +207,18 @@
 	defineValueMethods(computer, desktopValueMethods, next => [next]);
 	computer.display = async selector => makeDisplay(await callValue([step("display", [selector])]));
 	for (const [namespace, methods] of [
-		["apps", ["list", "open"]],
+		["apps", ["list"]],
 		["control", ["acquire", "release", "state"]],
 	]) {
 		const nested = {};
 		for (const method of methods)
 			defineMethod(nested, method, (...args) => callValue([step(`${namespace}.${method}`, args)]));
+		if (namespace === "apps") {
+			defineMethod(nested, "open", async (...args) => {
+				const app = await callValue([step("apps.open", args)]);
+				return app?.window ? { ...app, window: makeWindow(app.window) } : app;
+			});
+		}
 		computer[namespace] = Object.freeze(nested);
 	}
 	computer.window = selector => resolveWindow([step("window", [selector])]);
@@ -226,12 +235,29 @@
 			throw new TypeError("computer.run() expects a function or code string");
 		}
 		const opts = validateOptions("computer.run", options);
+		const allowed = ["args", "read_only", "timeout"];
+		const message = unknownOptionsMessage(opts, allowed, "computer.run");
+		if (message) {
+			const error = new Error(message);
+			// Match the host's strict-option ToolError rather than the facade's argument-shape TypeErrors.
+			error.name = "ToolError";
+			throw error;
+		}
+		const args = opts.args ?? [];
+		if (typeof fnOrCode === "string" && (!Array.isArray(args) || args.length > 0)) {
+			throw new TypeError("computer.run() passes args only to a function; a code string receives none");
+		}
+		if (!Array.isArray(args)) {
+			throw new TypeError(
+				"computer.run() args must be an array of the function's arguments after its scope: computer.run(async ({ desktop }, path) => …, { args: [path] })",
+			);
+		}
 		const parameters = {};
 		if (opts.read_only !== undefined) parameters.read_only = opts.read_only;
 		if (opts.timeout !== undefined) parameters.timeout = opts.timeout;
 		if (typeof fnOrCode === "function") {
 			parameters.fn = serializeFunction("computer.run()", fnOrCode);
-			parameters.args = encodeArgs("computer.run() argument", Array.isArray(opts.args) ? opts.args : []);
+			parameters.args = encodeArgs("computer.run() argument", args);
 		} else {
 			parameters.code = fnOrCode;
 		}

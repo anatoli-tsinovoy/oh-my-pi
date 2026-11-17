@@ -55,6 +55,7 @@ function createContext(
 	const session = {
 		isStreaming: options.streaming ?? false,
 		fork: vi.fn(async () => true),
+		abort: vi.fn(async () => undefined),
 		flushToDisk: vi.fn(async () => undefined),
 		sessionFile,
 		sessionId: "parent-session-id",
@@ -64,8 +65,10 @@ function createContext(
 	};
 	const flush = vi.fn(async () => undefined);
 	const sessionManager = {
+		getHeader: vi.fn(() => undefined),
 		getCwd: vi.fn(() => options.cwd ?? "/workspace/project"),
 		getSessionFile: vi.fn(() => sessionFile),
+		getSessionId: vi.fn(() => "parent-session-id"),
 		isSessionOnDisk: vi.fn(() => sessionFile !== undefined),
 		flush,
 	};
@@ -419,11 +422,15 @@ describe("/fork terminal placement", () => {
 
 describe("/fork inside Tern", () => {
 	const TERN_ENV_KEYS = ["TERN_PANE_SOCKET", "TERN_PANE"] as const;
-	const savedEnv = new Map(TERN_ENV_KEYS.map(key => [key, process.env[key]]));
+	let savedEnv: Map<string, string | undefined>;
 	let daemon: FakeDaemon | undefined;
 
 	beforeAll(async () => {
 		await initTheme(false);
+	});
+
+	beforeEach(() => {
+		savedEnv = new Map(TERN_ENV_KEYS.map(key => [key, process.env[key]]));
 	});
 
 	afterEach(async () => {
@@ -453,12 +460,14 @@ describe("/fork inside Tern", () => {
 		expect(ctx.present).toHaveBeenCalledTimes(1);
 	});
 
-	it("refuses the in-place fallback mid-turn when Tern declines the fork", async () => {
+	it("aborts the running turn and forks in place when Tern declines the fork", async () => {
 		const tern = await startTern(() => ({ error: { kind: "not_agent", message: "no session file" } }));
 		const { controller, ctx, session } = createContext({ streaming: true });
 		await controller.handleForkCommand();
 		expect(tern.forks).toHaveLength(1);
-		expect(session.fork).not.toHaveBeenCalled();
-		expect(ctx.showWarning).toHaveBeenCalledTimes(1);
+		expect(session.abort).toHaveBeenCalledTimes(1);
+		expect(session.fork).toHaveBeenCalledTimes(1);
+		expect(session.abort.mock.invocationCallOrder[0]).toBeLessThan(session.fork.mock.invocationCallOrder[0]);
+		expect(ctx.showWarning).not.toHaveBeenCalled();
 	});
 });

@@ -14,10 +14,9 @@ import {
 	buildMiseUpdateEnv,
 	buildMiseUpgradeArgs,
 	buildNpmInstallArgs,
+	buildNpmUpdateEnv,
 	buildRenameCleanupPackages,
-	downloadVerifiedBinary,
 	type InstalledVersionVerification,
-	managedInstallName,
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
@@ -36,6 +35,7 @@ import {
 	updateViaBinaryAt,
 	updateViaManager,
 	updateViaShimTakeover,
+	verifyInstalledVersion,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
 import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -43,6 +43,25 @@ import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
+const npmBinary = $which("npm");
+
+/**
+ * npm before 11.10.0 has no `min-release-age` (npm/cli#8965) and ignores the
+ * env key there, so the gated half of the resolution test below can only fail
+ * on 11.10.0+. Probed synchronously because `it.skipIf` is evaluated while
+ * the module loads.
+ */
+const npmSupportsReleaseAge = (() => {
+	if (!npmBinary) return false;
+	// Run from a neutral directory: inside an npm workspaces checkout the
+	// config query exits with ENOWORKSPACES before it ever reads the key.
+	const probe = Bun.spawnSync([npmBinary, "config", "get", "min-release-age"], {
+		cwd: os.tmpdir(),
+		stdout: "pipe",
+		stderr: "ignore",
+	});
+	return probe.exitCode === 0 && probe.stdout.toString().trim() !== "undefined";
+})();
 
 const tempDirs: string[] = [];
 
@@ -118,7 +137,7 @@ const TEST_CONFIG: CliConfig = {
 describe("update command plugin dispatch", () => {
 	it("routes -l to plugin upgrade instead of the app updater", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["-l"], TEST_CONFIG);
 		await command.run();
@@ -129,7 +148,7 @@ describe("update command plugin dispatch", () => {
 
 	it("keeps normal update flags on the app updater path", async () => {
 		const pluginSpy = spyOn(pluginCli, "runPluginCommand").mockResolvedValue(undefined);
-		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue(undefined);
+		const updateSpy = spyOn(updateCli, "runUpdateCommand").mockResolvedValue({ kind: "current" });
 
 		const command = new Update(["--check", "--force"], TEST_CONFIG);
 		await command.run();
@@ -611,6 +630,115 @@ describe("update-cli package manager commands", () => {
 		expect(args).toContain("@oh-my-pi/pi-natives@16.3.15");
 		expect(args).toContain("@oh-my-pi/pi-natives-win32-x64@16.3.15");
 	});
+
+	it("passes --minimum-release-age=0 to bun installs unless the installed bun predates the flag", () => {
+		expect(buildBunInstallArgs("16.3.15", "linux-x64")).toContain("--minimum-release-age=0");
+
+		const legacy = buildBunInstallArgs(
+			"16.3.15",
+			"linux-x64",
+			{ pkg: "@oh-my-pi/pi-coding-agent", natives: "@oh-my-pi/pi-natives" },
+			{ supportsReleaseAgeOverride: false },
+		);
+		expect(legacy).not.toContain("--minimum-release-age=0");
+		expect(legacy).toContain("@oh-my-pi/pi-coding-agent@16.3.15");
+	});
+
+	it("overrides ambient npm release-age settings with the same key, never with before", () => {
+		// npm 11.10-11.14 declared before and min-release-age mutually exclusive
+		// across config sources and aborted with a TypeError when they met, so the
+		// overlay must override min-release-age itself, not before.
+		const env = buildNpmUpdateEnv({ PATH: "/bin", npm_config_min_release_age: "365" });
+
+		expect(env.PATH).toBe("/bin");
+		expect(env.npm_config_min_release_age).toBe("0");
+		expect(Object.keys(env)).not.toContain("npm_config_before");
+
+		// npm predating the feature must not even see the unknown env key.
+		expect(buildNpmUpdateEnv({ PATH: "/bin" }, false)).toEqual({ PATH: "/bin" });
+	});
+
+	it.skipIf(!npmBinary || !npmSupportsReleaseAge)(
+		"overrides ambient min-release-age during actual npm resolution",
+		async () => {
+			if (!npmBinary) throw new Error("npm binary unavailable");
+			const root = await makeTempDir();
+			const now = new Date().toISOString();
+			const old = "2020-01-01T00:00:00.000Z";
+			const version = (v: string) => ({
+				name: "omp-age-gate-probe",
+				version: v,
+				dist: { tarball: "http://127.0.0.1/never-fetched.tgz" },
+			});
+			const packument = {
+				name: "omp-age-gate-probe",
+				"dist-tags": { latest: "2.0.0" },
+				versions: { "1.0.0": version("1.0.0"), "2.0.0": version("2.0.0") },
+				time: { created: old, modified: now, "1.0.0": old, "2.0.0": now },
+			};
+			const server = Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				fetch(request) {
+					const pathname = new URL(request.url).pathname;
+					if (pathname.endsWith("/omp-age-gate-probe")) return Response.json(packument);
+					return new Response("not found", { status: 404 });
+				},
+			});
+			try {
+				// The gate lives in an npmrc FILE, not env: the reported bug is
+				// npmrc-sourced, and the fixed overlay beats it via cross-source
+				// precedence (env outranks file). Same-source env would also mask
+				// the before/min-release-age exclusivity abort on npm 11.10-11.14.
+				const home = path.join(root, "home");
+				const prefix = path.join(root, "prefix");
+				await fs.mkdir(home, { recursive: true });
+				await fs.mkdir(npmGlobalLayout(prefix).nodeModulesDir, { recursive: true });
+				await Bun.write(path.join(home, ".npmrc"), "min-release-age=365\n");
+				// Bogus proxies keep a corporate proxy from intercepting the loopback
+				// registry; NO_PROXY exempts 127.0.0.1 so the fake registry stays reachable.
+				const env: Record<string, string> = {
+					PATH: process.env.PATH ?? "",
+					HOME: home,
+					// npm resolves the home npmrc from USERPROFILE and the global
+					// prefix from APPDATA on Windows; pin both inside the sandbox.
+					USERPROFILE: home,
+					npm_config_prefix: prefix,
+					npm_config_cache: path.join(root, "cache"),
+					npm_config_audit: "false",
+					npm_config_fund: "false",
+					npm_config_update_notifier: "false",
+					HTTP_PROXY: "http://127.0.0.1:9",
+					HTTPS_PROXY: "http://127.0.0.1:9",
+					ALL_PROXY: "http://127.0.0.1:9",
+					NO_PROXY: "127.0.0.1,localhost",
+				};
+				const run = async (extraEnv: Record<string, string | undefined>) => {
+					const proc = Bun.spawn(
+						[npmBinary, "install", "-g", "--dry-run", `--registry=${server.url}`, "omp-age-gate-probe@2.0.0"],
+						{ env: { ...env, ...extraEnv }, cwd: root, stdin: "ignore", stdout: "pipe", stderr: "pipe" },
+					);
+					const [stdout, stderr, exitCode] = await Promise.all([
+						new Response(proc.stdout).text(),
+						new Response(proc.stderr).text(),
+						proc.exited,
+					]);
+					return { out: stdout + stderr, exitCode };
+				};
+
+				const gated = await run({});
+				expect(gated.exitCode).not.toBe(0);
+				expect(gated.out).toMatch(/notarget|No matching version/i);
+
+				const overlay = buildNpmUpdateEnv({});
+				const allowed = await run(overlay);
+				expect(allowed.exitCode).toBe(0);
+				expect(allowed.out).toMatch(/add(ed)?\s+\S*omp-age-gate-probe\b[^\n]*2\.0\.0/);
+			} finally {
+				server.stop(true);
+			}
+		},
+	);
 });
 
 describe("update-cli npm rename contract", () => {
@@ -776,10 +904,11 @@ describe("update-cli bun install command", () => {
 		//     the release.
 		// See https://github.com/can1357/oh-my-pi/issues/1686.
 		const args = buildBunInstallArgs("15.7.6", "linux-x64");
-		expect(args.slice(0, 5)).toEqual([
+		expect(args.slice(0, 6)).toEqual([
 			"install",
 			"-g",
 			"--no-cache",
+			"--minimum-release-age=0",
 			"--registry=https://registry.npmjs.org/",
 			"@oh-my-pi/pi-coding-agent@15.7.6",
 		]);
@@ -943,107 +1072,6 @@ describe("update-cli bun cache pruning", () => {
 
 describe("update-cli release binary integrity", () => {
 	const binaryName = "omp-linux-x64";
-	const url = "https://r2.test/omp-linux-x64";
-	const content = "verified binary";
-	const digest = `sha256:${Bun.SHA256.hash(content, "hex")}`;
-
-	it("writes a download only after its size and digest match", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-
-		await downloadVerifiedBinary({
-			url,
-			targetPath,
-			expectedSize: Buffer.byteLength(content),
-			expectedDigest: digest,
-			fetchImpl: async () => new Response(content),
-		});
-
-		expect(await Bun.file(targetPath).text()).toBe(content);
-		// Windows has no POSIX mode bits; the executable bit is only observable elsewhere.
-		if (process.platform !== "win32") expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
-	});
-
-	it("aborts the response stream as soon as it exceeds the expected size", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-		let pulls = 0;
-		const body = new ReadableStream<Uint8Array>(
-			{
-				pull(controller) {
-					pulls++;
-					controller.enqueue(new Uint8Array(pulls === 1 ? 2 : 1));
-					if (pulls === 2) controller.close();
-				},
-			},
-			{ highWaterMark: 0 },
-		);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: 1,
-				expectedDigest: digest,
-				fetchImpl: async () => new Response(body),
-			}),
-		).rejects.toThrow("received at least 2");
-		expect(pulls).toBe(1);
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-	});
-
-	it("wraps a timeout during body streaming with a friendly message", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-		const body = new ReadableStream<Uint8Array>(
-			{
-				pull(controller) {
-					controller.enqueue(new Uint8Array(1));
-					controller.error(new DOMException("The operation timed out.", "TimeoutError"));
-				},
-			},
-			{ highWaterMark: 0 },
-		);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: Buffer.byteLength(content),
-				expectedDigest: digest,
-				fetchImpl: async () => new Response(body),
-			}),
-		).rejects.toThrow("Timed out downloading release binary after 15 minutes");
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-	});
-
-	it("removes downloads whose size or digest does not match", async () => {
-		const dir = await makeTempDir();
-		const targetPath = path.join(dir, binaryName);
-		const fetchImpl = async () => new Response(content);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: Buffer.byteLength(content) + 1,
-				expectedDigest: digest,
-				fetchImpl,
-			}),
-		).rejects.toThrow("size mismatch");
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-
-		await expect(
-			downloadVerifiedBinary({
-				url,
-				targetPath,
-				expectedSize: Buffer.byteLength(content),
-				expectedDigest: `sha256:${Bun.SHA256.hash("different binary", "hex")}`,
-				fetchImpl,
-			}),
-		).rejects.toThrow("digest mismatch");
-		expect(await Bun.file(targetPath).exists()).toBe(false);
-	});
 
 	it("rejects an altered whole-file download and leaves the installed binary in place", async () => {
 		const dir = await makeTempDir();
@@ -1685,46 +1713,28 @@ describe("update-cli concurrent binary updates", () => {
 	});
 });
 
-describe("managedInstallName", () => {
-	async function managedRoot(): Promise<string> {
-		const root = await makeTempDir();
-		await fs.mkdir(path.join(root, "versions"));
-		await fs.mkdir(path.join(root, "bin"));
-		await Bun.write(path.join(root, "versions", "1.0.0"), "omp");
-		await Bun.write(path.join(root, "manager.json"), JSON.stringify({ manager: "tern", name: "Tern" }));
-		return root;
-	}
-
-	it.skipIf(process.platform === "win32")(
-		"names the manager through the launcher symlink and a link outside the root",
-		async () => {
-			const root = await managedRoot();
-			const launcher = path.join(root, "bin", "omp");
-			await fs.symlink(path.join("..", "versions", "1.0.0"), launcher);
-			const outside = path.join(await makeTempDir(), "omp");
-			await fs.symlink(launcher, outside);
-
-			expect(await managedInstallName(launcher)).toBe("Tern");
-			expect(await managedInstallName(outside)).toBe("Tern");
-		},
-	);
-
-	it("names the manager of a copied launcher (Windows layout)", async () => {
-		const root = await managedRoot();
-		const copy = path.join(root, "bin", "omp.exe");
-		await Bun.write(copy, "omp");
-
-		expect(await managedInstallName(copy)).toBe("Tern");
-	});
-
-	it("treats a binary without a readable manifest as unmanaged", async () => {
-		const plain = path.join(await makeTempDir(), "bin", "omp");
-		await Bun.write(plain, "omp");
-		expect(await managedInstallName(plain)).toBeUndefined();
-
-		const root = await managedRoot();
-		await Bun.write(path.join(root, "manager.json"), "{not json");
-		expect(await managedInstallName(path.join(root, "versions", "1.0.0"))).toBeUndefined();
+describe("verifyInstalledVersion", () => {
+	// A Windows shim takeover retires the launcher PATH first resolved (`omp.cmd`)
+	// for one later on PATH (`omp.exe`); the check must follow it, not a cached path.
+	it.skipIf(process.platform === "win32")("re-resolves PATH after an install moves the launcher", async () => {
+		const [first, second] = [await makeTempDir(), await makeTempDir()];
+		await Bun.write(path.join(first, "omp"), "#!/bin/sh\necho omp/1.0.0\n");
+		await Bun.write(path.join(second, "omp"), "#!/bin/sh\necho omp/2.0.0\n");
+		await fs.chmod(path.join(first, "omp"), 0o755);
+		await fs.chmod(path.join(second, "omp"), 0o755);
+		const originalPath = process.env.PATH;
+		process.env.PATH = [first, second, originalPath].join(path.delimiter);
+		try {
+			expect((await verifyInstalledVersion("2.0.0")).actual).toBe("1.0.0");
+			await fs.rm(path.join(first, "omp"));
+			expect(await verifyInstalledVersion("2.0.0")).toEqual({
+				ok: true,
+				actual: "2.0.0",
+				path: path.join(second, "omp"),
+			});
+		} finally {
+			process.env.PATH = originalPath;
+		}
 	});
 });
 

@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use xutf::{Text, UnitSet, Utf8};
+
 use crate::{
 	error::EditError,
 	text::{
@@ -201,7 +203,7 @@ const fn no_context_match(confidence: f64) -> ContextLineResult {
 }
 
 #[allow(clippy::suspicious_operation_groupings, reason = "paired index bounds are intentional")]
-fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
+fn levenshtein_slices<T: PartialEq>(a: &[T], b: &[T]) -> usize {
 	if a == b {
 		return 0;
 	}
@@ -229,13 +231,13 @@ fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
 	}
 
 	let mut row: Vec<usize> = (0..=shorter.len()).collect();
-	for (line, &a_char) in longer.iter().enumerate() {
+	for (line, a_elem) in longer.iter().enumerate() {
 		let mut diagonal = row[0];
 		row[0] = line + 1;
-		for (column, &b_char) in shorter.iter().enumerate() {
+		for (column, b_elem) in shorter.iter().enumerate() {
 			let cell = column + 1;
 			let above = row[cell];
-			row[cell] = if a_char == b_char {
+			row[cell] = if a_elem == b_elem {
 				diagonal
 			} else {
 				(above + 1).min(row[cell - 1] + 1).min(diagonal + 1)
@@ -246,14 +248,32 @@ fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
 	row[shorter.len()]
 }
 
+#[inline]
+#[cfg(test)]
+fn levenshtein_chars(a: &[char], b: &[char]) -> usize {
+	levenshtein_slices(a, b)
+}
+
 /// Levenshtein edit distance over Unicode scalar values.
 ///
 /// The TypeScript source used UTF-16 code units. Rust deliberately uses
 /// Unicode scalar values, so astral characters count as one element.
 pub fn levenshtein_distance(a: &str, b: &str) -> usize {
+	if a == b {
+		return 0;
+	}
+	if a.is_empty() {
+		return b.chars().count();
+	}
+	if b.is_empty() {
+		return a.chars().count();
+	}
+	if a.is_ascii() && b.is_ascii() {
+		return levenshtein_slices(a.as_bytes(), b.as_bytes());
+	}
 	let a_chars: Vec<char> = a.chars().collect();
 	let b_chars: Vec<char> = b.chars().collect();
-	levenshtein_chars(&a_chars, &b_chars)
+	levenshtein_slices(&a_chars, &b_chars)
 }
 
 /// [`levenshtein_distance`] over pre-collected chars, or `None` above `max`.
@@ -412,13 +432,21 @@ impl PatternDistance {
 
 /// Similarity in `[0, 1]`: `1 - distance / max_len`.
 pub fn similarity(a: &str, b: &str) -> f64 {
+	if a == b {
+		return 1.0;
+	}
+	if a.is_empty() || b.is_empty() {
+		return 0.0;
+	}
+	if a.is_ascii() && b.is_ascii() {
+		let max_len = a.len().max(b.len());
+		let dist = levenshtein_slices(a.as_bytes(), b.as_bytes());
+		return 1.0 - dist as f64 / max_len as f64;
+	}
 	let a_chars: Vec<char> = a.chars().collect();
 	let b_chars: Vec<char> = b.chars().collect();
 	let max_len = a_chars.len().max(b_chars.len());
-	if max_len == 0 {
-		return 1.0;
-	}
-	1.0 - levenshtein_chars(&a_chars, &b_chars) as f64 / max_len as f64
+	1.0 - levenshtein_slices(&a_chars, &b_chars) as f64 / max_len as f64
 }
 
 fn format_preview_window(lines: &[&str], center_index: usize) -> String {
@@ -431,16 +459,9 @@ fn format_preview_window(lines: &[&str], center_index: usize) -> String {
 		.enumerate()
 		.map(|(offset, line)| {
 			let truncated = if utf16_len(line) > OCCURRENCE_PREVIEW_MAX_LEN {
-				let mut units = 0;
-				let mut text = String::new();
-				for ch in line.chars() {
-					let width = ch.len_utf16();
-					if units + width > OCCURRENCE_PREVIEW_MAX_LEN - 1 {
-						break;
-					}
-					text.push(ch);
-					units += width;
-				}
+				let end = line.unit_offset::<u16>(OCCURRENCE_PREVIEW_MAX_LEN - 1);
+				let mut text = String::with_capacity(end + '…'.len_utf8());
+				text.push_str(&line[..end]);
 				text.push('…');
 				text
 			} else {
@@ -466,21 +487,26 @@ fn find_exact_match_outcome(
 	let mut first_index = None;
 	let mut occurrences = 0;
 	let mut recorded_indices = Vec::new();
-	let mut search_start = 0;
-	while search_start <= content.len().saturating_sub(target.len()) {
-		let Some(relative) = content[search_start..].find(target) else {
-			break;
+	{
+		let mut record = |index| {
+			let end_index = index + target.len();
+			if !overlaps_excluded(index, end_index, excluded_ranges) {
+				first_index.get_or_insert(index);
+				occurrences += 1;
+				if recorded_indices.len() < MAX_RECORDED_MATCHES {
+					recorded_indices.push(index);
+				}
+			}
 		};
-		let index = search_start + relative;
-		let end_index = index + target.len();
-		if !overlaps_excluded(index, end_index, excluded_ranges) {
-			first_index.get_or_insert(index);
-			occurrences += 1;
-			if recorded_indices.len() < MAX_RECORDED_MATCHES {
-				recorded_indices.push(index);
+		if content.len() < 64 {
+			for (index, _) in content.match_indices(target) {
+				record(index);
+			}
+		} else {
+			for index in xutf::find_iter::<Utf8>(content.as_bytes(), target.as_bytes()) {
+				record(index);
 			}
 		}
-		search_start = end_index;
 	}
 	let first_index = first_index?;
 	if occurrences > 1 {
@@ -488,11 +514,7 @@ fn find_exact_match_outcome(
 		let mut occurrence_lines = Vec::with_capacity(recorded_indices.len());
 		let mut occurrence_previews = Vec::with_capacity(recorded_indices.len());
 		for index in recorded_indices {
-			let line_number = content[..index]
-				.bytes()
-				.filter(|byte| *byte == b'\n')
-				.count()
-				+ 1;
+			let line_number = UnitSet::new(b"\n").count::<Utf8>(&content.as_bytes()[..index]) + 1;
 			occurrence_lines.push(line_number as u32);
 			occurrence_previews.push(format_preview_window(&content_lines, line_number - 1));
 		}
@@ -503,11 +525,8 @@ fn find_exact_match_outcome(
 			..MatchOutcome::default()
 		});
 	}
-	let start_line = content[..first_index]
-		.bytes()
-		.filter(|byte| *byte == b'\n')
-		.count() as u32
-		+ 1;
+	let start_line =
+		UnitSet::new(b"\n").count::<Utf8>(&content.as_bytes()[..first_index]) as u32 + 1;
 	Some(MatchOutcome {
 		matched: Some(FuzzyMatch {
 			actual_text: target.to_owned(),
@@ -1235,7 +1254,7 @@ pub fn format_occurrence_error(path: &str, outcome: &MatchOutcome) -> String {
 	let previews = outcome
 		.occurrence_previews
 		.as_ref()
-		.map_or_else(String::new, |items| items.join("\n\n"));
+		.map_or_default(|items| items.join("\n\n"));
 	let more = if occurrences > MAX_RECORDED_MATCHES {
 		format!(" (showing first {MAX_RECORDED_MATCHES} of {occurrences})")
 	} else {
@@ -1429,6 +1448,14 @@ mod tests {
 
 	fn options(allow_fuzzy: bool) -> FindMatchOptions<'static> {
 		FindMatchOptions { allow_fuzzy, threshold: None, excluded_ranges: &[] }
+	}
+
+	#[test]
+	fn preview_truncation_uses_utf16_units_without_splitting_surrogates() {
+		let line = format!("{}😀xx", "a".repeat(78));
+		assert_eq!(format_preview_window(&[&line], 0), format!("  1 | {}…", "a".repeat(78)));
+		let line = format!("{}😀", "a".repeat(78));
+		assert_eq!(format_preview_window(&[&line], 0), format!("  1 | {line}"));
 	}
 
 	#[test]
@@ -1786,5 +1813,28 @@ mod tests {
 				.to_string(),
 			"oldText must not be empty."
 		);
+	}
+
+	#[test]
+	fn levenshtein_and_similarity_fast_paths_match_unicode_fallback() {
+		// Equal strings (including empty) take the O(1) equality fast path.
+		assert_eq!(levenshtein_distance("hello", "hello"), 0);
+		assert_eq!(similarity("", ""), 1.0);
+
+		// Empty vs non-empty counts Unicode scalar values, not UTF-8 byte length.
+		assert_eq!(levenshtein_distance("", "世界"), 2);
+		assert_eq!(levenshtein_distance("世界", ""), 2);
+		assert_eq!(similarity("abc", ""), 0.0);
+
+		// Pure ASCII uses the byte-slice path without Vec<char> allocation.
+		assert_eq!(levenshtein_distance("kitten", "sitting"), 3);
+		assert!((similarity("kitten", "sitting") - (1.0 - 3.0 / 7.0)).abs() < 1e-9);
+
+		// Non-ASCII falls back to char-level comparison across UTF-8 byte
+		// lengths.
+		assert_eq!(levenshtein_distance("café", "cafe"), 1);
+		assert!((similarity("café", "cafe") - 0.75).abs() < 1e-9);
+		assert_eq!(levenshtein_distance("世界", "世間"), 1);
+		assert!((similarity("世界", "世間") - 0.5).abs() < 1e-9);
 	}
 }

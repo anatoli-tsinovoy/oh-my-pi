@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import {
+	copyToClipboard,
+	isClipboardTerminalLocal,
 	readImageFromClipboard,
 	readMacFileUrlsFromClipboard,
 	readTextFromClipboard,
 } from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as native from "@oh-my-pi/pi-natives/clipboard";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Subprocess } from "bun";
 
 type SpawnOptions = Bun.SpawnOptions.SpawnOptions<
@@ -22,11 +25,11 @@ function streamOf(body: SpawnOutput): ReadableStream<Uint8Array> {
 	return stream;
 }
 
-function fakeProcess(stdout: SpawnOutput, exitCode = 0): Subprocess {
+function fakeProcess(stdout: SpawnOutput, exitCode = 0, stderr = ""): Subprocess {
 	return {
 		pid: 1,
 		stdout: streamOf(stdout),
-		stderr: streamOf(""),
+		stderr: streamOf(stderr),
 		exitCode,
 		exited: Promise.resolve(exitCode),
 		kill: () => true,
@@ -82,6 +85,48 @@ afterEach(() => {
 // 1x1 red PNG; round-tripped through PowerShell as base64 in the real flow.
 const RED_1X1_PNG_BASE64 =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
+
+describe("copyToClipboard on Termux", () => {
+	it("does not invoke the native fallback when the Termux helper fails", async () => {
+		setPlatform("android");
+		process.env.TERMUX_VERSION = "0.118";
+		const calls: SpawnCall[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		spySpawn(calls, "", 1);
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+
+		await copyToClipboard("hello");
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd).toEqual(["termux-clipboard-set"]);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+	it("uses the Termux helper on Android when available", async () => {
+		setPlatform("android");
+		process.env.TERMUX_VERSION = "0.118";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "");
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+
+		await copyToClipboard("hello");
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.cmd).toEqual(["termux-clipboard-set"]);
+		expect(calls[0]?.options.stdin).toEqual(Buffer.from("hello"));
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not use native clipboard or desktop tools on Android without Termux", async () => {
+		setPlatform("android");
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		const nativeSpy = vi.spyOn(native, "copyToClipboard");
+
+		await copyToClipboard("hello");
+
+		expect(spawnSpy).not.toHaveBeenCalled();
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+});
 
 describe("readImageFromClipboard on WSL", () => {
 	it("decodes the PowerShell base64 payload without touching the native bridge", async () => {
@@ -229,6 +274,19 @@ describe("readImageFromClipboard dispatch", () => {
 		},
 	);
 
+	it("returns no image on Android without invoking native or desktop clipboard paths", async () => {
+		setPlatform("android");
+		process.env.WSL_INTEROP = "/run/WSL/1_interop";
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		process.env.DISPLAY = ":0";
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		const nativeSpy = vi.spyOn(native, "readImageFromClipboard");
+
+		expect(await readImageFromClipboard()).toBeNull();
+		expect(spawnSpy).not.toHaveBeenCalled();
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
 	it("returns null on Termux without spawning anything", async () => {
 		setPlatform("linux");
 		process.env.TERMUX_VERSION = "0.118";
@@ -277,6 +335,31 @@ describe("readMacFileUrlsFromClipboard", () => {
 });
 
 describe("readTextFromClipboard", () => {
+	it("returns no text on Android without Termux or desktop/native clipboard access", async () => {
+		setPlatform("android");
+		process.env.WSL_INTEROP = "/run/WSL/1_interop";
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		process.env.DISPLAY = ":0";
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		const spawnSpy = vi.spyOn(Bun, "spawn");
+		const nativeSpy = vi.spyOn(native, "readTextFromClipboard");
+
+		expect(await readTextFromClipboard()).toBe("");
+		expect(spawnSpy).not.toHaveBeenCalled();
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
+
+	it("reads Android text through termux-clipboard-get", async () => {
+		setPlatform("android");
+		process.env.TERMUX_VERSION = "0.118";
+		const calls: SpawnCall[] = [];
+		spySpawn(calls, "from Termux");
+		const nativeSpy = vi.spyOn(native, "readTextFromClipboard");
+
+		expect(await readTextFromClipboard()).toBe("from Termux");
+		expect(calls.map(call => call.cmd)).toEqual([["termux-clipboard-get"]]);
+		expect(nativeSpy).not.toHaveBeenCalled();
+	});
 	it("falls back to xsel when xclip is unavailable on X11", async () => {
 		setPlatform("linux");
 		process.env.DISPLAY = ":0";
@@ -303,6 +386,29 @@ describe("readTextFromClipboard", () => {
 			["xclip", "-selection", "clipboard", "-o"],
 			["xsel", "--clipboard", "--output"],
 		]);
+	});
+
+	it("does not warn when wl-paste reports no text and the X11 tools fail too", async () => {
+		setPlatform("linux");
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		process.env.DISPLAY = ":0";
+		const noText = 'Clipboard content is not available as requested type "text"\n';
+		vi.spyOn(Bun, "spawn").mockImplementation(() => fakeProcess("", 1, noText));
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		expect(await readTextFromClipboard()).toBe("");
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("still reads X11 text after wl-paste reports none", async () => {
+		setPlatform("linux");
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		process.env.DISPLAY = ":0";
+		vi.spyOn(Bun, "spawn")
+			.mockImplementationOnce(() => fakeProcess("", 1, "Nothing is copied\n"))
+			.mockImplementation(() => fakeProcess("from xclip"));
+
+		expect(await readTextFromClipboard()).toBe("from xclip");
 	});
 
 	it("requests UTF-8-capable text instead of the first Wayland MIME offer", async () => {
@@ -403,5 +509,15 @@ describe("readTextFromClipboard", () => {
 		expect(await readTextFromClipboard()).toBe("from powershell\n");
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.cmd[0]).toBe("powershell.exe");
+	});
+});
+
+describe("isClipboardTerminalLocal", () => {
+	it("never trusts the system clipboard over SSH, even with a forwarded-looking display", () => {
+		const ssh = { SSH_CONNECTION: "10.0.0.2 50000 10.0.0.1 22" };
+		// A tmux session can keep a stale forward whose port a later SSH session now owns.
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: "localhost:10.0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ ...ssh, DISPLAY: ":0", WAYLAND_DISPLAY: "wayland-0" })).toBe(false);
+		expect(isClipboardTerminalLocal({ DISPLAY: ":0" })).toBe(true);
 	});
 });

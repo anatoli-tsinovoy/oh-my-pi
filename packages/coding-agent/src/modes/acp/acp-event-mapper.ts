@@ -215,7 +215,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			const update: SessionUpdate = {
 				sessionUpdate: "tool_call_update",
 				toolCallId: event.toolCallId,
-				status: "in_progress",
+				status: toolUpdateStatus(event.partialResult),
 				rawOutput: event.partialResult,
 			};
 			if (content.length > 0) {
@@ -308,6 +308,18 @@ function mapAssistantMessageUpdate(
 			}
 			break;
 		}
+		case "thinking_end": {
+			// Narration streams as thinking; once its block closes as narration,
+			// surface it as the reply it is.
+			const block = event.assistantMessageEvent.partial?.content?.[event.assistantMessageEvent.contentIndex];
+			if (block?.type !== "thinking" || !block.narration) return [];
+			sessionUpdate = "agent_message_chunk";
+			text = canonicalizeMessage(event.assistantMessageEvent.content);
+			if (text.length > 0 && progress) {
+				progress.textEmitted = true;
+			}
+			break;
+		}
 		case "done":
 			if (progress?.textEmitted) {
 				return [];
@@ -380,7 +392,6 @@ const todoStatusMap: Record<TodoStatus, "pending" | "in_progress" | "completed">
 	in_progress: "in_progress",
 	completed: "completed",
 	abandoned: "completed",
-	blocked: "pending",
 };
 
 function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "completed" {
@@ -444,13 +455,7 @@ function extractTodoEntries(phases: unknown[]): Array<{ content: string; status:
 }
 
 function isTodoStatus(status: unknown): status is TodoStatus {
-	return (
-		status === "pending" ||
-		status === "in_progress" ||
-		status === "completed" ||
-		status === "abandoned" ||
-		status === "blocked"
-	);
+	return status === "pending" || status === "in_progress" || status === "completed" || status === "abandoned";
 }
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
@@ -463,6 +468,7 @@ export function buildToolCallStartUpdate(input: {
 	const update: ToolCall & { sessionUpdate: "tool_call" } = {
 		sessionUpdate: "tool_call",
 		toolCallId: input.toolCallId,
+		name: input.toolName,
 		title: buildToolTitle(input.toolName, input.args, input.intent),
 		kind: mapToolKind(input.toolName, input.args),
 		status: input.status ?? "pending",
@@ -735,6 +741,28 @@ function extractTerminalId(value: unknown): string | undefined {
 	if (typeof value !== "object" || value === null) return undefined;
 	const details = (value as DetailsContainer).details;
 	return extractStringProperty<TerminalIdContainer>(details, "terminalId");
+}
+
+interface AsyncJobContainer {
+	async?: unknown;
+}
+
+interface AsyncStateContainer {
+	state?: unknown;
+}
+
+/**
+ * Status of a `tool_execution_update` frame: the settled frame of a call's
+ * background job (`details.async.state` completed, failed or cancelled, sent
+ * after the call returned) settles the call; any other frame is progress.
+ */
+function toolUpdateStatus(partialResult: unknown): "in_progress" | "completed" | "failed" {
+	if (typeof partialResult !== "object" || partialResult === null) return "in_progress";
+	const details = (partialResult as DetailsContainer).details;
+	if (typeof details !== "object" || details === null) return "in_progress";
+	const state = extractStringProperty<AsyncStateContainer>((details as AsyncJobContainer).async, "state");
+	if (state === "completed") return "completed";
+	return state === "failed" || state === "cancelled" ? "failed" : "in_progress";
 }
 
 function terminalToolCallContent(terminalId: string): ToolCallContent {

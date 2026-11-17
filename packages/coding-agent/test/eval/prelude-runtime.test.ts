@@ -35,9 +35,13 @@ function definition(
 fixture = _FixturePrelude()
 del _FixturePrelude`,
 		exports: ["fixture"],
-		codeModeDeclarations: `declare const fixture: { version: ${JSON.stringify(version)} };`,
 		async invoke(parameters, context) {
-			calls.push({ parameters, session: context.session, toolCallId: context.toolCallId });
+			calls.push({
+				parameters,
+				session: context.session,
+				toolCallId: context.toolCallId,
+				cellTimeoutMs: context.cellTimeoutMs,
+			});
 			return {
 				content: [{ type: "text", text: `host-${version}` }, ...images],
 				details: { version },
@@ -63,7 +67,7 @@ describe("eval prelude runtime", () => {
 	});
 
 	for (const language of ["js", "py"] satisfies ("js" | "py")[]) {
-		it(`preserves native frame pixels through ${language} bridge, display, Eval and provider normalization`, async () => {
+		it(`preserves native frame pixels through ${language} bridge, print, Eval and provider normalization`, async () => {
 			const seed = Buffer.from(
 				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
 				"base64",
@@ -83,18 +87,20 @@ describe("eval prelude runtime", () => {
 			const toolSession = session(() => [prelude]);
 			toolSession.getEvalSessionId = () => `frame-fidelity-${language}`;
 			const tool = new EvalTool(toolSession);
-			const displayImages = [original, ordinary].map(image =>
+			const printImages = [original, ordinary].map(image =>
 				language === "js"
-					? `display(${JSON.stringify(image)});`
-					: `display(json.loads(${JSON.stringify(JSON.stringify(image))}))`,
+					? `print(${JSON.stringify(image)});`
+					: `print(json.loads(${JSON.stringify(JSON.stringify(image))}))`,
 			);
 			const code =
 				language === "js"
-					? `await fixture.invoke({});\n${displayImages.join("\n")}`
-					: `import json\nawait fixture.invoke()\n${displayImages.join("\n")}`;
-			const result = await tool.execute(`frame-fidelity-${language}`, { language, code, timeout: 30 });
+					? `await fixture.invoke({});\n${printImages.join("\n")}`
+					: `import json\nawait fixture.invoke()\n${printImages.join("\n")}`;
+			const result = await tool.execute(`frame-fidelity-${language}`, { language, code, timeout: 45 });
 			expect(result.details?.cells?.[0]?.status).toBe("complete");
 			expect(calls).toHaveLength(1);
+			// The cell's timeout reaches the prelude, which sizes calls that set no timeout from it.
+			expect(calls[0]).toMatchObject({ cellTimeoutMs: 45_000 });
 			const model = getBundledModels("openai")[0];
 			if (!model) throw new Error("Missing bundled OpenAI model");
 			const messages: Message[] = [
@@ -143,11 +149,12 @@ describe("eval prelude runtime", () => {
 		);
 		expect(first.exitCode).toBe(0);
 		expect(first.displayOutputs).toContainEqual({ type: "image", mimeType: "image/png", data: IMAGE_DATA });
-		expect(first.displayOutputs).toContainEqual({
-			type: "json",
-			data: { text: "host-v1", details: { version: "v1" }, images: "(1 image displayed)" },
-		});
+		expect(first.output.trim()).toBe(
+			"{ text: 'host-v1', details: { version: 'v1' }, images: '(1 image displayed)' }",
+		);
 		expect(calls).toHaveLength(1);
+		// A cell without a timeout says so with 0.
+		expect(calls[0]).toMatchObject({ cellTimeoutMs: 0 });
 
 		const retained = await executeJs("fixture.invoke === globalThis.savedFixtureInvoke", options);
 		expect(retained.output.trim()).toBe("true");
@@ -156,10 +163,9 @@ describe("eval prelude runtime", () => {
 		const replacedVersion = await executeJs("fixture.version", options);
 		expect(replacedVersion.output.trim()).toBe("v2");
 		const replaced = await executeJs("await fixture.invoke({ value: 3 })", options);
-		expect(replaced.displayOutputs).toContainEqual({
-			type: "json",
-			data: { text: "host-v2", details: { version: "v2" }, images: "(1 image displayed)" },
-		});
+		expect(replaced.output.trim()).toBe(
+			"{ text: 'host-v2', details: { version: 'v2' }, images: '(1 image displayed)' }",
+		);
 		expect(calls).toHaveLength(2);
 
 		current = [];
@@ -193,6 +199,7 @@ describe("eval prelude runtime", () => {
 		expect(first.output.trim()).toBe("v1");
 		expect(first.displayOutputs).toContainEqual({ type: "image", mimeType: "image/png", data: IMAGE_DATA });
 		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({ cellTimeoutMs: 0 });
 		const retained = await executePython("print(fixture is saved_fixture)", options);
 		expect(retained.output.trim()).toBe("True");
 

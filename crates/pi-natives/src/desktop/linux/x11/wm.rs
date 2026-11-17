@@ -28,6 +28,12 @@ const TREE_WALK_LIMIT: usize = 32;
 /// processes click-to-focus asynchronously).
 const FOCUS_SETTLE_WATCH: Duration = Duration::from_millis(150);
 const FOCUS_POLL: Duration = Duration::from_millis(25);
+/// How long a sent activation is given to move the focus after the user
+/// intervened, so the caller's hand-back can undo it: the shortest budget a
+/// takeover gives the WM to act on the same request.
+const QUEUED_ACTIVATION_WAIT: Duration = Duration::from_millis(800);
+/// Poll for that move; the user's keys reach the target until it is undone.
+const QUEUED_ACTIVATION_POLL: Duration = Duration::from_millis(2);
 
 pub(super) struct Atoms {
 	pub net_active_window:   Atom,
@@ -39,11 +45,13 @@ pub(super) struct Atoms {
 	pub time_probe:          Atom,
 	/// `_NET_WM_WINDOW_TYPE`s of override-redirect windows that hold no grab.
 	pub passive_popup_types: [Atom; 3],
+	/// `_OMP_MPX_HOLDER`, the master pointer property naming the pair's holder.
+	pub mpx_holder:          Atom,
 }
 
 impl Atoms {
 	pub(super) fn intern(conn: &RustConnection) -> CoreResult<Self> {
-		const NAMES: [&str; 10] = [
+		const NAMES: [&str; 11] = [
 			"_NET_ACTIVE_WINDOW",
 			"_NET_WM_PID",
 			"_NET_WM_NAME",
@@ -54,6 +62,7 @@ impl Atoms {
 			"_NET_WM_WINDOW_TYPE_TOOLTIP",
 			"_NET_WM_WINDOW_TYPE_NOTIFICATION",
 			"_NET_WM_WINDOW_TYPE_DND",
+			"_OMP_MPX_HOLDER",
 		];
 		let cookies = NAMES
 			.iter()
@@ -74,12 +83,32 @@ impl Atoms {
 			wm_state:            atoms[5],
 			time_probe:          atoms[6],
 			passive_popup_types: [atoms[7], atoms[8], atoms[9]],
+			mpx_holder:          atoms[10],
 		})
 	}
 }
 
 fn wm_failed(error: impl std::fmt::Display) -> DesktopError {
 	DesktopError::input_failed(format!("X11 window query failed: {error}"))
+}
+
+/// A refusal of one input call. Before any of its events was sent it is
+/// `unsent`'s clean refusal, which the host may rerun in takeover. Once one
+/// was, part of the call may already have landed, so it is an `InputFailed`
+/// that must not be replayed.
+pub(super) fn refusal(
+	sent: bool,
+	reason: std::fmt::Arguments<'_>,
+	unsent: impl FnOnce(String) -> DesktopError,
+) -> DesktopError {
+	if sent {
+		DesktopError::input_failed(format!(
+			"{reason}; earlier input of this call may already have landed, so inspect the target \
+			 before retrying"
+		))
+	} else {
+		unsent(format!("{reason}; no input was sent"))
+	}
 }
 
 /// Window-manager view of the X session: one connection, its root, atoms.
@@ -244,7 +273,7 @@ impl Wm<'_> {
 				.reply()
 				.ok()
 				.filter(|reply| !reply.value.is_empty())
-				.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
+				.map(|reply| String::from_utf8_lossy_owned(reply.value))
 		};
 		read(self.atoms.net_wm_name, self.atoms.utf8_string)
 			.or_else(|| read(AtomEnum::WM_NAME.into(), AtomEnum::STRING.into()))
@@ -317,21 +346,30 @@ impl Wm<'_> {
 		&self,
 		window: Window,
 		current: Option<Window>,
+		check_user: impl Fn() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		self.activate(window, current, false)
+		self.activate(window, current, false, check_user)
 	}
 
 	pub(super) fn restore_activation(&self, window: Window, current: Window) -> CoreResult<()> {
-		self.activate(window, Some(current), true)
+		self.activate(window, Some(current), true, || Ok(()))
 	}
 
-	fn activate(&self, window: Window, current: Option<Window>, restoring: bool) -> CoreResult<()> {
+	fn activate(
+		&self,
+		window: Window,
+		current: Option<Window>,
+		restoring: bool,
+		check_user: impl Fn() -> CoreResult<()>,
+	) -> CoreResult<()> {
 		control::check()?;
 		let time = self.server_time();
+		#[cfg(test)]
+		super::input::named_change_tests::after_server_time();
 		control::check()?;
 		// Timestamp acquisition can yield to physical input. Re-check the
 		// guard immediately before requesting a restore, not just before it.
-		if restoring && !current.is_some_and(|current| self.is_focused(current, true)) {
+		if restoring && !current.is_some_and(|current| self.is_focused(current, false)) {
 			return Ok(());
 		}
 		let event = ClientMessageEvent::new(32, window, self.atoms.net_active_window, [
@@ -341,6 +379,7 @@ impl Wm<'_> {
 			0,
 			0,
 		]);
+		check_user()?;
 		self
 			.conn
 			.send_event(
@@ -352,11 +391,19 @@ impl Wm<'_> {
 			.map_err(wm_failed)?
 			.check()
 			.map_err(wm_failed)?;
-		control::check()?;
+		#[cfg(test)]
+		super::input::named_change_tests::after_send();
+		// The WM holds the request and can move the focus once the caller has
+		// looked; let it, so the hand-back sees the move and undoes it. Escape
+		// both cancels and counts as a press, so neither may skip the wait.
+		if let Err(error) = control::check().and_then(|()| check_user()) {
+			self.await_activation(window);
+			return Err(error);
+		}
 		// Never override a newer focus switch while the WM handles the request.
 		if restoring
-			&& !self.is_focused(window, true)
-			&& !current.is_some_and(|current| self.is_focused(current, true))
+			&& !self.is_focused(window, false)
+			&& !current.is_some_and(|current| self.is_focused(current, false))
 		{
 			return Ok(());
 		}
@@ -365,6 +412,16 @@ impl Wm<'_> {
 			let _ = cookie.check();
 		}
 		self.conn.flush().map_err(wm_failed)
+	}
+
+	/// Waits, bounded, for core focus to reach `window` after its activation
+	/// was sent; a WM that declines the request leaves it at the bound. A
+	/// cancel does not end it: the caller's hand-back needs to see the move.
+	pub(super) fn await_activation(&self, window: Window) {
+		let deadline = Instant::now() + QUEUED_ACTIVATION_WAIT;
+		while Instant::now() < deadline && !self.is_focused(window, false) {
+			control::settle(QUEUED_ACTIVATION_POLL);
+		}
 	}
 
 	/// Whether `window` is the active window (when an EWMH WM tracks one) and
@@ -379,7 +436,14 @@ impl Wm<'_> {
 	/// Refuses a real (position-routed) pointer event at screen point `(x, y)`
 	/// unless it would land on `window`. Another window of the same process
 	/// and an unowned override-redirect popup are not the requested target.
-	pub(super) fn check_pointer_target(&self, window: Window, x: i16, y: i16) -> CoreResult<()> {
+	/// `sent` says whether this call already sent an event; see [`refusal`].
+	pub(super) fn check_pointer_target(
+		&self,
+		window: Window,
+		x: i16,
+		y: i16,
+		sent: bool,
+	) -> CoreResult<()> {
 		let attributes = self
 			.conn
 			.get_window_attributes(window)
@@ -387,9 +451,11 @@ impl Wm<'_> {
 			.reply()
 			.map_err(wm_failed)?;
 		if attributes.map_state != MapState::VIEWABLE {
-			return Err(DesktopError::background_unavailable(format!(
-				"window {window} is not viewable; use ax actions or takeover:true"
-			)));
+			return Err(refusal(
+				sent,
+				format_args!("window {window} is not viewable"),
+				DesktopError::background_unavailable,
+			));
 		}
 		let geometry = self
 			.conn
@@ -410,22 +476,28 @@ impl Wm<'_> {
 			|| px >= left + i32::from(geometry.width)
 			|| py >= top + i32::from(geometry.height)
 		{
-			return Err(DesktopError::invalid_coordinate_frame(format!(
-				"screen point ({x}, {y}) lies outside window {window} (x={left}, y={top}, {}x{}); no \
-				 input was sent",
-				geometry.width, geometry.height
-			)));
+			return Err(refusal(
+				sent,
+				format_args!(
+					"screen point ({x}, {y}) lies outside window {window} (x={left}, y={top}, {}x{})",
+					geometry.width, geometry.height
+				),
+				DesktopError::invalid_coordinate_frame,
+			));
 		}
 		let under = self.root_child_at(x, y).ok_or_else(|| {
-			DesktopError::background_unavailable(format!(
-				"no input window covers ({x}, {y}); use ax actions or takeover:true"
-			))
+			refusal(
+				sent,
+				format_args!("no input window covers ({x}, {y})"),
+				DesktopError::background_unavailable,
+			)
 		})?;
 		let frame = self.root_child_of(window).ok_or_else(|| {
-			DesktopError::background_unavailable(format!(
-				"window {window} is not mapped on this screen; retry with takeover:true or use ax \
-				 actions"
-			))
+			refusal(
+				sent,
+				format_args!("window {window} is not mapped on this screen"),
+				DesktopError::background_unavailable,
+			)
 		})?;
 		if under == frame {
 			return Ok(());
@@ -433,36 +505,98 @@ impl Wm<'_> {
 		let covering_pid = self.root_child_pid(under);
 		let client = self.client_of(under).unwrap_or(under);
 		let title = self.title(client);
-		Err(DesktopError::background_unavailable(format!(
-			"window {window}: screen point ({x}, {y}) is covered by window {client}{}{}, so a real \
-			 pointer event would land there; no input was sent; retry with takeover:true or use ax \
-			 actions",
-			if title.is_empty() {
-				String::new()
-			} else {
-				format!(" \"{title}\"")
-			},
-			covering_pid.map_or_else(String::new, |pid| format!(" (pid {pid})")),
-		)))
+		Err(refusal(
+			sent,
+			format_args!(
+				"window {window}: screen point ({x}, {y}) is covered by window {client}{}{}, so a \
+				 real pointer event would land there",
+				if title.is_empty() {
+					String::new()
+				} else {
+					format!(" \"{title}\"")
+				},
+				covering_pid.map_or_default(|pid| format!(" (pid {pid})")),
+			),
+			DesktopError::background_unavailable,
+		))
 	}
 
 	/// A mapped popup is evidence that input may be grabbed, not proof of
 	/// who owns the grab. Never use this heuristic to authorize core input.
 	pub(super) fn grab_popup_of(&self, pid: u32) -> Option<Window> {
-		self.children(self.root).into_iter().rev().find(|&child| {
-			let Some(attributes) = self
-				.conn
-				.get_window_attributes(child)
-				.ok()
-				.and_then(|cookie| cookie.reply().ok())
-			else {
-				return false;
-			};
-			attributes.override_redirect
-				&& attributes.map_state == MapState::VIEWABLE
-				&& self.root_child_pid(child) == Some(pid)
-				&& !self.is_passive_popup(child)
-		})
+		self
+			.children(self.root)
+			.into_iter()
+			.rev()
+			.find(|&child| self.is_grab_popup_of(child, pid))
+	}
+
+	/// Every popup [`Self::grab_popup_of`] would consider, topmost first: a
+	/// submenu and the menu it opened from are one grab.
+	pub(super) fn grab_popups_of(&self, pid: u32) -> Vec<Window> {
+		let mut children = self.children(self.root);
+		children.retain(|&child| self.is_grab_popup_of(child, pid));
+		children.reverse();
+		children
+	}
+
+	fn is_grab_popup_of(&self, child: Window, pid: u32) -> bool {
+		self.is_grab_popup(child) && self.root_child_pid(child) == Some(pid)
+	}
+
+	/// Whether screen point (`x`, `y`) lies inside `window`; `false` when its
+	/// geometry cannot be read.
+	pub(super) fn contains_point(&self, window: Window, x: i16, y: i16) -> bool {
+		let geometry = self
+			.conn
+			.get_geometry(window)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok());
+		let origin = self
+			.conn
+			.translate_coordinates(window, self.root, 0, 0)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok());
+		let (Some(geometry), Some(origin)) = (geometry, origin) else {
+			return false;
+		};
+		let (left, top) = (i32::from(origin.dst_x), i32::from(origin.dst_y));
+		let (px, py) = (i32::from(x), i32::from(y));
+		px >= left
+			&& py >= top
+			&& px < left + i32::from(geometry.width)
+			&& py < top + i32::from(geometry.height)
+	}
+
+	/// Whether an active keyboard grab can be taken for `pid`'s own, as X
+	/// does not name a grab's owner: the topmost viewable, non-passive
+	/// override-redirect root child belongs to `pid`, or, with no such popup
+	/// on screen, the focus window `focus` does (a VM viewer or a game that
+	/// grabs on its own window). A foreign popup above the target's own popup
+	/// keeps keys refused.
+	pub(super) fn keyboard_grab_is_owned_by(&self, pid: u32, focus: Window) -> bool {
+		match self
+			.children(self.root)
+			.into_iter()
+			.rev()
+			.find(|&child| self.is_grab_popup(child))
+		{
+			Some(popup) => self.root_child_pid(popup) == Some(pid),
+			None => self.owning_pid(focus) == Some(pid),
+		}
+	}
+
+	fn is_grab_popup(&self, window: Window) -> bool {
+		self
+			.conn
+			.get_window_attributes(window)
+			.ok()
+			.and_then(|cookie| cookie.reply().ok())
+			.is_some_and(|attributes| {
+				attributes.override_redirect
+					&& attributes.map_state == MapState::VIEWABLE
+					&& !self.is_passive_popup(window)
+			})
 	}
 
 	fn is_passive_popup(&self, window: Window) -> bool {
@@ -498,11 +632,11 @@ impl FocusSnapshot {
 	/// Observe only. Re-activation can raise windows, and the old "focus
 	/// bounce" deliberately sent the user's keystrokes to the target for
 	/// 60ms. Neither belongs in a background operation. An unrelated focus
-	/// change is the user's, not permission to undo it.
+	/// change is the user's, not permission to undo it. It follows the
+	/// action's input, so a cancel does not cut it short.
 	pub(super) fn check(&self, wm: Wm<'_>, target: Window) -> CoreResult<()> {
 		let watch_until = Instant::now() + FOCUS_SETTLE_WATCH;
 		loop {
-			control::check()?;
 			if self.changed(wm) {
 				let moved_to_target = (self.active != Some(target)
 					&& wm.active_window() == Some(target))
@@ -513,8 +647,7 @@ impl FocusSnapshot {
 				return if moved_to_target {
 					Err(DesktopError::input_failed(format!(
 						"window {target} changed the desktop focus during background input; the action \
-						 may already have landed, so do not retry blindly; use ax actions or \
-						 takeover:true for subsequent input"
+						 may already have landed, so do not retry blindly; inspect the desktop first"
 					)))
 				} else {
 					Ok(())
@@ -523,7 +656,26 @@ impl FocusSnapshot {
 			if Instant::now() >= watch_until {
 				return Ok(());
 			}
-			control::wait(FOCUS_POLL)?;
+			control::settle(FOCUS_POLL);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::desktop::error::ErrorCode;
+
+	#[test]
+	fn a_refusal_after_sent_input_is_an_input_failure_that_admits_partial_delivery() {
+		let before = refusal(false, format_args!("covered"), DesktopError::background_unavailable);
+		assert_eq!(before.code, ErrorCode::BackgroundUnavailable);
+		assert!(before.message.contains("no input was sent"), "{}", before.message);
+
+		let after = refusal(true, format_args!("covered"), DesktopError::background_unavailable);
+		assert_eq!(after.code, ErrorCode::InputFailed);
+		assert!(after.message.starts_with("covered"), "{}", after.message);
+		assert!(after.message.contains("may already have landed"), "{}", after.message);
+		assert!(!after.message.contains("no input was sent"), "{}", after.message);
 	}
 }

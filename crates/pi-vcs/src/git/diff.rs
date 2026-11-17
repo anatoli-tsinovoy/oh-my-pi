@@ -1,12 +1,20 @@
 //! Git-compatible patch generation.
 
-use std::{fmt::Write as _, io::Write as _, path::Path};
+use std::{
+	fmt::{NumBuffer, Write as _},
+	io::Write as _,
+	path::Path,
+};
 
-use gix::bstr::{BStr, BString, ByteSlice};
+use gix::{
+	bstr::{BStr, BString, ByteSlice},
+	diff::blob::platform::prepare_diff::Operation,
+};
 
 use super::{
 	GitRepo,
 	open::{load_index_or_empty, status_with_fresh_index},
+	patch::{path_needs_quoting, split_unquoted_paths, write_quoted_path},
 };
 use crate::{
 	error::{Error, Result},
@@ -43,10 +51,14 @@ impl GitRepo {
 			options.binary,
 			options.max_bytes,
 		)?;
-		// Size the joined patch once: growing it by doubling would hold up to
-		// twice the output during the copy, on top of the per-change strings
-		// that are released as they are consumed.
-		let mut text = String::with_capacity(rendered.iter().map(|item| item.text.len()).sum());
+		// Reuse the first patch's allocation; single-file requests need no
+		// joining copy. Reserve the remaining bytes once for multi-file patches.
+		let mut rendered = rendered.into_iter();
+		let Some(first) = rendered.next() else {
+			return Ok(String::new());
+		};
+		let mut text = first.text;
+		text.reserve_exact(rendered.as_slice().iter().map(|item| item.text.len()).sum());
 		for item in rendered {
 			text.push_str(&item.text);
 		}
@@ -310,6 +322,7 @@ fn tree_changes(
 			out.push(item);
 		}
 	}
+	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
 }
@@ -341,8 +354,46 @@ fn index_changes(
 			},
 		)
 		.map_err(|err| Error::backend("git diff --cached", err))?;
+	pair_gitlink_renames(&mut out);
 	sort_changes(&mut out);
 	Ok(out)
+}
+
+/// gix's rename tracker only considers blobs, but git pairs a deleted and an
+/// added gitlink with the same commit id as a 100% rename. Changed-id gitlinks
+/// have no content to score, so git (and this) leaves them as delete + add.
+fn pair_gitlink_renames(changes: &mut Vec<FileChange>) {
+	let is_gitlink = |mode: Option<gix::objs::tree::EntryMode>| {
+		mode.is_some_and(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+	};
+	let mut index = 0;
+	while index < changes.len() {
+		let deletion = &changes[index];
+		if !(deletion.new_mode.is_none() && is_gitlink(deletion.old_mode)) {
+			index += 1;
+			continue;
+		}
+		let old_id = deletion.old_id;
+		let Some(addition) = changes.iter().position(|change| {
+			change.old_mode.is_none() && is_gitlink(change.new_mode) && change.new_id == old_id
+		}) else {
+			index += 1;
+			continue;
+		};
+		let added = changes.swap_remove(addition);
+		// `swap_remove` may have moved the deletion into `addition`'s slot.
+		let index_now = if index == changes.len() {
+			addition
+		} else {
+			index
+		};
+		let deletion = &mut changes[index_now];
+		deletion.new_path = added.new_path;
+		deletion.new_id = added.new_id;
+		deletion.new_mode = added.new_mode;
+		deletion.similarity = Some(100);
+		index = 0;
+	}
 }
 
 fn base_worktree_changes(
@@ -649,6 +700,14 @@ fn render_change(
 	binary_patch: bool,
 	budget: Option<RenderBudget>,
 ) -> Result<Rendered> {
+	if change
+		.old_mode
+		.iter()
+		.chain(change.new_mode.iter())
+		.all(|mode| mode.kind() == gix::objs::tree::EntryKind::Commit)
+	{
+		return Ok(render_gitlink(change));
+	}
 	let old_kind = change
 		.old_mode
 		.or(change.new_mode)
@@ -682,15 +741,20 @@ fn render_change(
 		.map_err(|err| Error::backend("git diff", err))?;
 
 	let mut text = String::new();
-	text.push_str("diff --git a/");
-	text.push_str(&change.old_path);
-	text.push_str(" b/");
-	text.push_str(&change.new_path);
-	text.push('\n');
-	let is_binary = matches!(
-		prepared.operation,
-		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary
-	);
+	push_diff_header(&mut text, &change.old_path, &change.new_path);
+	// Callers receive the patch as a `String`, which cannot hold a text hunk of
+	// bytes that are not UTF-8. An appliable (`binary_patch`) render carries
+	// such content as a binary block instead; `git apply` takes either form.
+	let not_utf8 =
+		|data: Option<&[u8]>| data.is_some_and(|bytes| std::str::from_utf8(bytes).is_err());
+	let is_binary = match prepared.operation {
+		Operation::SourceOrDestinationIsBinary => true,
+		Operation::InternalDiff { .. } => {
+			binary_patch
+				&& (not_utf8(prepared.old.data.as_slice()) || not_utf8(prepared.new.data.as_slice()))
+		},
+		Operation::ExternalCommand { .. } => false,
+	};
 	let similarity = if change.similarity == Some(u8::MAX) {
 		compute_similarity(&prepared)
 	} else {
@@ -698,24 +762,25 @@ fn render_change(
 	};
 	append_metadata(&mut text, change, similarity, binary_patch && is_binary);
 
+	if is_binary {
+		if binary_patch {
+			text.push_str("GIT binary patch\n");
+			let old = object_bytes(repo, change.old_id)?;
+			let new = object_bytes(repo, change.new_id)?;
+			append_binary_body(&mut text, &old, &new, budget)?;
+			append_binary_body(&mut text, &new, &old, budget)?;
+		} else {
+			text.push_str("Binary files ");
+			push_old_path(&mut text, change);
+			text.push_str(" and ");
+			push_new_path(&mut text, change);
+			text.push_str(" differ\n");
+		}
+		return Ok(Rendered { text, added: None, removed: None });
+	}
 	match prepared.operation {
-		gix::diff::blob::platform::prepare_diff::Operation::SourceOrDestinationIsBinary => {
-			if binary_patch {
-				text.push_str("GIT binary patch\n");
-				let old = object_bytes(repo, change.old_id)?;
-				let new = object_bytes(repo, change.new_id)?;
-				append_binary_body(&mut text, &old, &new, budget)?;
-				append_binary_body(&mut text, &new, &old, budget)?;
-			} else {
-				text.push_str("Binary files ");
-				push_old_path(&mut text, change);
-				text.push_str(" and ");
-				push_new_path(&mut text, change);
-				text.push_str(" differ\n");
-			}
-			Ok(Rendered { text, added: None, removed: None })
-		},
-		gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } => {
+		Operation::SourceOrDestinationIsBinary => unreachable!("binary content is rendered above"),
+		Operation::InternalDiff { algorithm } => {
 			// Tokenize with line terminators kept: git's xdiff treats the
 			// terminator as part of the line, so CRLF content diffs with
 			// literal `\r` bytes and a final line without a newline is a
@@ -748,20 +813,54 @@ fn render_change(
 			}
 			Ok(Rendered { text, added: Some(added), removed: Some(removed) })
 		},
-		gix::diff::blob::platform::prepare_diff::Operation::ExternalCommand { .. } => {
+		Operation::ExternalCommand { .. } => {
 			Err(Error::backend("git diff", "external diff drivers cannot be rendered in-process"))
 		},
 	}
+}
+
+fn render_gitlink(change: &FileChange) -> Rendered {
+	let mut text = String::new();
+	push_diff_header(&mut text, &change.old_path, &change.new_path);
+	// Gitlinks have no content to score, so only an exact-id rename carries a
+	// meaningful similarity; the "compute later" sentinel has nothing to
+	// compute.
+	let similarity = change
+		.similarity
+		.filter(|&similarity| similarity != u8::MAX);
+	append_metadata(&mut text, change, similarity, false);
+	if change.old_id == change.new_id {
+		// Pure rename: git emits only the rename header and counts 0/0.
+		return Rendered { text, added: Some(0), removed: Some(0) };
+	}
+	text.push_str("--- ");
+	push_old_path(&mut text, change);
+	text.push_str("\n+++ ");
+	push_new_path(&mut text, change);
+	text.push('\n');
+	match (change.old_mode, change.new_mode) {
+		(Some(_), Some(_)) => text.push_str("@@ -1 +1 @@\n"),
+		(None, Some(_)) => text.push_str("@@ -0,0 +1 @@\n"),
+		(Some(_), None) => text.push_str("@@ -1 +0,0 @@\n"),
+		(None, None) => unreachable!("a change has at least one mode"),
+	}
+	if change.old_mode.is_some() {
+		let _ = writeln!(text, "-Subproject commit {}", change.old_id);
+	}
+	if change.new_mode.is_some() {
+		let _ = writeln!(text, "+Subproject commit {}", change.new_id);
+	}
+	Rendered { text, added: change.new_mode.map(|_| 1), removed: change.old_mode.map(|_| 1) }
 }
 
 fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>, full_ids: bool) {
 	if let Some(similarity) = similarity {
 		let _ = writeln!(out, "similarity index {similarity}%");
 		out.push_str("rename from ");
-		out.push_str(&change.old_path);
+		push_record_path(out, "", &change.old_path);
 		out.push('\n');
 		out.push_str("rename to ");
-		out.push_str(&change.new_path);
+		push_record_path(out, "", &change.new_path);
 		out.push('\n');
 	}
 	match (change.old_mode, change.new_mode) {
@@ -794,9 +893,7 @@ fn append_metadata(out: &mut String, change: &FileChange, similarity: Option<u8>
 fn compute_similarity(
 	prepared: &gix::diff::blob::platform::prepare_diff::Outcome<'_>,
 ) -> Option<u8> {
-	let gix::diff::blob::platform::prepare_diff::Operation::InternalDiff { algorithm } =
-		prepared.operation
-	else {
+	let Operation::InternalDiff { algorithm } = prepared.operation else {
 		return Some(50);
 	};
 	let input = gix::diff::blob::InternedInput::new(
@@ -1371,7 +1468,7 @@ fn no_index_label(root: &Path, path: &Path) -> String {
 }
 
 fn is_null_device(path: &Path) -> bool {
-	path == Path::new("/dev/null") || path.to_string_lossy().eq_ignore_ascii_case("NUL")
+	path == "/dev/null" || path.to_string_lossy().eq_ignore_ascii_case("NUL")
 }
 
 #[cfg(unix)]
@@ -1463,17 +1560,55 @@ const fn zero_start(start: u32, len: u32) -> u32 {
 }
 
 fn push_range(out: &mut String, start: u32, len: u32) {
-	out.push_str(&start.to_string());
+	let mut buf = NumBuffer::new();
+	out.push_str(start.format_into(&mut buf));
 	if len != 1 {
 		out.push(',');
-		out.push_str(&len.to_string());
+		out.push_str(len.format_into(&mut buf));
+	}
+}
+
+fn push_diff_header(out: &mut String, old_path: &str, new_path: &str) {
+	// Paths with spaces stay verbatim whenever that header parses back to
+	// the same paths; anything ambiguous or corrupting is C-quoted instead.
+	// No spaces means the single separator parses back to these paths, so
+	// skip the verbatim allocation on the common path.
+	let resolvable = if old_path.contains(' ') || new_path.contains(' ') {
+		let verbatim = format!("a/{old_path} b/{new_path}");
+		split_unquoted_paths(&verbatim).is_some_and(|(old, new)| old == old_path && new == new_path)
+	} else {
+		true
+	};
+	out.push_str("diff --git ");
+	push_header_side(out, "a/", old_path, resolvable);
+	out.push(' ');
+	push_header_side(out, "b/", new_path, resolvable);
+	out.push('\n');
+}
+
+fn push_header_side(out: &mut String, prefix: &str, path: &str, resolvable: bool) {
+	if resolvable && !path_needs_quoting(path) {
+		out.push_str(prefix);
+		out.push_str(path);
+	} else {
+		write_quoted_path(out, prefix, path);
+	}
+}
+
+/// Write a `---`/`+++`/`rename` path, quoting it only when verbatim output
+/// would corrupt the record (quotes, backslashes, control bytes).
+fn push_record_path(out: &mut String, prefix: &str, path: &str) {
+	if path_needs_quoting(path) {
+		write_quoted_path(out, prefix, path);
+	} else {
+		out.push_str(prefix);
+		out.push_str(path);
 	}
 }
 
 fn push_old_path(out: &mut String, change: &FileChange) {
 	if change.old_mode.is_some() {
-		out.push_str("a/");
-		out.push_str(&change.old_path);
+		push_record_path(out, "a/", &change.old_path);
 	} else {
 		out.push_str("/dev/null");
 	}
@@ -1481,8 +1616,7 @@ fn push_old_path(out: &mut String, change: &FileChange) {
 
 fn push_new_path(out: &mut String, change: &FileChange) {
 	if change.new_mode.is_some() {
-		out.push_str("b/");
-		out.push_str(&change.new_path);
+		push_record_path(out, "b/", &change.new_path);
 	} else {
 		out.push_str("/dev/null");
 	}
@@ -1504,6 +1638,7 @@ mod tests {
 	use tempfile::TempDir;
 
 	use super::*;
+	use crate::types::ApplyOptions;
 
 	// Diff oracles pass `--no-ext-diff`: a developer's `diff.external` (e.g.
 	// difftastic) would otherwise replace git's patch with its own output.
@@ -1516,6 +1651,7 @@ mod tests {
 		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
 		String::from_utf8(output.stdout).expect("git output is UTF-8")
 	}
+	#[cfg(unix)]
 	fn git_diff(dir: &Path, args: &[&str]) -> String {
 		let output = Command::new("git")
 			.args(args)
@@ -1659,6 +1795,61 @@ mod tests {
 			repo.diff_text(&filtered).expect("filtered diff"),
 			git(dir.path(), &["diff", "--no-ext-diff", "--cached", "--", "added.txt"])
 		);
+	}
+
+	#[test]
+	fn gitlink_patch_matches_git_and_preserves_commit_ids() {
+		let dir = fixture();
+		let old = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		let new = "b".repeat(40); // Valid gitlink, absent from the root object database.
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{old},module")]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{new},module")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let patch = git(dir.path(), &["diff", "--no-ext-diff", "--cached"]);
+		assert_eq!(
+			repo
+				.diff_text(&DiffOptions { cached: true, ..DiffOptions::default() })
+				.expect("staged gitlink"),
+			patch
+		);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{old},module")]);
+		repo
+			.apply_patch(&patch, &ApplyOptions { cached: true, ..ApplyOptions::default() })
+			.expect("apply gitlink without its commit object in the root repo");
+		assert!(git(dir.path(), &["ls-files", "--stage", "module"]).contains(&new));
+		git(dir.path(), &["commit", "-qm", "update gitlink"]);
+		assert_eq!(
+			repo
+				.diff_tree("HEAD^", "HEAD", true)
+				.expect("committed gitlink"),
+			git(dir.path(), &["diff-tree", "-r", "-p", "HEAD^", "HEAD"])
+		);
+	}
+
+	#[test]
+	fn gitlink_pure_rename_matches_git_without_synthetic_hunk() {
+		let dir = fixture();
+		let head = git(dir.path(), &["rev-parse", "HEAD"]).trim().to_owned();
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{head},module")]);
+		git(dir.path(), &["commit", "-qm", "add gitlink"]);
+		git(dir.path(), &["update-index", "--force-remove", "module"]);
+		git(dir.path(), &["update-index", "--add", "--cacheinfo", &format!("160000,{head},moved")]);
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let options = DiffOptions { cached: true, ..DiffOptions::default() };
+		assert_eq!(
+			repo.diff_text(&options).expect("renamed gitlink"),
+			git(dir.path(), &["diff", "--no-ext-diff", "--cached", "-M"])
+		);
+		assert_eq!(repo.numstat(&options).expect("numstat"), vec![NumstatEntry {
+			path:    "moved".to_owned(),
+			added:   Some(0),
+			removed: Some(0),
+		}]);
 	}
 
 	#[test]
@@ -2020,6 +2211,38 @@ mod tests {
 				])
 			);
 		}
+	}
+
+	#[test]
+	fn binary_patch_carries_non_utf8_text_byte_exact() {
+		let dir = fixture();
+		let latin1: &[u8] = b"caf\xe9\nna\xefve\n";
+		fs::write(dir.path().join("file.txt"), latin1).expect("write tracked");
+		fs::write(dir.path().join("new.txt"), latin1).expect("write untracked");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let tracked = repo
+			.diff_text(&DiffOptions {
+				files: vec!["file.txt".to_owned()],
+				binary: true,
+				..DiffOptions::default()
+			})
+			.expect("diff");
+		let untracked = repo
+			.diff_no_index(Path::new("/dev/null"), Path::new("new.txt"), true)
+			.expect("no-index diff");
+		assert!(tracked.contains("GIT binary patch\n"), "{tracked}");
+		assert!(untracked.contains("GIT binary patch\n"), "{untracked}");
+		repo
+			.apply_patch(&format!("{tracked}{untracked}"), &ApplyOptions {
+				cached: true,
+				..ApplyOptions::default()
+			})
+			.expect("apply");
+		let blob = git(dir.path(), &["hash-object", "file.txt"]);
+		assert_eq!(git(dir.path(), &["rev-parse", ":file.txt"]), blob);
+		assert_eq!(git(dir.path(), &["rev-parse", ":new.txt"]), blob);
 	}
 
 	#[cfg(unix)]

@@ -3,6 +3,7 @@ import * as transcription from "@oh-my-pi/pi-ai/transcription";
 import type { TranscriptionResult } from "@oh-my-pi/pi-ai/transcription";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
+import { cfgOffline } from "@oh-my-pi/pi-coding-agent/config/auxiliary-model-policy";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as asrClient from "@oh-my-pi/pi-coding-agent/stt/asr-client";
 import * as downloader from "@oh-my-pi/pi-coding-agent/stt/downloader";
@@ -62,6 +63,26 @@ describe("STTController cloud transcription", () => {
 		controller?.dispose();
 		controller = undefined;
 		restoreSettingsTestState(state);
+	});
+
+	it("offline prevents recording and transcription through a foreign provider", async () => {
+		const model = getBundledModel("openai", "whisper-1");
+		settings.setModelRole("dictation", "openai/whisper-1");
+		cfgOffline.override(settings, true);
+		const transcribe = vi.spyOn(transcription, "transcribeAudio");
+		const capture = vi.fn(() => ({ stop: vi.fn() }));
+		controller = new STTController(capture, {
+			settings,
+			registry: registryFor(model),
+			getSessionProvider: () => "local",
+		});
+		const options = makeOptions();
+
+		await controller.toggle(makeEditor(), options);
+
+		expect(capture).not.toHaveBeenCalled();
+		expect(transcribe).not.toHaveBeenCalled();
+		expect(options.showWarning).toHaveBeenCalled();
 	});
 
 	it("buffers microphone PCM into a valid mono 16-bit WAV and commits the cloud transcript", async () => {
@@ -125,6 +146,32 @@ describe("STTController cloud transcription", () => {
 		expect(options.onStateChange.mock.calls.map(([next]) => next)).toEqual(["recording", "transcribing", "idle"]);
 		expect(options.showStatus).toHaveBeenCalledWith("Transcribing...");
 	});
+
+	it.each([
+		{ manualSubmit: true, submissions: 0, deletions: 0 },
+		{ manualSubmit: undefined, submissions: 1, deletions: 1 },
+	])(
+		"honors the capture submit policy for cloud dictation (manualSubmit=$manualSubmit)",
+		async ({ manualSubmit, submissions, deletions }) => {
+			const model = getBundledModel("openai", "whisper-1");
+			settings.setModelRole("dictation", "openai/whisper-1");
+			cfgSttSubmitTrigger.set(settings, "say-submit");
+			vi.spyOn(transcription, "transcribeAudio").mockResolvedValue({
+				text: "please review this submit.",
+				usage: ZERO_USAGE,
+			});
+			controller = new STTController(() => ({ stop: vi.fn() }), { settings, registry: registryFor(model) });
+			const editor = makeEditor();
+
+			await controller.start(editor, { ...makeOptions(), manualSubmit });
+			await controller.stop();
+
+			expect(editor.commitVolatileText).toHaveBeenCalledWith("please review this submit.");
+			expect(editor.submit).toHaveBeenCalledTimes(submissions);
+			expect(editor.deleteBeforeCursor).toHaveBeenCalledTimes(deletions);
+			if (deletions) expect(editor.deleteBeforeCursor).toHaveBeenCalledWith(8);
+		},
+	);
 
 	it("aborts an in-flight cloud request when the controller is disposed", async () => {
 		const model = getBundledModel("openai", "whisper-1");

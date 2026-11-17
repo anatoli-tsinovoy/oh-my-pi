@@ -9,6 +9,7 @@ import { ensureGrammar } from "../utils/grammars";
 import { countTextLines } from "./read-format";
 import { formatReadSummary } from "@oh-my-pi/pi-tui/tools/read";
 import { throwIfAborted } from "./tool-errors";
+import { getToolConversationState } from "./tool-state";
 
 import {
 	cfgReadSummarizeMinBodyLines,
@@ -30,17 +31,13 @@ import {
 // only ever renders `parsed && elided` summaries — caching the segments would
 // retain up to 48 near-2MiB sources just to remember "no summary".
 const SUMMARY_CACHE_MAX = 48;
-const summaryParseCaches = new WeakMap<object, LRUCache<string, SummaryResult | false>>();
-function getSummaryParseCache(session: object): LRUCache<string, SummaryResult | false> {
-	let cache = summaryParseCaches.get(session);
-	if (!cache) {
-		cache = new LRUCache<string, SummaryResult | false>({ max: SUMMARY_CACHE_MAX });
-		summaryParseCaches.set(session, cache);
-	}
-	return cache;
+function getSummaryParseCache(session: ToolSession): LRUCache<string, SummaryResult | false> {
+	const state = getToolConversationState(session);
+	state.summaryParses ??= new LRUCache<string, SummaryResult | false>({ max: SUMMARY_CACHE_MAX });
+	return state.summaryParses;
 }
-const MAX_SUMMARY_BYTES = 2 * 1024 * 1024;
-const MAX_SUMMARY_LINES = 20_000;
+export const MAX_SUMMARY_BYTES = 2 * 1024 * 1024;
+export const MAX_SUMMARY_LINES = 20_000;
 /**
  * Prose files (Markdown flavors and plain text) skip code-block summarization
  * unless `read.summarize.prose` opts them in.
@@ -117,7 +114,8 @@ export async function trySummarize(
 	}
 }
 
-/** Read session display preferences and format a structural summary. */
+/** Read session display preferences and format a structural summary; `rowPrefixes` records whether its rows carry `N:`/`N|` prefixes. */
 export function renderSummary(session: ToolSession, summary: SummaryResult) {
-	return formatReadSummary(resolveFileDisplayMode(session), summary);
+	const displayMode = resolveFileDisplayMode(session);
+	return { ...formatReadSummary(displayMode, summary), rowPrefixes: displayMode.lineNumbers };
 }

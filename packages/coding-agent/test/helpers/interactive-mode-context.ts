@@ -51,7 +51,7 @@ type AnyFn = (...args: never[]) => unknown;
 /** Partial at every depth; function members keep their exact signature. */
 export type Deep<T> = T extends AnyFn ? T : T extends object ? { [K in keyof T]?: Deep<T[K]> } : T;
 
-export type ContextOverrides = Deep<InteractiveModeContext>;
+export type ContextOverrides = Omit<Deep<InteractiveModeContext>, "viewSession"> & { viewSession?: Deep<AgentSession> };
 export type SessionOverrides = Deep<AgentSession>;
 export type McpManagerOverrides = Deep<MCPManager>;
 
@@ -131,8 +131,10 @@ export function createSessionStub(
 		setActiveToolsByName: vi.fn(async () => {}),
 		runIdleCompaction: vi.fn(async () => {}),
 		waitForIdle: async () => {},
-		hasPendingAsyncWork: () => false,
-		settleAsyncWork: async () => {},
+		isRunActive: false,
+		wakeSources: undefined,
+		waitForRunEnd: async () => {},
+		getAsyncJobSnapshot: () => null,
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);
@@ -219,9 +221,11 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 	};
 	const ctx = {
 		ui,
+		composer: { setRunActive: vi.fn() },
 		chatContainer,
 		statusContainer: new Container(),
 		editorContainer: new Container(),
+		pendingShellContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		todoContainer: new Container(),
 		editor: { getText: () => "", setText: vi.fn(), onEscape: undefined },
@@ -293,6 +297,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		renderInitialMessages: vi.fn(async () => {}),
 		updatePendingMessagesDisplay: vi.fn(),
 		updateEditorBorderColor: vi.fn(),
+		syncIdleMaintenanceView: vi.fn(),
 		ensureLoadingAnimation: vi.fn(),
 		setWorkingMessage: vi.fn(),
 		syncRetryHintRow: vi.fn(),

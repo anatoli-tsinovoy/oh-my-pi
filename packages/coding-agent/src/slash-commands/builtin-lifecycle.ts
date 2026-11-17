@@ -1,16 +1,16 @@
-import { clearSubmittedText } from "./helpers/draft";
+import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetachedDraft } from "./helpers/draft";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
-import { clearClaudePluginRootsCache } from "../discovery/helpers";
-import { rebindMemoryBackendForCwd } from "../hindsight/backend";
+import { rescopeSessionToCwd } from "../session/cwd-rescope";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveResumableSession } from "../session/session-listing";
-import { toggleSessionPin } from "../session/session-pins";
+import { resolveResumableSession, resolveResumeTarget } from "../session/session-listing";
+import { toggleSessionPin, unpinSession } from "../session/session-pins";
 import {
 	cleanSourceCheckoutIfConfigured,
 	createSessionWorktree,
@@ -19,7 +19,6 @@ import {
 	type SessionWorktree,
 } from "../session/session-worktree";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
-import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -131,6 +130,22 @@ async function relocateHeadlessSession(
 	return undefined;
 }
 
+/** Session id `/pin` and `/unpin` act on (the argument's match, else the active session), or the usage result. */
+async function resolvePinTarget(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+	verb: "pin" | "unpin",
+): Promise<string | SlashCommandResult> {
+	const sessionArg = command.args.trim();
+	if (sessionArg) {
+		const match = await resolveResumableSession(sessionArg, runtime.cwd, runtime.sessionManager.getSessionDir(), {
+			allowGlobalFallback: true,
+		});
+		return match ? match.session.id : usage(`Session "${sessionArg}" not found.`, runtime);
+	}
+	return runtime.sessionManager.getSessionId() || usage(`No active session to ${verb}.`, runtime);
+}
+
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "ssh",
@@ -161,7 +176,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		description: "Start a new session",
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
-			await runtime.ctx.handleClearCommand();
+			await runtime.ctx.handleNewCommand();
 		},
 	},
 	{
@@ -225,6 +240,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handle: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
 			if ("error" in parsed) return usage(parsed.error, runtime);
+			// Print mode turns a failed compaction into a nonzero exit; the
+			// flag is closure state because the background-dispatch branch
+			// (RPC) returns before `runCompact` settles.
+			let compactFailed = false;
 			const runCompact = async (): Promise<void> => {
 				const before = runtime.session.getContextUsage?.();
 				const beforeTokens = before?.tokens;
@@ -240,6 +259,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					// Compaction precondition failures (no model, already compacted, too
 					// small) and provider errors propagate as plain Errors; surface them
 					// via runtime.output so they don't fail the ACP prompt turn.
+					compactFailed = true;
 					await runtime.output(`Compaction failed: ${errorMessage(err)}`);
 					return;
 				}
@@ -260,7 +280,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			await runCompact();
-			return commandConsumed();
+			return commandConsumed({ failed: compactFailed });
 		},
 		handleTui: async (command, runtime) => {
 			const parsed = parseCompactArgs(command.args);
@@ -269,7 +289,30 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showWarning(parsed.error);
 				return;
 			}
-			await runtime.ctx.handleCompactCommand(parsed.instructions, parsed.mode);
+			const { ctx } = runtime;
+			const origin = runtime.followUp;
+			// A switch still applying (or rolling back) decides which conversation is live; judge after it.
+			if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
+			if (origin && !continuesConversation(ctx.sessionManager, origin)) {
+				// Input hooks ran while the conversation changed: never compact one it was not sent in.
+				restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+				ctx.showWarning("Conversation changed before /compact ran; returned it to the editor");
+				return;
+			}
+			if (origin && ctx.session.isStreaming) {
+				ctx.yieldCompaction = {
+					...origin,
+					text: command.text,
+					instructions: parsed.instructions,
+					mode: parsed.mode,
+				};
+				ctx.updatePendingMessagesDisplay();
+				ctx.showStatus("Queued compaction for when the agent yields");
+				// A prompt still in setup may bail without an agent run, and so without the settle that runs this.
+				ctx.runYieldCompaction();
+				return;
+			}
+			await ctx.handleCompactCommand(parsed.instructions, parsed.mode);
 		},
 	},
 	{
@@ -315,6 +358,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			if (runtime.session.isGeneratingHandoff) {
 				return usage("Handoff generation is already in progress.", runtime);
 			}
+			// Print mode turns a failed handoff into a nonzero exit; closure
+			// state because the background-dispatch branch (RPC) returns
+			// before `runHandoff` settles.
+			let handoffFailed = false;
 			const runHandoff = async (): Promise<void> => {
 				let result: HandoffResult | undefined;
 				try {
@@ -343,6 +390,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 					// Persist the real failure so it stays debuggable after the client
 					// message scrolls away (same rationale as the TUI path, #7993).
 					logger.error("Handoff failed", { error: message });
+					handoffFailed = true;
 					await runtime.output(`Handoff failed: ${message}`);
 					return;
 				}
@@ -360,9 +408,10 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return commandConsumed();
 			}
 			await runHandoff();
-			return commandConsumed();
+			return commandConsumed({ failed: handoffFailed });
 		},
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const customInstructions = command.args || undefined;
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleHandoffCommand(customInstructions);
@@ -386,18 +435,18 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				runtime.ctx.showSessionSelector();
 				return;
 			}
-			const match = await resolveResumableSession(
+			const target = await resolveResumeTarget(
 				sessionArg,
 				runtime.ctx.sessionManager.getCwd(),
 				runtime.ctx.sessionManager.getSessionDir(),
 				{ allowGlobalFallback: true },
 			);
-			if (!match) {
+			if (!target) {
 				runtime.ctx.showError(`Session "${sessionArg}" not found`);
 				return;
 			}
 			try {
-				await runtime.ctx.handleResumeSession(match.session.path);
+				await runtime.ctx.handleResumeSession(target.session.path, { continuation: target.continuation });
 			} catch (error) {
 				// The picker reports a failed switch itself; `/resume <id>` has no picker.
 				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
@@ -411,27 +460,26 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[session id]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const sessionArg = command.args.trim();
-			let sessionId: string | undefined;
-			if (sessionArg) {
-				const match = await resolveResumableSession(
-					sessionArg,
-					runtime.cwd,
-					runtime.sessionManager.getSessionDir(),
-					{ allowGlobalFallback: true },
-				);
-				if (!match) {
-					return usage(`Session "${sessionArg}" not found.`, runtime);
-				}
-				sessionId = match.session.id;
-			} else {
-				sessionId = runtime.sessionManager.getSessionId();
-				if (!sessionId) {
-					return usage("No active session to pin.", runtime);
-				}
-			}
+			const sessionId = await resolvePinTarget(command, runtime, "pin");
+			if (typeof sessionId !== "string") return sessionId;
 			const pinned = await toggleSessionPin(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, pinned);
 			await runtime.output(pinned ? "Session pinned to the top of the resume list." : "Session unpinned.");
+			return commandConsumed();
+		},
+	},
+	{
+		name: "unpin",
+		icon: "pin",
+		description: "Unpin a session from the top of the resume list",
+		inlineHint: "[session id]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const sessionId = await resolvePinTarget(command, runtime, "unpin");
+			if (typeof sessionId !== "string") return sessionId;
+			const wasPinned = await unpinSession(sessionId);
+			await runtime.notifySessionPinChanged?.(sessionId, false);
+			await runtime.output(wasPinned ? "Session unpinned." : "Session is not pinned.");
 			return commandConsumed();
 		},
 	},
@@ -443,8 +491,12 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleBtwCommand(question);
+			await runWithDetachedDraft(
+				command,
+				runtime,
+				() => runtime.ctx.handleBtwCommand(question, runtime.input?.images),
+				{ restoreText: true },
+			);
 		},
 	},
 	{
@@ -455,8 +507,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const work = command.text.slice(`/${command.name}`.length).trim();
-			clearSubmittedText(runtime);
-			await runtime.ctx.handleTanCommand(work);
+			await runWithDetachedDraft(command, runtime, () => runtime.ctx.handleTanCommand(work, runtime.input?.images), {
+				restoreText: true,
+			});
 		},
 	},
 	{
@@ -466,6 +519,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "<complaint>",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const complaint = command.text.slice(`/${command.name}`.length).trim();
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleOmfgCommand(complaint);
@@ -478,6 +532,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[request] [--all]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
+			if (refuseImages(command, runtime)) return;
 			const args = command.text.slice(`/${command.name}`.length).trim();
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleCleanseCommand(args);
@@ -562,6 +617,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				case "view": {
 					const payload = await backend.buildDeveloperInstructions(
 						runtime.settings.getAgentDir(),
+						runtime.cwd,
 						runtime.settings,
 						runtime.session,
 					);
@@ -837,7 +893,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "restart",
 		icon: "restart",
-		description: "Restart omp with the same launch flags, resuming this session",
+		description: "Restart omp with the same launch flags, resuming this session and its running subagents",
 		handleTui: async (_command, runtime) => {
 			clearSubmittedText(runtime);
 			await runtime.ctx.restart();
@@ -846,13 +902,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 ];
 async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
 	setProjectDir(cwd);
-	await runtime.settings.reloadForCwd(cwd);
-	await rebindMemoryBackendForCwd(runtime.session);
-	clearClaudePluginRootsCache();
-	const src = discoverTitleSystemPromptFile(cwd);
-	const p = await resolvePromptInput(src, "title system prompt");
-	runtime.session.setTitleSystemPrompt(p);
-	await runtime.session.refreshSkillsAndCommands();
+	await rescopeSessionToCwd(runtime.session, runtime.settings, cwd);
 	await runtime.refreshCommands?.();
-	await runtime.reloadPlugins();
 }

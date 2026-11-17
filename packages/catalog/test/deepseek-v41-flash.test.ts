@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { resolveCascade } from "../src/compat/cascade";
 import { Effort } from "../src/effort";
 import { getBundledModels } from "../src/models";
 import type { Model } from "../src/types";
@@ -17,7 +18,6 @@ function bundled(provider: Parameters<typeof getBundledModels>[0], id: string): 
 describe("DeepSeek V4.1 Flash", () => {
 	test("the bundled native row accepts image input", () => {
 		const model = bundled("deepseek", "deepseek-flash");
-		expect(model.name).toBe("DeepSeek V4.1 Flash");
 		expect(model.reasoning).toBe(true);
 		expect(model.input).toEqual(["text", "image"]);
 		expect(model.compat.stripImageInput).toBe(false);
@@ -25,12 +25,31 @@ describe("DeepSeek V4.1 Flash", () => {
 		expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 
-	test("the exemption does not widen to lookalike or retired SKUs", () => {
-		// Retired V4 SKUs stay text-only by reviewed census decision.
-		expect(bundled("deepseek", "deepseek-v4-flash").compat.stripImageInput).toBe(true);
+	test("the exemption follows DeepSeek's alias routing, not the retired id", () => {
+		// DeepSeek's API serves the retired `deepseek-v4-flash` id with V4.1 Flash.
+		expect(bundled("deepseek", "deepseek-v4-flash").compat.stripImageInput).toBe(false);
+		// Hosts serving the same id still run text-only V4.0 Flash weights.
+		expect(bundled("fireworks", "deepseek-v4-flash").compat.stripImageInput).toBe(true);
 		expect(bundled("deepseek", "deepseek-v4-pro").compat.stripImageInput).toBe(true);
-		// Yolo-Auto resells the same model behind an id the release-name glob
-		// must not claim.
-		expect(bundled("yolo-auto", "deepseek-flash-v4").compat.stripImageInput).toBe(true);
+	});
+
+	test("publisher-namespaced ids keep the exemption", () => {
+		// Gateways that resell the upstream prefix its namespace onto the id, so
+		// the carve-out has to key on the release name rather than the exact id.
+		const stripImageInput = (model: string) =>
+			resolveCascade({
+				provider: "omni",
+				api: "openai-completions",
+				class: "deepseek",
+				family: "flash",
+				model,
+				reasoning: true,
+			}).wire.stripImageInput;
+
+		expect(stripImageInput("ds/deepseek-flash")).toBe(false);
+		expect(stripImageInput("deepseek/deepseek-flash")).toBe(false);
+		// Namespacing must not turn into suffix matching: the retired V4 reseller
+		// id still ends in `-v4` and stays text-only.
+		expect(stripImageInput("deepseek-flash-v4")).toBe(true);
 	});
 });

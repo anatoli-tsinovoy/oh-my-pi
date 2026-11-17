@@ -47,11 +47,12 @@ export interface SessionHandoffHost {
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
+	getPromptCacheKeyForModel(model: Model): string | undefined;
 	baseSystemPrompt(): string[];
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
 	deobfuscateFromProvider(text: string): string;
-	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
+	convertMessagesToLlm(messages: AgentMessage[], signal: AbortSignal | undefined, model: Model): Promise<Message[]>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
 	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
 }
@@ -134,11 +135,11 @@ export class SessionHandoff {
 			// effective provider cache key with a unique side `sessionId` so
 			// OpenAI/Codex append-only state never mixes with the live turn.
 			const cacheSessionId = this.#host.sessionId();
-			// The loop sends `promptCacheKey` (providerPromptCacheKey) and falls back to
+			// The loop sends an explicit or model-gated Task key, falling back to
 			// the provider session id; providers route on `promptCacheKey ?? sessionId`.
 			// Both can diverge from this.#host.sessionId() (tan/subagent/shared sessions), so
 			// mirror exactly what the live turn populated the cache under.
-			const handoffPromptCacheKey = this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId;
+			const handoffPromptCacheKey = this.#host.getPromptCacheKeyForModel(model) ?? this.#host.agent.sessionId;
 			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
 			const handoffSnapshot: AgentMessage[] = [
 				...this.#host.agent.state.messages,
@@ -149,7 +150,7 @@ export class SessionHandoff {
 					timestamp: Date.now(),
 				},
 			];
-			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal);
+			const handoffLlmMessages = await this.#host.convertMessagesToLlm(handoffSnapshot, handoffSignal, model);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the document seeds the post-compaction context and must not carry
 			// prompt-specific hook state.
@@ -190,22 +191,22 @@ export class SessionHandoff {
 			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
 
 			throwIfHandoffAborted(handoffSignal);
-			if (!handoffText || handoffText.trim().length === 0) {
-				// Empty/whitespace-only generation is a real failure, not a user
-				// cancellation. #7904 stopped masking provider errors as "Handoff
-				// cancelled"; an empty document is the remaining path that produced the
-				// same misleading, undebuggable message (#7993).
-				logger.warn("Handoff generation produced no content", {
-					sessionId: this.#host.sessionId(),
+			const failure = !handoffText?.trim()
+				? "no content"
+				: !/^## Goal[ \t]*\r?$/m.test(handoffText)
+					? "an invalid document"
+					: undefined;
+			if (failure) {
+				logger.warn(`Handoff generation produced ${failure}`, {
+					providerSessionId: this.#host.sessionId(),
 					autoTriggered: options?.autoTriggered ?? false,
 				});
-				// Auto-handoff is best-effort: returning undefined lets maintenance fall
-				// back to the next compaction method. A user-initiated handoff must
-				// surface the failure instead of a silent, misleading "cancelled".
+				// Auto-handoff is best-effort: maintenance can try the next method
+				// without committing a document that replaces the user's goal.
 				if (options?.autoTriggered) {
 					return undefined;
 				}
-				throw new Error("Handoff generation produced no content");
+				throw new Error(`Handoff generation produced ${failure}`);
 			}
 
 			let savedPath: string | undefined;

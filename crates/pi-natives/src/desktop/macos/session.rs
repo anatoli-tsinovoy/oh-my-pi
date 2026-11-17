@@ -1,7 +1,8 @@
-//! Login-session state (lock screen, display sleep) and the assertion that
-//! keeps the display awake while the agent acts.
+//! Login-session state (lock screen, display sleep, secure input) and the
+//! assertion that keeps the display awake while the agent acts.
 
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType};
+use objc2::rc::autoreleasepool;
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
 	CGDirectDisplayID, CGDisplayIsAsleep, CGGetOnlineDisplayList, CGSessionCopyCurrentDictionary,
 };
@@ -12,6 +13,9 @@ use crate::power::platform::{AssertionInner, AssertionKind};
 /// Session dictionary key `WindowServer` sets to true while the lock screen is
 /// up; absent while unlocked.
 const SCREEN_LOCKED_KEY: &str = "CGSSessionScreenIsLocked";
+/// Session dictionary key `WindowServer` sets to the process that turned
+/// Secure Event Input on; absent while it is off.
+const SECURE_INPUT_PID_KEY: &str = "kCGSSessionSecureInputPID";
 /// Shown by `pmset -g assertions` next to the holding process.
 const DISPLAY_AWAKE_REASON: &str = "oh-my-pi computer tool is operating the desktop";
 const MAX_ONLINE_DISPLAYS: u32 = 32;
@@ -22,7 +26,7 @@ const MAX_ONLINE_DISPLAYS: u32 = 32;
 pub(in super::super) fn screen_state(selector: &DisplaySelector) -> ScreenState {
 	ScreenState {
 		locked:         screen_locked(),
-		display_asleep: displays_asleep(selector, &online_displays(), |id| CGDisplayIsAsleep(id)),
+		display_asleep: displays_asleep(selector, &online_displays(), CGDisplayIsAsleep),
 	}
 }
 
@@ -68,23 +72,33 @@ fn screen_locked() -> bool {
 		.is_some_and(CFBoolean::value)
 }
 
-/// Prevent-idle-display-sleep assertion, held while `Some`.
-#[derive(Default)]
-pub(super) struct DisplayAwake(Option<AssertionInner>);
-
-impl DisplayAwake {
-	pub(super) fn set(&mut self, awake: bool) {
-		match (awake, self.0.is_some()) {
-			(true, false) => {
-				// A refused assertion only means the display may sleep as it
-				// would without the agent; screen-state reporting covers that.
-				self.0 =
-					AssertionInner::start(AssertionKind::PreventDisplaySleep, DISPLAY_AWAKE_REASON).ok();
-			},
-			(false, true) => self.0 = None,
-			_ => {},
-		}
+/// Whether Secure Event Input is on, and the app macOS names as holding it.
+pub(super) fn secure_input() -> (bool, Option<String>) {
+	if !super::key_reroute::secure_entry() {
+		return (false, None);
 	}
+	let pid = CGSessionCopyCurrentDictionary().and_then(|session| {
+		// SAFETY: as in `screen_locked`.
+		let session =
+			unsafe { CFRetained::cast_unchecked::<CFDictionary<CFString, CFType>>(session) };
+		let key = CFString::from_static_str(SECURE_INPUT_PID_KEY);
+		// SAFETY: `session` is an immutable copy that outlives the borrow.
+		unsafe { session.get_unchecked(&key) }
+			.and_then(|value| value.downcast_ref::<CFNumber>())
+			.and_then(CFNumber::as_i32)
+	});
+	let app = pid.filter(|&pid| pid > 0).map(|pid| {
+		autoreleasepool(|_| super::process::application_name(pid))
+			.unwrap_or_else(|| format!("process {pid}"))
+	});
+	(true, app)
+}
+
+/// Starts the prevent-idle-display-sleep assertion, held until the returned
+/// value drops. A refused assertion only means the display may sleep as it
+/// would without the agent; screen-state reporting covers that.
+pub(super) fn hold_display_awake() -> Option<AssertionInner> {
+	AssertionInner::start(AssertionKind::PreventDisplaySleep, DISPLAY_AWAKE_REASON).ok()
 }
 
 #[cfg(test)]

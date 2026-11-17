@@ -2470,7 +2470,7 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 		expect(textPart?.cache_control).toEqual({ type: "ephemeral" });
 	});
 
-	it("does not attach Anthropic cache_control to empty assistant tool-call content", async () => {
+	it("anchors Anthropic cache_control on the trailing tool result during a tool loop", async () => {
 		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
@@ -2508,17 +2508,16 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 			messages: [{ role: "user", content: "cache me", timestamp: 0 }, assistantMessage, toolResultMessage],
 		});
 		const messages = getPayloadMessages(payload);
-		const assistant = messages.find(message => {
-			const toolCalls = message.tool_calls;
-			return message.role === "assistant" && Array.isArray(toolCalls);
-		});
-		const firstUser = messages.find(message => message.role === "user");
-		const userContent = firstUser?.content;
-		const textPart = getLastTextPart(userContent);
+		const [user, assistant, tool] = messages;
 
+		// Empty tool-call replay content must stay a string: an empty text part
+		// with cache_control is rejected by Anthropic/OpenRouter.
 		expect(assistant?.content).toBe("");
-		expect(textPart?.text).toBe("cache me");
-		expect(textPart?.cache_control).toEqual({ type: "ephemeral" });
+		expect(getLastTextPart(user?.content)?.cache_control).toBeUndefined();
+		expect(tool?.role).toBe("tool");
+		expect(tool?.content).toEqual([
+			{ type: "text", text: "Read image file [image/webp]", cache_control: { type: "ephemeral" } },
+		]);
 	});
 
 	it("does not infer Anthropic cache_control for custom Claude ids without compat", async () => {
@@ -2846,6 +2845,36 @@ describe("mistral prompt_cache_key regression (#15079)", () => {
 		});
 		const payloadObject = toObject(payload);
 		expect(payloadObject === null || !("prompt_cache_key" in payloadObject)).toBe(true);
+	});
+});
+
+describe("Mistral reasoning_effort ladders (#19265)", () => {
+	// docs.mistral.ai/inference/conversations/reasoning: GLM 5.3 and Flash take
+	// low/high/max; Large 4 takes low/medium/high and rejects minimal/xhigh/max.
+	it("offers each model only the efforts Mistral documents and sends them on the wire", async () => {
+		const ladders = [
+			["zai-glm-5-3", [Effort.Low, Effort.High, Effort.Max]],
+			["zai-glm-5-3-flash", [Effort.Low, Effort.High, Effort.Max]],
+			["mistral-large-4", [Effort.Low, Effort.Medium, Effort.High]],
+			["mistral-large-4-0", [Effort.Low, Effort.Medium, Effort.High]],
+		] as const;
+		for (const [id, efforts] of ladders) {
+			const model = getBundledModel<"openai-completions">("mistral", id);
+			expect(getSupportedEfforts(model)).toEqual([...efforts]);
+			const send = async (requested: Effort) =>
+				toObject(
+					await captureOpenAICompletionsPayload(model, undefined, {
+						reasoning: clampThinkingLevelForModel(model, requested),
+					}),
+				)?.reasoning_effort;
+			// A documented effort goes out as itself, `max` included.
+			for (const effort of efforts) expect(await send(effort)).toBe(effort);
+			// An undocumented one is clamped to a documented value, never sent as-is.
+			for (const requested of [Effort.Minimal, Effort.Medium, Effort.XHigh, Effort.Max]) {
+				if ((efforts as readonly Effort[]).includes(requested)) continue;
+				expect(efforts as readonly unknown[]).toContain(await send(requested));
+			}
+		}
 	});
 });
 

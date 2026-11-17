@@ -1,6 +1,8 @@
 //! Reusable text transforms shared by minimizer filters.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt::NumBuffer};
+
+use xutf::{LineEnds, Text};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapClass {
@@ -27,6 +29,14 @@ pub const fn reduced(cap: usize, by: usize) -> usize {
 	let reduced = cap.saturating_sub(by);
 	if reduced == 0 && cap > 0 { 1 } else { reduced }
 }
+
+/// Size up to which output the agent asked to read is returned whole.
+///
+/// Applies to patches, `jq` results and remote command output. Below it a
+/// lossy summary sends the agent to the raw artifact more often than it saves
+/// context: in recorded sessions, nearly half of the summarized `jq` results
+/// and `git diff`/`git show` patches were followed by a read of the raw output.
+pub const WHOLE_OUTPUT_BYTES: usize = 16 * 1024;
 
 /// Remove ANSI CSI escape sequences while preserving line endings verbatim.
 #[must_use]
@@ -74,16 +84,26 @@ fn flush_repeated(out: &mut String, line: Option<&str>, count: usize) {
 	out.push_str(line);
 	if count > 1 {
 		out.push_str(" (×");
-		out.push_str(&count.to_string());
+		out.push_str(count.format_into(&mut NumBuffer::new()));
 		out.push(')');
 	}
 	out.push('\n');
 }
 
+fn collect_lines(input: &str) -> Vec<&str> {
+	if input.len() < 64 {
+		input.lines().collect()
+	} else {
+		xutf::lines_str(input, LineEnds::Lf)
+			.map(|line| line.text())
+			.collect()
+	}
+}
+
 /// Keep the first `head` and last `tail` lines with an omission marker.
 #[must_use]
 pub fn head_tail_lines(input: &str, head: usize, tail: usize) -> String {
-	let lines: Vec<&str> = input.lines().collect();
+	let lines = collect_lines(input);
 	if lines.len() <= head + tail {
 		return input.to_string();
 	}
@@ -104,7 +124,7 @@ pub fn head_tail_of_lines(lines: &[&str], head: usize, tail: usize) -> String {
 		out.push('\n');
 	}
 	out.push_str("[…");
-	out.push_str(&omitted.to_string());
+	out.push_str(omitted.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	for line in lines.iter().skip(lines.len() - tail) {
 		out.push_str(line);
@@ -164,7 +184,7 @@ pub fn group_by_file(input: &str, max_per_file: usize) -> String {
 		}
 		if entries.len() > max_per_file {
 			out.push_str("  … ");
-			out.push_str(&(entries.len() - max_per_file).to_string());
+			out.push_str((entries.len() - max_per_file).format_into(&mut NumBuffer::new()));
 			out.push_str(" more\n");
 		}
 	}
@@ -266,7 +286,7 @@ pub fn compact_listing(input: &str, max_lines: usize) -> String {
 		return input.to_string();
 	}
 	let mut out = String::new();
-	out.push_str(&lines.len().to_string());
+	out.push_str(lines.len().format_into(&mut NumBuffer::new()));
 	out.push_str(" entries\n");
 	for line in lines.iter().take(max_lines / 2) {
 		out.push_str(line);
@@ -297,15 +317,23 @@ pub fn truncate_line(line: &str, max_chars: usize) -> String {
 	if max_chars == 0 {
 		return String::new();
 	}
-	let mut chars = line.chars();
-	let mut out = String::new();
-	for _ in 0..max_chars {
-		match chars.next() {
-			Some(ch) => out.push(ch),
-			None => return out,
-		}
+	if line.len() <= max_chars {
+		return line.to_owned();
 	}
-	let dropped = chars.count();
+	let end = if line.len() < 64 {
+		line
+			.char_indices()
+			.nth(max_chars)
+			.map_or(line.len(), |(at, _)| at)
+	} else {
+		line.unit_offset::<u32>(max_chars)
+	};
+	let mut out = line[..end].to_owned();
+	let dropped = if line.len() < 64 {
+		line[end..].chars().count()
+	} else {
+		line[end..].transcoded_len::<u32>()
+	};
 	if dropped > 0 {
 		use std::fmt::Write as _;
 		// 5–6 bytes typical; this avoids pulling `itoa` for a marker tally.
@@ -317,7 +345,7 @@ pub fn truncate_line(line: &str, max_chars: usize) -> String {
 /// Keep only the first `head` lines; append a summary marker when truncated.
 #[must_use]
 pub fn head_lines_only(input: &str, head: usize) -> String {
-	let lines: Vec<&str> = input.lines().collect();
+	let lines = collect_lines(input);
 	if lines.len() <= head {
 		return input.to_string();
 	}
@@ -328,7 +356,7 @@ pub fn head_lines_only(input: &str, head: usize) -> String {
 		out.push('\n');
 	}
 	out.push_str("[…");
-	out.push_str(&omitted.to_string());
+	out.push_str(omitted.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	out
 }
@@ -336,14 +364,14 @@ pub fn head_lines_only(input: &str, head: usize) -> String {
 /// Keep only the last `tail` lines; prepend a summary marker when truncated.
 #[must_use]
 pub fn tail_lines_only(input: &str, tail: usize) -> String {
-	let lines: Vec<&str> = input.lines().collect();
+	let lines = collect_lines(input);
 	if lines.len() <= tail {
 		return input.to_string();
 	}
 	let omitted = lines.len() - tail;
 	let mut out = String::new();
 	out.push_str("[…");
-	out.push_str(&omitted.to_string());
+	out.push_str(omitted.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	for line in lines.iter().skip(omitted) {
 		out.push_str(line);
@@ -355,7 +383,7 @@ pub fn tail_lines_only(input: &str, tail: usize) -> String {
 /// Hard cap: keep at most `max` lines, append a truncation marker otherwise.
 #[must_use]
 pub fn max_lines(input: &str, max: usize) -> String {
-	let lines: Vec<&str> = input.lines().collect();
+	let lines = collect_lines(input);
 	if lines.len() <= max {
 		return input.to_string();
 	}
@@ -366,7 +394,7 @@ pub fn max_lines(input: &str, max: usize) -> String {
 		out.push('\n');
 	}
 	out.push_str("[…");
-	out.push_str(&dropped.to_string());
+	out.push_str(dropped.format_into(&mut NumBuffer::new()));
 	out.push_str("ln elided…]\n");
 	out
 }
@@ -467,6 +495,29 @@ mod tests {
 	#[test]
 	fn truncate_line_max_zero_yields_empty() {
 		assert_eq!(truncate_line("anything", 0), "");
+	}
+
+	#[test]
+	fn truncation_keeps_scalar_boundaries_on_long_unicode_lines() {
+		let line = format!("{}😀e\u{301}終", "a".repeat(128));
+		assert_eq!(truncate_line(&line, 130), format!("{}😀e…[+2]", "a".repeat(128)));
+	}
+
+	#[test]
+	fn line_caps_preserve_crlf_and_unterminated_input_semantics() {
+		let input = "a\r\nb\r\nc\r";
+		assert_eq!(head_tail_lines(input, 1, 1), "a\n[…1ln elided…]\nc\r\n");
+		assert_eq!(head_lines_only(input, 1), "a\n[…2ln elided…]\n");
+		assert_eq!(tail_lines_only(input, 1), "[…2ln elided…]\nc\r\n");
+		assert_eq!(max_lines(input, 1), "a\n[…2ln elided…]\n");
+		assert_eq!(head_tail_lines(input, 2, 1), input);
+	}
+
+	#[test]
+	fn long_line_collection_matches_std_lines() {
+		for input in [format!("{}\r\nb\r\nc\r", "a".repeat(128)), "\n".repeat(128)] {
+			assert_eq!(collect_lines(&input), input.lines().collect::<Vec<_>>());
+		}
 	}
 
 	#[test]

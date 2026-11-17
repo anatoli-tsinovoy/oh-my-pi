@@ -112,6 +112,7 @@ describe("task async preflight", () => {
 			const result = await tool.execute("preflight", params as TaskParams);
 
 			expect(textOf(result)).toContain(expectation);
+			expect(result.isError).toBe(true);
 			expect(jobs.getJob(name)).toBeUndefined();
 		},
 	);
@@ -134,6 +135,7 @@ describe("task async preflight", () => {
 
 		const text = textOf(result);
 		expect(text).toContain('Task Invalid failed preflight: Unknown agent "missing"');
+		expect(result.isError).toBe(true);
 		expect(text).toContain('Task AlsoInvalid failed preflight: Unknown agent "also-missing"');
 		expect(register).not.toHaveBeenCalled();
 		expect(runSubprocess).not.toHaveBeenCalled();
@@ -164,6 +166,29 @@ describe("task async preflight", () => {
 		expect(runSubprocess).not.toHaveBeenCalled();
 		expect(jobs.getJob("Invalid")).toBeUndefined();
 		expect(jobs.getJob("Valid")).toBeUndefined();
+	});
+
+	it.each([false, true])("treats a blank per-call model as omitted (batch=%s)", async batch => {
+		mockDiscovery();
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("BlankModel"));
+		const tool = await TaskTool.create(
+			createSession({ manager: manager(), settings: { "async.enabled": false, "task.batch": batch } }),
+		);
+
+		const result = await tool.execute(
+			"blank-model",
+			(batch
+				? {
+						context: "Shared context.",
+						tasks: [{ name: "BlankModel", agent: "task", task: "Do work.", model: "" }],
+					}
+				: { name: "BlankModel", agent: "task", task: "Do work.", model: "" }) as TaskParams,
+		);
+
+		expect(result.isError).toBeFalsy();
+		expect(runSubprocess).toHaveBeenCalledTimes(1);
+		// A blank selector is absence: the task uses its configured model, not a per-call route.
+		expect(runSubprocess.mock.calls[0]?.[0]?.perCallModelGrants).toBeUndefined();
 	});
 
 	it("names the searched agent directories, home-shortened, when the agent is unknown", async () => {
