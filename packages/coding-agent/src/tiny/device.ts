@@ -25,6 +25,7 @@ export interface TinyModelDevicePreference {
 
 const CPU_DEVICE: TinyOnnxDevice = "cpu";
 const CPU_ONLY_ORDER: readonly TinyOnnxDevice[] = [CPU_DEVICE];
+const WASM_ONLY_ORDER: readonly TinyOnnxDevice[] = ["wasm"];
 const DARWIN_WEBGPU_UNSAFE_ORDER: readonly TinyOnnxDevice[] = [CPU_DEVICE];
 
 const DEVICE_VALUES: Record<TinyModelDevice, true> = {
@@ -42,10 +43,6 @@ const DEVICE_VALUES: Record<TinyModelDevice, true> = {
 	"webnn-cpu": true,
 	[MLX_DEVICE]: true,
 };
-
-function usesDarwinWorkerWebGpu(device: TinyModelDevice): boolean {
-	return process.platform === "darwin" && (device === "gpu" || device === "webgpu" || device === "auto");
-}
 
 /** Whether the mlx-lm backend can run here: MLX ships Metal wheels for Apple silicon only. */
 export function tinyMlxSupported(platform = process.platform, arch = process.arch): boolean {
@@ -76,9 +73,18 @@ export function resolveTinyModelDevicePreference(
  * is not an ONNX provider: workers that only speak ONNX (STT/TTS, or the tiny
  * worker after an MLX bootstrap failure) run CPU-only for it.
  */
-export function tinyModelDeviceLoadOrder(preference: TinyModelDevicePreference): readonly TinyOnnxDevice[] {
+export function tinyModelDeviceLoadOrder(
+	preference: TinyModelDevicePreference,
+	platform: NodeJS.Platform | string = process.platform,
+): readonly TinyOnnxDevice[] {
+	if (platform === "android") return WASM_ONLY_ORDER;
 	if (preference.device === CPU_DEVICE || preference.device === MLX_DEVICE) return CPU_ONLY_ORDER;
-	if (usesDarwinWorkerWebGpu(preference.device)) return DARWIN_WEBGPU_UNSAFE_ORDER;
+	if (
+		platform === "darwin" &&
+		(preference.device === "gpu" || preference.device === "webgpu" || preference.device === "auto")
+	) {
+		return DARWIN_WEBGPU_UNSAFE_ORDER;
+	}
 	return [preference.device, CPU_DEVICE];
 }
 
