@@ -10,6 +10,8 @@
 
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added standalone Android ARM64/Termux executables bundling Bun 1.4.4, with Linux cross-build support.
+- Added local Android speech recognition through ONNX WASM.
+- Added Android support for local CPU Phonon 31M text-to-speech (`local/phonon-31m`), with model checkpoints downloaded on demand.
 
 ### Fixed
 
