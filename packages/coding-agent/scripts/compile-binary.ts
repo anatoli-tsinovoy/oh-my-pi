@@ -3,11 +3,29 @@
 import { USER_AGENT } from "@oh-my-pi/pi-utils/dirs";
 import { embeddedAddonFiles, type NativeEmbedTarget } from "../../natives/scripts/embed-native";
 import { buildDocsIndexPayload } from "./generate-docs-index";
+import { embeddedRelayExtensionFiles } from "./embed-relay-extension";
 import { createJsonParsePlugin } from "./json-parse-plugin";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
 /** Native runtime dependencies always resolved from the on-demand install instead of embedded into compiled binaries. */
-export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze(["fastembed", "onnxruntime-node"]);
+export const COMPILED_EXTERNAL_DEPENDENCIES: readonly string[] = Object.freeze([
+	"@huggingface/transformers",
+	"fastembed",
+	"onnxruntime-node",
+]);
+
+/** Bun 1.4.4 supports Android cross-compilation; the installed Bun types lag this target. */
+export const ANDROID_COMPILE_TARGET = "bun-linux-arm64-android";
+
+/**
+ * Compile targets accepted by the shared coding-agent builder. Current Bun
+ * declarations omit its Android target and the existing musl-baseline release
+ * target spelling.
+ */
+export type CodingAgentCompileTarget =
+	| Bun.Build.CompileTarget
+	| typeof ANDROID_COMPILE_TARGET
+	| "bun-linux-x64-musl-baseline";
 
 /** Inputs shared by local and release coding-agent binary builds. */
 export interface CodingAgentCompileOptions {
@@ -17,15 +35,13 @@ export interface CodingAgentCompileOptions {
 	readonly entrypoint: string;
 	/** Absolute standalone executable output path. */
 	readonly outfile: string;
-	/** Concrete Transformers.js version baked into the tiny-model worker. */
-	readonly transformersVersion: string;
 	/**
 	 * Native addon target embedded for the runtime loader to extract; `null`
 	 * compiles without one (probe builds that never load the addon).
 	 */
 	readonly native: NativeEmbedTarget | null;
 	/** Optional cross-compilation runtime target. */
-	readonly target?: Bun.Build.CompileTarget;
+	readonly target?: CodingAgentCompileTarget;
 	/** Optional unmodified Bun executable used as the standalone runtime template. */
 	readonly executablePath?: string;
 	/** Match release builds that minify identifiers while retaining names. */
@@ -48,10 +64,12 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,
 			external: [...COMPILED_EXTERNAL_DEPENDENCIES],
-			files: options.native ? await embeddedAddonFiles(options.native) : {},
+			files: {
+				...(options.native ? await embeddedAddonFiles(options.native) : {}),
+				...(await embeddedRelayExtensionFiles()),
+			},
 			define: {
 				"process.env.PI_COMPILED": JSON.stringify("true"),
-				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
 			},
 			// Precompiled bytecode skips parsing the ~20 MB bundle at boot:
@@ -60,8 +78,11 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 			format: "esm",
 			bytecode: true,
 			splitting: true,
-			// Discovery entry chunks can share a hash; include their source names to avoid collisions.
-			naming: { chunk: "chunks/[name]-[hash].[ext]" },
+			// The legacy Pi registry lazily imports every exported module, so side-effect-only
+			// modules (e.g. tui `painters/input.ts` and `widgets/input.ts`) become facade chunks
+			// holding only identical imports of shared chunks: same content, same hash. Mirror
+			// each source path so same-named modules in different directories never collide.
+			naming: { chunk: "chunks/[dir]/[name]-[hash].[ext]" },
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,
 				keepNames: true,
@@ -74,7 +95,7 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				...(options.executablePath
 					? { executablePath: options.executablePath }
 					: options.target
-						? { target: options.target }
+						? { target: options.target as Bun.Build.CompileTarget }
 						: {}),
 				outfile: options.outfile,
 				autoloadBunfig: false,

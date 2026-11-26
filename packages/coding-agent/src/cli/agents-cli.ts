@@ -8,9 +8,9 @@ import * as path from "node:path";
 import { getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { YAML } from "bun";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import { loadBundledAgents } from "../task/agents";
 import type { AgentDefinition } from "../task/types";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 export type AgentsAction = "unpack";
 
@@ -58,12 +58,13 @@ function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
 		description: agent.description,
 	};
 
-	if (agent.tools && agent.tools.length > 0) frontmatter.tools = agent.tools;
+	if (agent.tools !== undefined) frontmatter.tools = agent.tools;
 	if (agent.spawns !== undefined) frontmatter.spawns = agent.spawns;
 	if (agent.model && agent.model.length > 0) frontmatter.model = agent.model;
 	if (agent.thinkingLevel) frontmatter.thinkingLevel = agent.thinkingLevel;
 	if (agent.output !== undefined) frontmatter.output = agent.output;
 	if (agent.blocking) frontmatter.blocking = true;
+	if (agent.structured) frontmatter.structured = true;
 
 	return frontmatter;
 }
@@ -117,11 +118,13 @@ export async function runAgentsCommand(cmd: AgentsCommandArgs): Promise<void> {
 
 			writeStdout(chalk.bold(`Bundled agents: ${result.total}`));
 			writeStdout(chalk.dim(`Target directory: ${result.targetDir}`));
-			writeStdout(chalk.green(`${theme.status.success} Written: ${result.written.length}`));
+			writeStdout(
+				chalk.green(`${currentTheme().symbols.symbol("status.success")} Written: ${result.written.length}`),
+			);
 			if (result.skipped.length > 0) {
 				writeStdout(
 					chalk.yellow(
-						`${theme.status.warning} Skipped existing: ${result.skipped.length} (use --force to overwrite)`,
+						`${currentTheme().symbols.symbol("status.warning")} Skipped existing: ${result.skipped.length} (use --force to overwrite)`,
 					),
 				);
 			}

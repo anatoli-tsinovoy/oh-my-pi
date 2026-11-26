@@ -1,19 +1,20 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
+import { getTerminalId } from "../utils/ttyid";
 import {
 	getCustomSessionFilesDir,
 	getSessionsDir,
 	getTerminalSessionsDir,
 	getWorktreesDir,
 	hashPath,
-	pathIsWithin,
+	relativePathWithinRoot,
 	resolveEquivalentPath,
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import type { Settings } from "../config/settings";
+import { worktreeFamily } from "../worktree/worktrees";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
@@ -80,6 +81,8 @@ function getDefaultSessionDirName(cwd: string): {
 	hashedDirName: string;
 	/** Home-relative name a temp-root cwd got while home was checked first; migrated forward. */
 	shadowedHomeDirName?: string;
+	/** Hashed home-scoped name from before temp-root precedence. */
+	shadowedHomeHashedDirName?: string;
 	resolvedCwd: string;
 } {
 	const resolvedCwd = path.resolve(cwd);
@@ -93,12 +96,16 @@ function getDefaultSessionDirName(cwd: string): {
 	const inHome = isRelativeWithin(homeRelative);
 	let encodedDirName: string;
 	let shadowedHomeDirName: string | undefined;
+	let shadowedHomeHashedDirName: string | undefined;
 	let scope: "home" | "tmp" | "abs";
 	// The temp root is checked first: it is the more specific root wherever it
 	// nests inside home (Windows' `%USERPROFILE%\AppData\Local\Temp`).
 	if (isRelativeWithin(tempRelative)) {
 		encodedDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
-		if (inHome) shadowedHomeDirName = encodeRelativeSessionDirName("-", homeRelative);
+		if (inHome) {
+			shadowedHomeDirName = encodeRelativeSessionDirName("-", homeRelative);
+			shadowedHomeHashedDirName = encodeHashedSessionDirName(canonicalCwd, "home");
+		}
 		scope = "tmp";
 	} else if (inHome) {
 		encodedDirName = encodeRelativeSessionDirName("-", homeRelative);
@@ -111,6 +118,7 @@ function getDefaultSessionDirName(cwd: string): {
 		encodedDirName,
 		hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope),
 		shadowedHomeDirName,
+		shadowedHomeHashedDirName,
 		resolvedCwd,
 	};
 }
@@ -216,28 +224,23 @@ export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessions
 	return path.join(sessionsRoot, getDefaultSessionDirName(cwd).encodedDirName);
 }
 
-/**
- * Session directories for `cwd`'s folder in the other worktrees of its git
- * repository, under the sessions root holding `sessionDir`: every worktree git
- * lists, plus agent-managed ones (`/wt`, PR checkouts) found by name, so a
- * worktree removed since still counts. `/wt` moves a session into a linked
- * worktree's directory; the session picker lists these so it stays resumable
- * from the checkout it left, and vice versa.
- *
- * Empty outside git, when `cwd` sits outside its checkout, when `sessionDir`
- * is not cwd-derived (a custom `--session-dir`), or when git metadata is
- * unreadable.
- */
-export async function worktreeSessionDirs(cwd: string, sessionDir: string): Promise<string[]> {
+/** Session buckets for both backends, including removed worktrees whose sessions can be resumed. */
+export async function worktreeSessionDirs(
+	cwd: string,
+	sessionDir: string,
+	options: { settings?: Settings; stranded?: boolean } = {},
+): Promise<string[]> {
 	const sessionsRoot = resolveManagedSessionRoot(sessionDir, cwd);
 	if (!sessionsRoot) return [];
 	try {
-		const repo = vcs.git(cwd);
-		const prefix = repo?.prefixOf(cwd);
-		if (!repo || prefix == null) return [];
-		const dirs = new Set(managedWorktreeSessionDirs(repo.primaryRoot(), prefix, sessionsRoot));
-		for (const worktree of await repo.worktrees()) {
-			dirs.add(sessionDirForCwd(path.resolve(worktree.path, prefix), sessionsRoot));
+		const family = await worktreeFamily(cwd, options.settings);
+		if (!family) return [];
+		const { primary, prefix, locations } = family;
+		const dirs = new Set(managedWorktreeSessionDirs(primary, prefix, sessionsRoot));
+		for (const location of locations) {
+			const dir = sessionDirForCwd(path.resolve(location.root, prefix), sessionsRoot);
+			if (options.stranded && location.offline) dirs.delete(dir);
+			else dirs.add(dir);
 		}
 		dirs.delete(path.resolve(sessionDir));
 		return [...dirs];
@@ -291,11 +294,13 @@ export function computeDefaultSessionDir(
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
 ): string {
-	const { encodedDirName, hashedDirName, shadowedHomeDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const { encodedDirName, hashedDirName, shadowedHomeDirName, shadowedHomeHashedDirName, resolvedCwd } =
+		getDefaultSessionDirName(cwd);
 	migrateHomeSessionDirs(sessionsRoot);
 	const sessionDir = path.join(sessionsRoot, encodedDirName);
 	migrateNamedSessionDir(encodeLegacyAbsoluteSessionDirName(resolvedCwd), sessionDir, sessionsRoot);
 	if (shadowedHomeDirName) migrateNamedSessionDir(shadowedHomeDirName, sessionDir, sessionsRoot);
+	if (shadowedHomeHashedDirName) migrateNamedSessionDir(shadowedHomeHashedDirName, sessionDir, sessionsRoot);
 	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;
@@ -410,6 +415,17 @@ function writeIfChangedSync(file: string, content: string): void {
 }
 
 /**
+ * Whether the garbage collector's recursive `*.jsonl` scan of the sessions root reaches `file`:
+ * a JSONL transcript under that root with no dot-leading path segment, since the scan skips dot
+ * entries. Anything else needs a marker to stay visible to the collector.
+ */
+function isFoundByManagedScan(file: string): boolean {
+	if (!file.endsWith(".jsonl")) return false;
+	const relative = relativePathWithinRoot(getSessionsDir(), file);
+	return relative !== null && !relative.split(path.sep).some(segment => segment.startsWith("."));
+}
+
+/**
  * Record a session's exact file in the persistent custom-files registry when
  * the managed-root glob scan cannot fully account for it. Idempotent: the
  * marker is keyed by a hash of the resolved file, and its content is the
@@ -423,7 +439,7 @@ function recordCustomSessionFile(cwd: string, sessionFile: string, scope: Custom
 	if (scope?.remoteStorage) return;
 	try {
 		const resolvedSessionFile = path.resolve(cwd, sessionFile);
-		if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) return;
+		if (isFoundByManagedScan(resolvedSessionFile)) return;
 		writeIfChangedSync(path.join(getCustomSessionFilesDir(), hashPath(resolvedSessionFile)), resolvedSessionFile);
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });

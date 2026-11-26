@@ -1,5 +1,5 @@
 import { renderCallChain } from "../run-code";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 
 /** One allowlisted method invocation in a computer call chain. */
 export interface ComputerCallStep {
@@ -61,7 +61,8 @@ export const DISPLAY_METHODS: MethodPolicies = {
 /** Helpers callable on a window handle resolved through `desktop.window(id)`. */
 export const WINDOW_METHODS: MethodPolicies = {
 	observe: "read",
-	"menu.items": "read",
+	// Reading a macOS menu makes its window key first.
+	"menu.items": "exec",
 	"menu.select": "exec",
 	bringToCurrentSpace: "exec",
 	holdKeys: "exec",
@@ -85,11 +86,13 @@ export const WINDOW_METHODS: MethodPolicies = {
 export const ELEMENT_METHODS: MethodPolicies = {
 	value: "read",
 	setValue: "exec",
+	selectText: "exec",
 	bounds: "read",
 	attributes: "read",
 	actions: "read",
 	perform: "exec",
 	press: "exec",
+	type: "exec",
 	click: "exec",
 	doubleClick: "exec",
 	focus: "exec",
@@ -151,5 +154,17 @@ export function renderComputerCall(chain: readonly ComputerCallStep[]): string {
 	if (chain.length === 1) return `return await desktop.${renderCallChain([root])};`;
 	// `desktop.ref(id)` returns a thenable handle whose element methods check their arguments before the lookup.
 	if (root.method === "ref") return `return await desktop.${renderCallChain(chain)};`;
+	const step = chain[1]!;
+	const id = root.args[0];
+	if (
+		root.method === "window" &&
+		root.args.length === 1 &&
+		(typeof id === "string" || typeof id === "number") &&
+		["ax", "find", "menu.items", "menu.select"].includes(step.method)
+	) {
+		// A retained handle's id is already exact. Native resolves it for this operation;
+		// rediscovering it through the visible list loses minimized windows.
+		return `return await desktop.${renderCallChain([{ method: "windowAccess", args: [String(id)] }, step])};`;
+	}
 	return `return await (await desktop.${renderCallChain([root])}).${renderCallChain([chain[1]!])};`;
 }

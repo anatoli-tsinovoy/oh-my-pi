@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { getSettingsForTab } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import { getSettingsForTab } from "@oh-my-pi/pi-coding-agent/config/settings-defs";
 import { createSettingsHost } from "@oh-my-pi/pi-coding-agent/config/settings-ui";
 import { autosaveApprovedPlan, resolvePlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
@@ -158,17 +158,24 @@ describe("plan-yolo approval autosave", () => {
 			configuredThinkingLevel: () => undefined,
 			restoreThinkingLevel: () => {},
 			resolveDefaultPrewalk: () => undefined,
+			resolveAutoPrewalkTarget: () => undefined,
+			resolveAutoPrewalkPlanner: () => "unused",
+			prepareAutoPrewalkPlanner: async () => "unused",
+			classifyAutoPrewalk: async () => undefined,
 			emitNotice: (level, message, source) => {
 				notices.push({ level, message, source });
 			},
 			setModelTemporary: async (...args: unknown[]) => {
 				modelTemporaryCalls.push(args);
+				return true;
 			},
+			setThinkingLevel: () => {},
 			setActiveToolsByName: async () => {},
 			restoreNonMCPToolPresentation: async () => {},
+			getAllToolNames: () => [],
 			getActiveToolNames: () => [],
 			getEnabledToolNames: () => [],
-			getMountedXdevToolNames: () => [],
+			getMountedToolCommandNames: () => [],
 			hasBuiltInTool: () => false,
 			getPlanModeState: () => planModeState,
 			setPlanModeState: state => {
@@ -232,5 +239,20 @@ describe("plan-yolo approval autosave", () => {
 			message: expect.stringContaining("Plan autosave failed"),
 			source: "plan-yolo",
 		});
+	});
+
+	it("leaves an extension-shadowed write out of the plan-yolo tool set (#14030)", async () => {
+		const cwd = makeCwd();
+		const t = setupPlanYolo(cwd, path.join(cwd, "artifacts"), Settings.isolated({}));
+		const applied: string[][] = [];
+		t.host.getEnabledToolNames = () => ["read", "write"];
+		t.host.setActiveToolsByName = async names => {
+			applied.push(names);
+		};
+		const coordinator = new PrewalkCoordinator(t.host, { planYolo: { target } satisfies PlanYolo });
+
+		await coordinator.armPlanYoloIfNeeded();
+
+		expect(applied).toEqual([["read"]]);
 	});
 });

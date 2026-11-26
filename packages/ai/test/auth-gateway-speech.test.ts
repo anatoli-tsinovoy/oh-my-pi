@@ -96,6 +96,7 @@ describe("auth-gateway speech", () => {
 				input: "Hello from xAI",
 				voice: "ara",
 				response_format: "wav",
+				speed: 1.2,
 			}),
 		});
 
@@ -109,6 +110,8 @@ describe("auth-gateway speech", () => {
 				body: {
 					text: "Hello from xAI",
 					voice_id: "ara",
+					language: "auto",
+					speed: 1.2,
 					output_format: { codec: "wav", sample_rate: 24_000 },
 				},
 			},
@@ -125,6 +128,42 @@ describe("auth-gateway speech", () => {
 		expect(response.status).toBe(400);
 		expect(await response.json()).toMatchObject({
 			error: { code: 400, type: "invalid_request_error" },
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	it("answers 400 when the xAI adapter rejects a schema-valid codec", async () => {
+		const response = await fetch(`${gateway.url}/v1/audio/speech`, {
+			method: "POST",
+			headers: { Authorization: "Bearer gateway-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ model: xaiSpeech.id, input: "No FLAC", response_format: "flac" }),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			error: {
+				code: 400,
+				type: "invalid_request_error",
+				message: "xai-tts does not support flac output; use mp3, wav or pcm",
+			},
+		});
+		expect(calls).toHaveLength(0);
+	});
+
+	it("answers 400 for xAI input past the adapter character limit", async () => {
+		const response = await fetch(`${gateway.url}/v1/audio/speech`, {
+			method: "POST",
+			headers: { Authorization: "Bearer gateway-token", "Content-Type": "application/json" },
+			body: JSON.stringify({ model: xaiSpeech.id, input: "a".repeat(60_001) }),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			error: {
+				code: 400,
+				type: "invalid_request_error",
+				message: "xai-tts input exceeds the 60000-character limit",
+			},
 		});
 		expect(calls).toHaveLength(0);
 	});

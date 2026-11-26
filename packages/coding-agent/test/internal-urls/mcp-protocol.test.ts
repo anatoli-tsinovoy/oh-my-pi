@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,11 +6,14 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadSkillsFromDir } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
+import { readMcpResource } from "@oh-my-pi/pi-coding-agent/internal-urls/mcp-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 import { withTimeout } from "@oh-my-pi/pi-utils";
 
 function createMockManager(opts: {
@@ -402,27 +405,56 @@ describe("McpProtocolHandler", () => {
 		await expect(router.resolve("mcp://test://empty")).rejects.toThrow("null-server");
 	});
 
-	it("formats binary content with mime type and base64 length", async () => {
-		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
-		resources.set("bin-server", {
-			resources: [{ uri: "test://image", name: "image" }],
-			templates: [],
-		});
-		const blobData = "iVBORw0KGgo=";
-		const manager = createMockManager({
-			servers: ["bin-server"],
-			resources,
-			readResult: {
-				contents: [{ uri: "test://image", mimeType: "image/png", blob: blobData }],
-			},
-		});
-		MCPManager.setInstance(manager);
-		const router = InternalUrlRouter.instance();
+	describe("binary resources", () => {
+		/** A 1×1 PNG. */
+		const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+		const serveBlob = (uri: string, blob: string, mimeType: string) => {
+			const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+			resources.set("bin-server", { resources: [{ uri, name: "blob" }], templates: [] });
+			MCPManager.setInstance(
+				createMockManager({
+					servers: ["bin-server"],
+					resources,
+					readResult: { contents: [{ uri, mimeType, blob }] },
+				}),
+			);
+		};
 
-		const resource = await router.resolve("mcp://test://image");
-		expect(resource.content).toContain("[Binary content:");
-		expect(resource.content).toContain("image/png");
-		expect(resource.content).toContain(`base64 length ${blobData.length}`);
+		it("resolves a lone blob to its bytes and reported type", async () => {
+			serveBlob("test://image", PNG, "image/png");
+			const resource = await InternalUrlRouter.instance().resolve("mcp://test://image");
+			expect(resource.content).toEqual(Buffer.from(PNG, "base64"));
+			expect(resource.contentType).toBe("image/png");
+		});
+
+		it("serves the bytes verbatim to the bash URL filesystem, native or mcp://-wrapped", async () => {
+			serveBlob("test://image", PNG, "image/png");
+			const filesystem = new InternalUrlFilesystem({ context: { cwd: os.tmpdir() }, tier: "read" });
+			for (const url of ["test://image", "mcp://test://image"]) {
+				expect(Buffer.from(await filesystem.readPrefix(url, 1 << 20))).toEqual(Buffer.from(PNG, "base64"));
+			}
+		});
+
+		it("reads an image blob as an image, like an image file", async () => {
+			serveBlob("test://image", PNG, "image/png");
+			const result = await new ReadTool(createToolSession()).execute("read-blob-image", {
+				path: "mcp://test://image",
+			});
+			expect(result.content.some(block => block.type === "image")).toBe(true);
+		});
+
+		it("reads an unparseable blob as a binary file", async () => {
+			serveBlob(
+				"test://bytes",
+				Buffer.from([0, 1, 2, 0xff, 0, 0x7f, 0, 3]).toString("base64"),
+				"application/octet-stream",
+			);
+			const result = await new ReadTool(createToolSession()).execute("read-blob-binary", {
+				path: "mcp://test://bytes",
+			});
+			const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
+			expect(text).toContain("Cannot read binary file 'mcp://test://bytes'");
+		});
 	});
 
 	it("joins mixed text and binary content with --- separator", async () => {
@@ -590,6 +622,26 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 		expect(text).not.toContain("L4");
 	});
 
+	it("reads an unloaded connected catalog despite another server's stalled connection", async () => {
+		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
+		MCPManager.setInstance(
+			createMockManager({
+				servers: ["figma"],
+				resources,
+				ensureResources: async name => {
+					resources.set(name, { resources: [{ uri: skillUri, name: "figma-use" }], templates: [] });
+				},
+				waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+				readResult: { contents: [{ uri: skillUri, text: mcpText }] },
+			}),
+		);
+
+		const reading = InternalUrlRouter.instance().resolve(skillUri, { skills: [] });
+		expect((await withTimeout(reading, 2_000, "connected catalog was blocked by another server")).content).toBe(
+			mcpText,
+		);
+	});
+
 	it("requires explicit MCP routing for skill URI templates", async () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("figma", {
@@ -716,6 +768,40 @@ describe("skill:// falls back to an MCP resource with the same URI", () => {
 			await expect(withTimeout(reading, 2_000, "read ignored cancellation")).rejects.toMatchObject({
 				name: "AbortError",
 			});
+		}
+	});
+
+	it("gives up on a server that never settles once the wait budget is spent, without an abort", async () => {
+		const manager = createMockManager({
+			servers: [],
+			// A hung handshake or reconnect ladder: nothing ever settles and no signal is passed.
+			waitForPendingConnections: () => Promise.withResolvers<void>().promise,
+		});
+		const reading = readMcpResource(manager, parseInternalUrl("skill://nope"), { exact: true, waitMs: 20 });
+		expect(await withTimeout(reading, 2_000, "bounded wait never ended")).toBeUndefined();
+	});
+
+	it("gives up on a deferred MCP startup that never returns once the wait budget is spent", async () => {
+		vi.useFakeTimers();
+		try {
+			const started = Promise.withResolvers<void>();
+			// `omp read` with a zero startup window: the loader awaits a handshake that never settles.
+			MCPManager.setDeferredInstance(() => {
+				started.resolve();
+				return Promise.withResolvers<MCPManager>().promise;
+			});
+			// Settle into a value: Bun's `expect(...).rejects` blocks until settlement, before timers advance.
+			const outcome = InternalUrlRouter.instance()
+				.resolve("skill://nope", { skills: [] })
+				.then(
+					() => "resolved",
+					(error: unknown) => (error instanceof Error ? error.message : String(error)),
+				);
+			await started.promise;
+			vi.advanceTimersByTime(5_000);
+			expect(await outcome).toContain("Unknown skill: nope");
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 

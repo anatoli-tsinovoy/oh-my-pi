@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { seedModels } from "@oh-my-pi/pi-catalog/compat/providers";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { modelKind } from "@oh-my-pi/pi-catalog/types";
 
 const CHAT_PAYLOAD = {
 	data: [
@@ -55,6 +61,33 @@ const DECISIONS_PAYLOAD = {
 		{
 			id: "~typesafe/jev-latest",
 			name: "TypeSafe: Jev Latest",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-1.13",
+			name: "TypeSafe: Jev 1.13",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-1.14",
+			name: "TypeSafe: Jev 1.14",
+			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
+			context_length: 32000,
+			pricing: { prompt: "0.000000042", completion: "0" },
+			supported_parameters: [],
+			top_provider: { context_length: 32000, max_completion_tokens: 28800 },
+		},
+		{
+			id: "typesafe/jev-unverified",
+			name: "TypeSafe: Jev Unverified",
 			architecture: { modality: "text->decisions", input_modalities: ["text"], output_modalities: ["decisions"] },
 			context_length: 32000,
 			pricing: { prompt: "0.000000042", completion: "0" },
@@ -148,6 +181,24 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 				maxTokens: 28800,
 			}),
 		);
+		const bundledJev = seedModels("openrouter").find(model => model.id === "~typesafe/jev-latest");
+		if (!bundledJev) throw new Error("OpenRouter bundled Jev alias is missing");
+		expect(bundledJev.input).toEqual(["text"]);
+		expect(buildModel(bundledJev).input).toEqual(["text", "image"]);
+
+		const discoveredJev = models?.filter(model =>
+			["typesafe/jev-1.13", "typesafe/jev-1.14", "typesafe/jev-unverified"].includes(model.id),
+		);
+		expect(discoveredJev?.map(model => [model.id, model.input])).toEqual([
+			["typesafe/jev-1.13", ["text"]],
+			["typesafe/jev-1.14", ["text"]],
+			["typesafe/jev-unverified", ["text"]],
+		]);
+		expect(discoveredJev?.map(model => [model.id, buildModel(model).input])).toEqual([
+			["typesafe/jev-1.13", ["text", "image"]],
+			["typesafe/jev-1.14", ["text", "image"]],
+			["typesafe/jev-unverified", ["text"]],
+		]);
 		expect(models?.find(model => model.id === "cohere/rerank-v3.5")).toMatchObject({
 			api: "openrouter-rerank",
 			kind: "rerank",
@@ -236,10 +287,14 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		const result = await resolveProviderModels(
 			{
 				...openrouterModelManagerOptions({
-					fetch: async input =>
-						String(input).endsWith("/models?output_modalities=decisions")
-							? Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] })
-							: new Response(null, { status: 404 }),
+					fetch: async input => {
+						const url = String(input);
+						if (url.endsWith("/models?output_modalities=decisions")) {
+							return Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] });
+						}
+						if (url === "https://openrouter.ai/api/v1/models") return Response.json(CHAT_PAYLOAD);
+						return new Response(null, { status: 404 });
+					},
 				}),
 				staticModels: [],
 				cacheDbPath: ":memory:",
@@ -253,5 +308,83 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			contextWindow: null,
 			maxTokens: null,
 		});
+	});
+
+	it("limits chat models to the keyed roster, dropping bundled rows guardrails hide", async () => {
+		// A key whose workspace guardrails allow-list one model gets a one-row `/models`.
+		const result = await resolveProviderModels(
+			{
+				...openrouterModelManagerOptions({
+					apiKey: "sk-or-test",
+					fetch: async input =>
+						String(input) === "https://openrouter.ai/api/v1/models"
+							? Response.json({ data: [CHAT_PAYLOAD.data[0]] })
+							: new Response(null, { status: 404 }),
+				}),
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+
+		expect(result.models.filter(model => modelKind(model) === "chat").map(model => model.id)).toEqual([
+			"openrouter/auto",
+		]);
+	});
+
+	it("keeps the bundled chat roster when only the chat endpoint fails", async () => {
+		const result = await resolveProviderModels(
+			{
+				...openrouterModelManagerOptions({
+					fetch: async input => {
+						const url = String(input);
+						if (url.endsWith("/images/models")) return Response.json(IMAGE_PAYLOAD);
+						if (url === "https://openrouter.ai/api/v1/models") throw new Error("chat endpoint unavailable");
+						return new Response(null, { status: 404 });
+					},
+				}),
+				cacheDbPath: ":memory:",
+			},
+			"online",
+		);
+
+		expect(result.models.some(model => model.id === "openai/gpt-5.5" && model.api === "openrouter")).toBe(true);
+	});
+
+	it("never serves one key's cached roster to another key", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openrouter-key-scope-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		const chatIds = async (apiKey: string | undefined, roster: string[]) => {
+			const result = await resolveProviderModels(
+				{
+					...openrouterModelManagerOptions({
+						apiKey,
+						fetch: async input =>
+							String(input) === "https://openrouter.ai/api/v1/models"
+								? Response.json({
+										data: roster.map(id => ({ id, name: id, supported_parameters: ["tools"] })),
+									})
+								: new Response(null, { status: 404 }),
+					}),
+					staticModels: [],
+					cacheDbPath,
+				},
+				"online-if-uncached",
+			);
+			return result.models
+				.filter(model => modelKind(model) === "chat")
+				.map(model => model.id)
+				.sort();
+		};
+		try {
+			// Keyless (public roster), then a guardrailed key.
+			expect(await chatIds(undefined, ["a/one", "b/two", "c/three"])).toEqual(["a/one", "b/two", "c/three"]);
+			expect(await chatIds("sk-or-narrow", ["a/one"])).toEqual(["a/one"]);
+			// Narrow key, then a wider key.
+			expect(await chatIds("sk-or-wide", ["a/one", "b/two"])).toEqual(["a/one", "b/two"]);
+			// Each key still reads its own fresh cache row.
+			expect(await chatIds("sk-or-narrow", ["a/one", "b/two", "c/three"])).toEqual(["a/one"]);
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
 	});
 });

@@ -154,7 +154,7 @@ async function captureOpenAIResponseHeaders(
 		body: null as Record<string, unknown> | null,
 	};
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-		captured.sessionId = getHeader(init?.headers, "session_id");
+		captured.sessionId = getHeader(init?.headers, "session-id");
 		captured.clientRequestId = getHeader(init?.headers, "x-client-request-id");
 		captured.headers = new Headers(init?.headers);
 		captured.body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
@@ -219,7 +219,7 @@ async function captureDispatchedOpenAIResponseHeaders(
 		body: null as Record<string, unknown> | null,
 	};
 	const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
-		captured.sessionId = getHeader(init?.headers, "session_id");
+		captured.sessionId = getHeader(init?.headers, "session-id");
 		captured.clientRequestId = getHeader(init?.headers, "x-client-request-id");
 		captured.headers = new Headers(init?.headers);
 		captured.body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : null;
@@ -383,6 +383,30 @@ describe("OpenAI Responses explicit prompt cache policy", () => {
 
 		expect(params.prompt_cache_options).toEqual({ mode: "implicit", ttl: "30m" });
 		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("maps long retention to the 12h lifetime instead of the legacy 24h field", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long" },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "implicit", ttl: "12h" });
+		expect(params.prompt_cache_retention).toBeUndefined();
+		expect(JSON.stringify(params.input)).not.toContain("prompt_cache_breakpoint");
+	});
+
+	it("lets an explicit policy ttl override long retention", () => {
+		const params = buildParams(
+			openAI56ResponsesModel,
+			historicalContext,
+			{ sessionId: "cache-key", cacheRetention: "long", promptCache: { mode: "explicit", ttl: "30m" } },
+			undefined,
+		).params;
+
+		expect(params.prompt_cache_options).toEqual({ mode: "explicit", ttl: "30m" });
 	});
 
 	it("marks the latest eligible stable history block", () => {

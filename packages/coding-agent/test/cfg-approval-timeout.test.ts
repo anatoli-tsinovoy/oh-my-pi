@@ -6,8 +6,11 @@ import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CfgProtocolHandler, setCfgApprovalHost } from "@oh-my-pi/pi-coding-agent/internal-urls/cfg-protocol";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import { type MCPAuthHandler, MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { __resetAutoQaConsentForTests, resolveAutoQaConsent } from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
 import {
 	cfgMarketplaceAutoUpdate,
 	cfgStartupChangelogMode,
@@ -17,13 +20,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { closeSessionIndex } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../src/ui/theme/service";
 import { getProjectDir, setProjectDir, Snowflake } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { createModeTerminal } from "./helpers/mode-terminal";
 import { createTestSession, type TestSessionContext } from "./utilities";
 
 describe("cfg:// approval prompt wiring", () => {
@@ -59,12 +61,15 @@ describe("cfg:// approval prompt wiring", () => {
 		setProjectDir(originalProject);
 		AgentStorage.close();
 		HistoryStorage.close();
-		resetSessionIndexForTests();
+		closeSessionIndex();
 		closeModelCache();
 		await fs.rm(tmp, { recursive: true, force: true });
 	});
 
-	async function startMode(askTimeout: number | undefined): Promise<Array<number | undefined>> {
+	async function startMode(
+		askTimeout: number | undefined,
+		mcpManager?: MCPManager,
+	): Promise<Array<number | undefined>> {
 		testSession = await createTestSession(
 			askTimeout === undefined ? {} : { settingsOverrides: { "ask.timeout": askTimeout } },
 		);
@@ -78,12 +83,10 @@ describe("cfg:// approval prompt wiring", () => {
 			"test",
 			undefined,
 			undefined,
+			mcpManager,
 			undefined,
-			undefined,
-			undefined,
-			new Composer({ terminal: new VirtualTerminal(200, 60) }),
+			createModeTerminal({ columns: 200, rows: 60 }).frame,
 		);
-		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 		spyOn(mode, "showHookConfirm").mockResolvedValue(true);
 		const seen: Array<number | undefined> = [];
 		spyOn(ExtensionUiController.prototype, "showCollabAwareSelector").mockImplementation(
@@ -171,6 +174,23 @@ describe("cfg:// approval prompt wiring", () => {
 		// Only the first write ever presented: the queued one denied on the
 		// already-aborted signal without prompting.
 		expect(seen).toEqual([undefined]);
+	}, 60_000);
+
+	it("runs the cfg://, auto-QA and MCP sign-in prompts as waits for the user", async () => {
+		const manager = new MCPManager(tmp, async () => ({ configs: {}, sources: {}, exaApiKeys: [] }));
+		const setAuthHandler = spyOn(manager, "setAuthHandler");
+		await startMode(undefined, manager);
+		const authHandler: MCPAuthHandler | undefined = setAuthHandler.mock.calls[0]?.[0];
+		const waits = spyOn(testSession!.session, "waitForUser");
+		spyOn(MCPCommandController.prototype, "handleMCPAuthChallenge").mockResolvedValue(undefined);
+
+		await driveWrite();
+		expect(waits).toHaveBeenCalledTimes(1);
+		await resolveAutoQaConsent(undefined);
+		expect(waits).toHaveBeenCalledTimes(2);
+		await authHandler!("server", { wwwAuthenticate: [] });
+		expect(waits).toHaveBeenCalledTimes(3);
+		__resetAutoQaConsentForTests();
 	}, 60_000);
 
 	it("denies a pending approval when the calling turn aborts", async () => {

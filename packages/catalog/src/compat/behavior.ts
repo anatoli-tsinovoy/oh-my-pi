@@ -3,7 +3,7 @@
  * (`rules/runtime/behavior.kdl`): provider/model heuristics that run before
  * or outside exact bundled-model lookup — responses routing, API routing,
  * quota tiers, plan requirements, model limits, roster and discovery-mode
- * exclusions, hosted defaults, and pricing peers.
+ * exclusions, hosted defaults, pricing peers, and per-role default models.
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
@@ -103,14 +103,17 @@ export function quotaTierFor(provider: string, model: string): string | undefine
 	return rule.defaultTier;
 }
 
-/** UTC offset for a provider's timezone-naive absolute retry-reset timestamps. */
-export function retryResetTimezoneOffsetFor(provider: string): string | undefined {
-	return behavior.retryResetTimezones.find(rule => rule.provider === provider)?.offset;
-}
-
-/** Whether a provider has catalog-authored model quota scopes. */
-export function hasQuotaTierPolicy(provider: string): boolean {
-	return behavior.quotaTiers.some(rule => rule.provider === provider);
+/** UTC offset for a provider's timezone-naive reset stamps, including its declared upstream endpoint. */
+export function retryResetTimezoneOffsetFor(provider: string, baseUrl?: string): string | undefined {
+	const direct = behavior.retryResetTimezones.find(rule => rule.provider === provider);
+	if (direct) return direct.offset;
+	if (baseUrl === undefined) return undefined;
+	// Custom providers keep the configured spelling; the completions transport
+	// strips trailing slashes before issuing the request, so match the same way.
+	const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+	return behavior.retryResetTimezones.find(
+		rule => rule.baseUrl !== undefined && rule.baseUrl.replace(/\/+$/, "") === normalizedBaseUrl,
+	)?.offset;
 }
 
 /** The provider-default wire model for a model-less hosted operation. */
@@ -204,6 +207,11 @@ export function isBareIdReferenceProvider(provider: string): boolean {
 	return !behavior.referenceIsolatedProviders.includes(provider);
 }
 
+/** Whether a host's prefix cache should use append-only conversation context by default. */
+export function prefersAppendOnlyContext(provider: string): boolean {
+	return behavior.appendOnlyContextProviders.includes(provider);
+}
+
 /** The declared subscription tier required to use a provider model id, if any. */
 export function planRequirementFor(provider: string, model: string): string | undefined {
 	const rule = behavior.planRequirements.find(candidate => candidate.provider === provider);
@@ -224,4 +232,12 @@ export function pricingPeerFor(
 	if (!rule) return undefined;
 	const alias = rule.aliases.find(candidate => candidate.model === model);
 	return { peers: rule.peers, peerId: alias?.peerId ?? model };
+}
+
+/**
+ * Built-in default model selector chains per agent role (`smol`, `slow`,
+ * `image`, …), most preferred first, in declaration order.
+ */
+export function roleDefaultModels(): Readonly<Record<string, readonly string[]>> {
+	return behavior.roleDefaults;
 }

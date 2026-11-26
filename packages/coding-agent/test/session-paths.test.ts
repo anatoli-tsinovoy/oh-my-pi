@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,7 +10,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { getTerminalId } from "@oh-my-pi/pi-coding-agent/utils/ttyid";
 import {
 	getAgentDir,
 	getCustomSessionFilesDir,
@@ -19,6 +19,7 @@ import {
 	hashPath,
 	setAgentDir,
 } from "@oh-my-pi/pi-utils";
+import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 
 const cleanup: string[] = [];
 
@@ -41,6 +42,75 @@ afterEach(() => {
 });
 
 describe("legacy session directory migration", () => {
+	test.each([false, true])(
+		"recovers hashed home-scoped sessions when the temp root is inside home (collision: %s)",
+		withCollision => {
+			const root = makeTempDir("omp-shadowed-home-");
+			const home = path.join(root, "home");
+			const tempRoot = path.join(home, "tmp");
+			const cwd = path.join(tempRoot, "project");
+			const sessionsRoot = path.join(root, "sessions");
+			fs.mkdirSync(cwd, { recursive: true });
+			const canonical = resolveEquivalentPath(path.resolve(cwd));
+			const digest = Bun.SHA256.hash(canonical.replaceAll("\\", "/"), "hex");
+			const oldDir = path.join(sessionsRoot, `home-project-${digest}`);
+			const canonicalDir = path.join(sessionsRoot, "-tmp-project");
+			const transcript = Buffer.from('{"type":"session","id":"saved","note":"你好"}\r\n');
+			fs.mkdirSync(oldDir, { recursive: true });
+			fs.writeFileSync(path.join(oldDir, "saved.jsonl"), transcript);
+			if (withCollision) {
+				fs.mkdirSync(canonicalDir);
+				fs.writeFileSync(path.join(oldDir, "active.jsonl"), "legacy\n");
+				fs.writeFileSync(path.join(canonicalDir, "active.jsonl"), "canonical\n");
+			}
+			const homeMock = vi.spyOn(os, "homedir").mockReturnValue(home);
+			try {
+				const tempMock = vi.spyOn(os, "tmpdir").mockReturnValue(tempRoot);
+				try {
+					const destination = computeDefaultSessionDir(cwd, new FileSessionStorage(), sessionsRoot);
+					expect(destination).toBe(canonicalDir);
+					expect(fs.readFileSync(path.join(destination, "saved.jsonl"))).toEqual(transcript);
+					if (withCollision) {
+						expect(fs.readFileSync(path.join(oldDir, "active.jsonl"), "utf8")).toBe("legacy\n");
+						expect(fs.readFileSync(path.join(destination, "active.jsonl"), "utf8")).toBe("canonical\n");
+					} else {
+						expect(fs.existsSync(oldDir)).toBe(false);
+					}
+				} finally {
+					tempMock.mockRestore();
+				}
+			} finally {
+				homeMock.mockRestore();
+			}
+		},
+	);
+
+	test("keeps normal home and temp session directory names", () => {
+		const root = makeTempDir("omp-session-scopes-");
+		const home = path.join(root, "home");
+		const tempRoot = path.join(root, "tmp");
+		const sessionsRoot = path.join(root, "sessions");
+		const homeCwd = path.join(home, "project");
+		const tempCwd = path.join(tempRoot, "project");
+		fs.mkdirSync(homeCwd, { recursive: true });
+		fs.mkdirSync(tempCwd, { recursive: true });
+		const homeMock = vi.spyOn(os, "homedir").mockReturnValue(home);
+		try {
+			const tempMock = vi.spyOn(os, "tmpdir").mockReturnValue(tempRoot);
+			try {
+				const storage = new FileSessionStorage();
+				expect(computeDefaultSessionDir(homeCwd, storage, sessionsRoot)).toBe(path.join(sessionsRoot, "-project"));
+				expect(computeDefaultSessionDir(tempCwd, storage, sessionsRoot)).toBe(
+					path.join(sessionsRoot, "-tmp-project"),
+				);
+			} finally {
+				tempMock.mockRestore();
+			}
+		} finally {
+			homeMock.mockRestore();
+		}
+	});
+
 	test("keeps a colliding live legacy session reachable through its path", () => {
 		const sessionsRoot = makeTempDir("omp-session-root-");
 		const cwd = makeTempDir("omp-session-cwd-");
@@ -117,6 +187,15 @@ describe("custom session-file registry", () => {
 			writeTerminalBreadcrumb(cwd, managedFile);
 			const managedMarker = path.join(getCustomSessionFilesDir(agentDir), hashPath(managedFile));
 			expect(fs.existsSync(managedMarker)).toBe(false);
+
+			// The root scan skips dot entries, so a transcript under a dot-leading
+			// directory of the sessions root is registered or the collector never sees it.
+			for (const hidden of ["..hidden", ".hidden"]) {
+				const hiddenFile = path.join(getSessionsDir(agentDir), hidden, "chat.jsonl");
+				writeTerminalBreadcrumb(cwd, hiddenFile);
+				const hiddenMarker = path.join(getCustomSessionFilesDir(agentDir), hashPath(hiddenFile));
+				expect(fs.readFileSync(hiddenMarker, "utf8")).toBe(hiddenFile);
+			}
 		} finally {
 			setAgentDir(originalAgentDir);
 		}
@@ -169,6 +248,23 @@ describe("custom session-file registry", () => {
 			expect(fs.existsSync(registry) ? fs.readdirSync(registry) : []).toEqual([]);
 		} finally {
 			setAgentDir(originalAgentDir);
+		}
+	});
+});
+
+describe("relative session directory", () => {
+	test("stores the session file under an absolute path", async () => {
+		const cwd = makeTempDir("omp-cwd-");
+		// `--session-dir ./sess` arrives relative to the process cwd.
+		const relativeDir = path.relative(process.cwd(), path.join(cwd, "sess"));
+		const manager = SessionManager.create(cwd, relativeDir, new MemorySessionStorage());
+		try {
+			expect(manager.getSessionDir()).toBe(path.join(cwd, "sess"));
+			const file = manager.getSessionFile();
+			expect(file && path.isAbsolute(file)).toBe(true);
+			expect(path.dirname(file!)).toBe(path.join(cwd, "sess"));
+		} finally {
+			await manager.close();
 		}
 	});
 });

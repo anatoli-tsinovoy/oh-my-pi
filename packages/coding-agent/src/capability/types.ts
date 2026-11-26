@@ -106,14 +106,18 @@ export interface LoadOptions<T = unknown> {
 	providers?: string[];
 	/** Exclude these providers (by ID). Default: none */
 	excludeProviders?: string[];
+	/** Read providers regardless of their switch; settings discovery resolves switches from the discovered items. */
+	includeDisabledProviders?: boolean;
 	/** Custom cwd. Default: getProjectDir() */
 	cwd?: string;
 	/** Native user config dir, forwarded to {@link LoadContext.agentDir}. Default: getAgentDir() */
 	agentDir?: string;
 	/** Include items even if they fail validation. Default: false */
 	includeInvalid?: boolean;
-	/** Include disabled items without letting them shadow enabled items. Default: false */
+	/** Include item-disabled and opted-out sources for inspection. Default: false. */
 	includeDisabled?: boolean;
+	/** Classify listed sources that would be inactive at runtime so they cannot shadow active rows. */
+	isSourceDisabled?: (source: SourceMeta) => boolean;
 	/** Explicit disabled extension IDs to apply instead of settings. */
 	disabledExtensions?: string[];
 	/**
@@ -171,6 +175,12 @@ export interface SourceMeta {
 	 * put the version, not the plugin name, in the path segment owning `skills/`.
 	 */
 	pluginName?: string;
+	/**
+	 * Filesystem-resolved plugin root supplying this item. Body read paths
+	 * substitute `${CLAUDE_PLUGIN_ROOT}` / `${OMP_PLUGIN_ROOT}` in Markdown
+	 * bodies with it, matching Claude Code's in-body resolution (#20165).
+	 */
+	pluginRoot?: string;
 }
 
 /**

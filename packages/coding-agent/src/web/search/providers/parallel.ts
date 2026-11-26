@@ -13,7 +13,7 @@ import {
 	parseParallelSearchPayload,
 } from "../../parallel";
 import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
-import { clampNumResults } from "../utils";
+import { clampNumResults, recencyAfterDate } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, siteHosts, toSearchSources, withHardTimeout } from "./utils";
@@ -51,13 +51,6 @@ function toMcpToolResult(result: unknown): ParallelMcpToolResult | undefined {
 	return { structuredContent: result.structuredContent, content, isError: result.isError === true };
 }
 
-const RECENCY_DAYS: Record<NonNullable<SearchParams["recency"]>, number> = {
-	day: 1,
-	week: 7,
-	month: 30,
-	year: 365,
-};
-
 /**
  * Map parsed `site:`/`-site:`/`after:` directives and the relative recency
  * option onto Parallel's `source_policy`. An explicit `after:` bound wins.
@@ -72,12 +65,11 @@ function toSourcePolicy(parsed: StructuredQuery, recency?: SearchParams["recency
 	if (include.length) policy.include_domains = include;
 	else if (exclude.length) policy.exclude_domains = exclude;
 	if (parsed.after) policy.after_date = parsed.after;
-	else if (recency) {
-		policy.after_date = new Date(Date.now() - RECENCY_DAYS[recency] * 86_400_000).toISOString().slice(0, 10);
-	}
+	else if (recency) policy.after_date = recencyAfterDate(recency);
 	return policy.include_domains || policy.exclude_domains || policy.after_date ? policy : undefined;
 }
 
+/** Anonymous public MCP search. Sends only the query: no session or model identifiers. */
 async function searchWithPublicMcp(
 	objective: string,
 	queries: string[],
@@ -85,9 +77,7 @@ async function searchWithPublicMcp(
 		signal?: AbortSignal;
 		timeoutMs?: number;
 		fetch?: FetchImpl;
-		modelName?: string;
 	},
-	sessionId?: string,
 ): Promise<ParallelSearchResult> {
 	const mcpResponse = await callMCP(
 		PARALLEL_MCP_URL,
@@ -97,8 +87,6 @@ async function searchWithPublicMcp(
 			arguments: {
 				objective,
 				search_queries: queries,
-				...(sessionId && sessionId.length <= 100 && { session_id: sessionId }),
-				...(params.modelName && params.modelName.length <= 100 && { model_name: params.modelName }),
 			},
 		},
 		{
@@ -162,7 +150,6 @@ async function searchWithAuthStorage(
 		timeoutMs?: number;
 		fetch?: FetchImpl;
 		mcpQuery: string;
-		modelName?: string;
 	},
 	authStorage: AuthStorage,
 	sessionId?: string,
@@ -177,7 +164,7 @@ async function searchWithAuthStorage(
 				"Parallel credentials could not be resolved. Check your configured API key or credential helper.",
 			);
 		}
-		return searchWithPublicMcp(objective, [params.mcpQuery], params, sessionId);
+		return searchWithPublicMcp(objective, [params.mcpQuery], params);
 	}
 
 	// Drive the (already-present) credential through the central force-refresh /
@@ -228,7 +215,6 @@ export async function searchParallel(
 		timeoutMs?: number;
 		fetch?: FetchImpl;
 		parsedQuery?: StructuredQuery;
-		modelName?: string;
 	},
 	authStorage: AuthStorage,
 	sessionId?: string,
@@ -251,7 +237,6 @@ export async function searchParallel(
 				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 				mcpQuery,
-				modelName: params.modelName,
 			},
 			authStorage,
 			sessionId,
@@ -284,6 +269,10 @@ export class ParallelProvider extends SearchProvider {
 		return true;
 	}
 
+	override isKeyless(authStorage: AuthStorage): boolean {
+		return authStorage.keys.source("parallel") === undefined;
+	}
+
 	search(params: SearchParams): Promise<SearchResponse> {
 		return searchParallel(
 			{
@@ -294,7 +283,6 @@ export class ParallelProvider extends SearchProvider {
 				timeoutMs: params.timeoutMs,
 				fetch: params.fetch,
 				parsedQuery: params.parsedQuery,
-				modelName: params.model.id,
 			},
 			params.authStorage,
 			params.sessionId,

@@ -5,20 +5,21 @@ import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import type { ModelRegistry } from "../config/model-registry";
-import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { deobfuscateSessionContext, obfuscateMessages } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { stripPendingSecretPlaceholderSuffix } from "../secrets/placeholder";
 import { normalizeModelContextImages } from "../utils/image-loading";
-import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
-import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
-import { blobExtensionForImageMimeType } from "@oh-my-pi/pi-tui/prompt/image-format";
-import { type CustomMessage, convertToLlm } from "./messages";
-import { IMAGE_ATTACHMENT_DESCRIPTION_TYPE } from "./queued-messages";
-import type { BuildSessionContextOptions, SessionContext } from "./session-context";
+import type { ImageDescriptions } from "../utils/image-vision-fallback";
+import { imageAttachmentSource } from "../utils/image-source";
+import { blobExtensionForImageMimeType } from "../utils/image-format";
+import { convertToLlm } from "./messages";
+import {
+	getReadableCompactionEntry,
+	type SessionContext,
+	type TranscriptSessionContextOptions,
+} from "./session-context";
 import type { SessionManager } from "./session-manager";
 
 import {
@@ -37,17 +38,19 @@ export interface SessionProviderBoundaryHost {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
-	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
-	sessionId(): string;
 	localProtocolOptions(): LocalProtocolOptions;
+	/** Input-image descriptions for models that cannot see images; side requests carrying history as text use them. */
+	imageDescriptions: ImageDescriptions | undefined;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
-	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;
+	convertToLlm(messages: AgentMessage[], model: Model | undefined): Message[] | Promise<Message[]>;
 	onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	/** Current secret obfuscator; swapped when `secrets.enabled` turns on mid-session. */
 	obfuscator(): SecretObfuscator | undefined;
+	/** Tool calls emitted by assistant turns of the current agent run. */
+	runToolCallIds(): ReadonlySet<string>;
 }
 
 /** Owns the transformations at the session/provider boundary. */
@@ -60,17 +63,13 @@ export class SessionProviderBoundary {
 
 	/**
 	 * Latest image attachments addressable by tools as `Image #N` or `attachment://N`: the newest
-	 * user/developer message with images, or `ask` result whose answers carry pasted images.
+	 * user/developer message with images.
 	 */
 	getImageAttachments(): { label: string; uri: string; image: ImageContent; sourcePath: string }[] {
 		for (let i = this.#host.agent.state.messages.length - 1; i >= 0; i--) {
 			const message = this.#host.agent.state.messages[i];
 			if (!message) continue;
-			const carriesUserImages =
-				message.role === "user" ||
-				message.role === "developer" ||
-				(message.role === "toolResult" && message.toolName === "ask");
-			if (!carriesUserImages || !Array.isArray(message.content)) continue;
+			if ((message.role !== "user" && message.role !== "developer") || !Array.isArray(message.content)) continue;
 			const images = message.content.filter((part): part is ImageContent => part.type === "image");
 			if (images.length === 0) continue;
 			return images.flatMap((image, index) => {
@@ -107,12 +106,29 @@ export class SessionProviderBoundary {
 		return [];
 	}
 
-	/** Builds the current deobfuscated context for agent display and replay. */
-	buildDisplaySessionContext(): SessionContext {
+	/**
+	 * Builds the current deobfuscated context for agent display and replay as `model` reads it: sized for its
+	 * frame budget, standing on the newest compaction it can replay (the active model unless a caller is about
+	 * to adopt another).
+	 */
+	buildDisplaySessionContext(model = this.#host.model()): SessionContext {
 		return deobfuscateSessionContext(
-			this.#host.sessionManager.buildSessionContext({ inFlightToolCallIds: this.#inFlightToolCallIds() }),
+			this.#host.sessionManager.buildSessionContext({
+				inFlightToolCallIds: this.#inFlightToolCallIds(),
+				maxFrameDataBytes: snapcompact.frameDataBytesBudget(model),
+				model,
+			}),
 			this.#host.obfuscator(),
 		);
+	}
+
+	/**
+	 * Whether `a` and `b` read the stored context from different compaction boundaries (one cannot replay a
+	 * provider-native compaction the other can), so the context built for one does not serve the other.
+	 */
+	readsOtherCompaction(a: Model | undefined, b: Model | undefined): boolean {
+		const branch = this.#host.sessionManager.getBranch();
+		return getReadableCompactionEntry(branch, a) !== getReadableCompactionEntry(branch, b);
 	}
 
 	/**
@@ -136,15 +152,20 @@ export class SessionProviderBoundary {
 		return undefined;
 	}
 
-	/** Builds the full display-only transcript context. */
-	buildTranscriptSessionContext(
-		options?: Pick<BuildSessionContextOptions, "collapseCompactedHistory" | "keepDanglingToolCalls">,
-	): SessionContext {
+	/**
+	 * Builds the full display-only transcript context. `keepInFlightToolCalls`
+	 * keeps unpaired calls only when the current agent run emitted them; calls
+	 * left unpaired by earlier runs (interrupted, host restarted) are stripped so
+	 * a mid-turn rebuild never revives them as active tool cards. This holds even
+	 * before the run's prompt (user, custom or developer message) is persisted.
+	 */
+	buildTranscriptSessionContext(options?: TranscriptSessionContextOptions): SessionContext {
+		const keepLive = options?.keepInFlightToolCalls === true && this.#host.agent.state.isStreaming;
 		return deobfuscateSessionContext(
 			this.#host.sessionManager.buildSessionContext({
 				transcript: true,
 				collapseCompactedHistory: options?.collapseCompactedHistory,
-				keepDanglingToolCalls: options?.keepDanglingToolCalls,
+				inFlightToolCallIds: keepLive ? this.#host.runToolCallIds() : undefined,
 			}),
 			this.#host.obfuscator(),
 		);
@@ -185,17 +206,47 @@ export class SessionProviderBoundary {
 		return stripPendingSecretPlaceholderSuffix(deobfuscated);
 	}
 
-	/** Converts side-request messages through the session's secret boundary. */
-	convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
-		const converted = convertToLlm(messages);
+	/**
+	 * Converts side-request messages through the session's secret boundary. With `withImageDescriptions`, each
+	 * image with a description {@link prepareImageDescriptions} made is replaced by it, before obfuscation so
+	 * secrets read off an image are redacted too.
+	 */
+	convertToLlmForSideRequest(
+		messages: AgentMessage[],
+		reader: Model,
+		options?: { withImageDescriptions: boolean },
+	): Message[] {
+		let converted = convertToLlm(messages, reader);
+		const descriptions = this.#host.imageDescriptions;
+		if (options?.withImageDescriptions && descriptions) {
+			converted = converted.map(message => descriptions.withDescriptions(message));
+		}
 		const obfuscator = this.#host.obfuscator();
 		return obfuscator ? obfuscateMessages(obfuscator, converted) : converted;
 	}
 
+	/**
+	 * The model to describe images for when `reader` gets history as text (summaries): `reader` when it cannot
+	 * see images, else the session's model when that cannot, since the history was written for it. Undefined
+	 * when both see images.
+	 */
+	imageDescriptionModel(reader: Model | undefined): Model | undefined {
+		return this.#host.imageDescriptions?.textOnlyModel(reader, this.#host.model());
+	}
+
+	/** Describe the images of `messages` for `model`, a model that cannot see them. */
+	async prepareImageDescriptions(messages: AgentMessage[], model: Model, signal?: AbortSignal): Promise<void> {
+		await this.#host.imageDescriptions?.prepare(convertToLlm(messages), model, signal);
+	}
+
 	/** Converts session messages using the configured pre-LLM pipeline. */
-	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]> {
+	async convertMessagesToLlm(
+		messages: AgentMessage[],
+		model: Model | undefined,
+		signal?: AbortSignal,
+	): Promise<Message[]> {
 		const transformedMessages = await this.#host.transformContext(messages, signal);
-		return await this.#host.convertToLlm(transformedMessages);
+		return await this.#host.convertToLlm(transformedMessages, model);
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */
@@ -280,46 +331,6 @@ export class SessionProviderBoundary {
 		return normalizeModelContextImages(images, { model: this.#host.model() });
 	}
 
-	/** Builds a hidden vision-model description for attachments sent to a text-only model. */
-	async buildImageDescriptionNotice(
-		normalizedImages: ImageContent[],
-		signal?: AbortSignal,
-	): Promise<CustomMessage | undefined> {
-		const model = this.#host.model();
-		if (!shouldDescribeImagesForTextModel(model, this.#host.settings)) return undefined;
-
-		let blocks: TextContent[];
-		try {
-			blocks = await describeAttachedImagesForTextModel(
-				normalizedImages,
-				{
-					activeModel: model,
-					modelRegistry: this.#host.modelRegistry,
-					settings: this.#host.settings,
-					localProtocolOptions: this.#host.localProtocolOptions(),
-					activeModelString: formatModelString(model),
-					telemetryConfig: this.#host.agent.telemetry,
-					sessionId: this.#host.sessionId(),
-				},
-				signal,
-			);
-		} catch (error) {
-			logger.warn("image attachment vision fallback failed; image left undescribed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return undefined;
-		}
-		if (blocks.length === 0) return undefined;
-		return {
-			role: "custom",
-			customType: IMAGE_ATTACHMENT_DESCRIPTION_TYPE,
-			content: blocks,
-			display: false,
-			attribution: "user",
-			timestamp: Date.now(),
-		};
-	}
-
 	/** Normalizes every image embedded in an agent message. */
 	async normalizeAgentMessageImages<T extends AgentMessage>(message: T): Promise<T> {
 		if (!("content" in message)) return message;
@@ -355,16 +366,26 @@ export class SessionProviderBoundary {
 		) {
 			return preserveData;
 		}
-		const obfuscated: Record<string, unknown> = { ...slot };
-		let changed = false;
-		for (const key of ["text", "textHead", "textTail"] as const) {
-			const value = slot[key];
-			if (typeof value !== "string" || value.length === 0) continue;
-			const next = obfuscator.obfuscate(value);
-			if (next === value) continue;
-			obfuscated[key] = next;
-			changed = true;
+		const obfuscateText = (archive: Record<string, unknown>): Record<string, unknown> => {
+			let obfuscated = archive;
+			for (const key of ["text", "textHead", "textTail"] as const) {
+				const value = archive[key];
+				if (typeof value !== "string" || value.length === 0) continue;
+				const next = obfuscator.obfuscate(value);
+				if (next !== value) obfuscated = { ...obfuscated, [key]: next };
+			}
+			return obfuscated;
+		};
+		let obfuscated = obfuscateText(slot);
+		// The no-reasoning variant carries its own copy of the text and summary.
+		const variant = slot.withoutThinking;
+		if (isRecord(variant) && isRecord(variant.archive) && typeof variant.summary === "string") {
+			const archive = obfuscateText(variant.archive);
+			const summary = obfuscator.obfuscate(variant.summary);
+			if (archive !== variant.archive || summary !== variant.summary) {
+				obfuscated = { ...obfuscated, withoutThinking: { ...variant, summary, archive } };
+			}
 		}
-		return changed ? { ...preserveData, [snapcompact.PRESERVE_KEY]: obfuscated } : preserveData;
+		return obfuscated === slot ? preserveData : { ...preserveData, [snapcompact.PRESERVE_KEY]: obfuscated };
 	}
 }

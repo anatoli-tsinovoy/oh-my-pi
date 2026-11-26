@@ -522,7 +522,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			const creator = SessionManager.create(tempDir.path(), tempDir.path(), new FileSessionStorage());
 			await creator.ensureOnDisk();
 			creator.appendMessage(userTurn("our turn before the conflict"));
-			const artifactId = await creator.saveArtifact("tool output", "bash");
+			const artifactId = await creator.saveArtifact("tool output");
 			const owned = creator.getSessionFile();
 			const ownedId = creator.getSessionId();
 			if (!owned || !artifactId) throw new Error("Expected session file and artifact");
@@ -541,7 +541,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			try {
 				await firstWrite(ours);
 				// Saved right after the move, while the background artifact copy may still run.
-				laterArtifactId = await ours.saveArtifact("output after the move", "bash");
+				laterArtifactId = await ours.saveArtifact("output after the move");
 				for (const turn of ourTurnsAfter) ours.appendMessage(userTurn(turn));
 				// The whole transcript is published to the sibling once; later appends go incremental.
 				expect(fullRewrites.reduce((calls, spy) => calls + spy.mock.calls.length, 0)).toBe(1);
@@ -560,10 +560,12 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			const lateNotices: SessionPersistenceNotice[] = [];
 			ours.onPersistenceNotice(notice => lateNotices.push(notice));
 			expect(lateNotices).toEqual(notices);
-			// Recorded `artifact://` references keep resolving after the move, and the
-			// artifact saved during the copy got a fresh id instead of overwriting one.
+			// Recorded spill references keep resolving after the move, and the
+			// spill saved during the copy got a fresh id instead of overwriting one.
 			const artifactPath = await ours.getArtifactPath(artifactId);
-			expect(artifactPath && path.dirname(artifactPath)).toBe(sibling.slice(0, -".jsonl".length));
+			expect(artifactPath && path.dirname(artifactPath)).toBe(
+				path.join(sibling.slice(0, -".jsonl".length), "local"),
+			);
 			expect(artifactPath && (await Bun.file(artifactPath).text())).toBe("tool output");
 			expect(laterArtifactId).toBeDefined();
 			expect(laterArtifactId).not.toBe(artifactId);
@@ -1080,6 +1082,54 @@ describe("SessionManager atomic entry batches", () => {
 		expect(content).not.toContain('"customType":"staged-terminal"');
 		expect(content).toContain('"customType":"concurrent-survivor"');
 		await manager.close();
+	});
+
+	it("keeps a late usage marker on a surviving leaf when the staged batch rolls back", async () => {
+		const storage = new GatedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		const rootId = manager.appendCustomEntry("root");
+		const activeId = manager.appendCustomEntry("active-tail");
+		await manager.ensureOnDisk();
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file");
+		const failure = storage.failNextAtomicWrite(new Error("batch publish failed"));
+		const commit = manager.appendEntriesAtomically(() => manager.appendCustomEntry("staged-terminal"));
+		await failure.started;
+		// A late probe for an older turn lands while the staged leaf is still current.
+		const usageId = manager.appendModelUsage(
+			{
+				purpose: "task-completion-probe",
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+				},
+				stopReason: "stop",
+			},
+			{ sessionId: manager.getSessionId(), parentId: rootId },
+		);
+		if (!usageId) throw new Error("Expected late usage to be recorded");
+		failure.release();
+
+		await expect(commit).rejects.toThrow("batch publish failed");
+		expect(manager.getLeafId()).toBe(activeId);
+		expect(manager.getEntry(usageId)).toMatchObject({ parentId: rootId, activeLeafId: activeId });
+		await manager.close();
+
+		const reopened = await SessionManager.open(sessionFile, "/sessions", storage, {
+			initialCwd: "/cwd",
+			suppressBreadcrumb: true,
+		});
+		expect(reopened.getLeafId()).toBe(activeId);
+		const nextId = reopened.appendCustomEntry("after-reopen");
+		expect(reopened.getEntry(nextId)?.parentId).toBe(activeId);
+		await reopened.close();
 	});
 
 	it("repairs authoritative rollback after commit-then-throw, including a rejecting repair acknowledgement", async () => {

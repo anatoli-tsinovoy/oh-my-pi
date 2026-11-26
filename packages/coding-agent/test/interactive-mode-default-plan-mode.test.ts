@@ -4,18 +4,20 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../src/config/model-registry";
+import { resolveExactModelIdentity } from "../src/config/model-resolver";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
 import { resolveLocalUrlToPath } from "../src/internal-urls";
 import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/interactive-mode";
-import { resolveXdevTool, type XdevState } from "../src/tools/xdev";
+import { resolveToolCommand, type ToolCommandState } from "../src/tools/tool-commands";
 
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 function makeTool(name: string): AgentTool {
 	return {
@@ -50,9 +52,7 @@ interface HarnessOptions {
 	/** Registry tools active from the first turn, alongside the built-in `read`. */
 	initialActiveTools?: readonly AgentTool[];
 	rebuildGate?: { fail: boolean; calls?: number };
-	xdev?: XdevState;
-	/** Provider/id of the initial model; defaults to `anthropic/claude-sonnet-4-5`. */
-	initialModel?: { provider: string; id: string };
+	toolCommands?: ToolCommandState;
 }
 
 describe("InteractiveMode plan.defaultOnStartup", () => {
@@ -100,30 +100,30 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	 *  entries still have built-in provenance after extension shadowing. */
 	function createHarness(settings: Settings, options: HarnessOptions = {}): InteractiveMode {
 		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${Bun.nanoseconds()}.yml`));
-		const requested = options.initialModel;
-		const initialModel = requested
-			? (registry.find(requested.provider, requested.id) ??
-				(() => {
-					throw new Error(`Expected ${requested.provider}/${requested.id} to exist`);
-				})())
-			: modelOrThrow(registry, "claude-sonnet-4-5");
+		const initialModel = modelOrThrow(registry, "claude-sonnet-4-5");
 		const readTool = makeTool("read");
 		// AgentSession requires a Map-typed tool registry; `read` is the initial
-		// active tool. Plan approval is a `write` to xd://propose, so plan-mode
-		// entry only augments the built-in `write` tool when present.
-		const xdev = options.xdev;
-		const toolRegistry = xdev?.tools ?? new Map<string, AgentTool>();
+		// active tool. Plan mode drafts the plan file with the built-in `write`, so
+		// entry augments that tool when the registry entry is the built-in one. A
+		// `bash` tool carries the tool-command transport, so a discoverable tool
+		// mounts as a command only while it is active in the session.
+		const toolCommands = options.toolCommands;
+		const toolRegistry = toolCommands?.tools ?? new Map<string, AgentTool>();
 		toolRegistry.set(readTool.name, readTool);
+		const bashTool = toolCommands ? makeTool("bash") : undefined;
+		if (bashTool) toolRegistry.set(bashTool.name, bashTool);
 		for (const tool of options.extraRegistryTools ?? []) {
 			toolRegistry.set(tool.name, tool);
 		}
+		const builtInToolNames = new Set(options.builtInToolNames ?? ["read"]);
+		if (bashTool) builtInToolNames.add(bashTool.name);
 		const manager = SessionManager.create(tempDir.path(), path.join(tempDir.path(), `active-${Bun.nanoseconds()}`));
 		const createdSession = new AgentSession({
 			agent: new Agent({
 				initialState: {
 					model: initialModel,
 					systemPrompt: ["Test"],
-					tools: [readTool, ...(options.initialActiveTools ?? [])],
+					tools: [readTool, ...(bashTool ? [bashTool] : []), ...(options.initialActiveTools ?? [])],
 					messages: [],
 					thinkingLevel: Effort.Medium,
 				},
@@ -132,7 +132,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			settings,
 			modelRegistry: registry,
 			toolRegistry,
-			builtInToolNames: options.builtInToolNames ?? ["read"],
+			builtInToolNames,
 			rebuildSystemPrompt: options.rebuildGate
 				? async () => {
 						if (options.rebuildGate) options.rebuildGate.calls = (options.rebuildGate.calls ?? 0) + 1;
@@ -140,10 +140,18 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 						return { systemPrompt: ["Test"] };
 					}
 				: undefined,
-			xdev,
+			toolCommands,
 		});
 		session = createdSession;
-		mode = new InteractiveMode(createdSession, "test");
+		mode = new InteractiveMode(
+			createdSession,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		return mode;
 	}
 
@@ -169,6 +177,69 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getPlanModeState()).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
 		expect(session?.getActiveToolNames()).toContain("read");
 	});
+	it("restores the pre-plan routed model and thinking level when a plan session resumes", async () => {
+		authStorage.keys.setRuntime("openrouter", "test-key");
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
+		const currentSession = session;
+		const routedBase = currentSession?.modelRegistry.find("openrouter", "anthropic/claude-sonnet-4.5");
+		if (!currentSession || !routedBase) throw new Error("Expected routed sonnet model");
+		const routedModel = resolveExactModelIdentity(
+			"openrouter/anthropic/claude-sonnet-4.5@anthropic",
+			currentSession.modelRegistry,
+		);
+		const planModel = currentSession.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!routedModel || !planModel) throw new Error("Expected routed sonnet and plan opus models");
+		currentSession.settings.setModelRole("plan", "anthropic/claude-opus-4-5");
+		await currentSession.setModelTemporary(routedModel, Effort.High);
+
+		await created.handlePlanModeCommand();
+		expect(currentSession.model?.id).toBe(planModel.id);
+		expect(currentSession.sessionManager.getEntries().at(-1)).toMatchObject({
+			type: "mode_change",
+			mode: "plan",
+			data: {
+				prePlanModelIdentity: "openrouter/anthropic/claude-sonnet-4.5@anthropic",
+				prePlanThinkingLevel: "high",
+			},
+		});
+
+		const resumedMode = new InteractiveMode(
+			currentSession,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
+		mode?.stop();
+		mode = resumedMode;
+		await resumedMode.init({ suppressWelcomeIntro: true });
+		expect(resumedMode.planModeEnabled).toBe(true);
+		await resumedMode.handlePlanModeCommand();
+
+		expect(currentSession.model?.id).toBe(routedModel.id);
+		expect(currentSession.model).toMatchObject({
+			compat: { openRouterRouting: { only: ["anthropic"] } },
+		});
+		expect(currentSession.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
+	it("keeps a mid-plan model change when no plan role is configured", async () => {
+		const created = createHarness(Settings.isolated({ "compaction.enabled": false }));
+		const currentSession = session;
+		const switched = currentSession?.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!currentSession || !switched) throw new Error("Expected opus model");
+
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(true);
+		await currentSession.setModelTemporary(switched, Effort.High);
+
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(false);
+		expect(currentSession.model?.id).toBe(switched.id);
+		expect(currentSession.configuredThinkingLevel()).toBe(Effort.High);
+	});
 
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
@@ -190,34 +261,28 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toContain("write");
 	});
 
-	it("keeps write on the direct surface when plan mode starts under Code Mode", async () => {
-		// Plan approval is a top-level `write` to `xd://propose`. Code Mode demotes
-		// every non-direct tool behind `eval`, and the partition only keeps `write`
-		// direct while a transport needs it — so plan mode state must be visible
-		// before the entry partition runs, or approval strands inside an eval result.
-		const evalTool = { ...makeTool("eval"), supportsCodeModeTransport: () => true };
-		const created = createHarness(
-			Settings.isolated({
-				"plan.defaultOnStartup": true,
-				"compaction.enabled": false,
-				"providers.openai-codex.codeMode": "auto",
-			}),
-			{
-				extraRegistryTools: [makeTool("write"), evalTool],
-				builtInToolNames: ["read", "write"],
-				initialActiveTools: [evalTool],
-				initialModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
-			},
-		);
+	it("deactivates an extension `write` on plan-mode entry so the read-only write guard holds (issue #14030)", async () => {
+		// An extension that registers the literal name `write` shadows the built-in
+		// tool. Plan mode's read-only guarantee relies on the built-in write/edit
+		// guard, so carrying the shadow into the plan phase would let it mutate the
+		// workspace (#14030).
+		const shadowWrite = makeTool("write");
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [shadowWrite],
+			initialActiveTools: [shadowWrite],
+			builtInToolNames: ["read"],
+		});
+
+		expect(session?.getActiveToolNames()).toContain("write");
+		expect(session?.hasBuiltInTool("write")).toBe(false);
 
 		await created.init({ suppressWelcomeIntro: true });
 
 		expect(created.planModeEnabled).toBe(true);
-		expect(session?.getActiveToolNames()).toContain("write");
-		// The eval tool advertises the bridge from this set, so a direct `write`
-		// must never appear as `tool.write()`.
-		expect(session?.getCodeModeDirectToolNames()).toContain("write");
-		expect(session?.getActiveToolNames()).toContain("eval");
+		// The extension tool bypasses the plan-file guard, so it must not stay
+		// active in the read-only plan phase.
+		expect(session?.getActiveToolNames()).not.toContain("write");
+		expect(session?.getActiveToolNames()).toContain("read");
 	});
 
 	it("does not activate an extension-shadowed write tool in plan mode", async () => {
@@ -251,7 +316,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 	it("keeps MCP tools discovered after startup when exiting plan mode", async () => {
 		const mcpTool = makeMcpTool();
 		const writeTool = makeTool("write");
-		const xdev: XdevState = {
+		const toolCommands: ToolCommandState = {
 			tools: new Map(),
 			mountedNames: new Set(),
 			builtInNames: new Set(["read", "write"]),
@@ -261,20 +326,20 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			extraRegistryTools: [writeTool],
 			builtInToolNames: ["read", "write"],
 			initialActiveTools: [writeTool],
-			xdev,
+			toolCommands,
 		});
 		await created.init({ suppressWelcomeIntro: true });
 
 		await session!.refreshMCPTools([mcpTool]);
 		expect(session!.getEnabledToolNames()).toContain(mcpTool.name);
-		expect(session!.getMountedXdevToolNames()).toContain(mcpTool.name);
+		expect(session!.getMountedToolCommandNames()).toContain(mcpTool.name);
 
 		await created.handlePlanModeCommand();
 
 		expect(created.planModeEnabled).toBe(false);
 		expect(session!.getEnabledToolNames()).toContain(mcpTool.name);
-		expect(session!.getMountedXdevToolNames()).toContain(mcpTool.name);
-		expect(resolveXdevTool(xdev, mcpTool.name)).toBeDefined();
+		expect(session!.getMountedToolCommandNames()).toContain(mcpTool.name);
+		expect(resolveToolCommand(toolCommands, mcpTool.name)).toBeDefined();
 	});
 
 	it("keeps MCP tools discovered after startup when approving the plan", async () => {
@@ -289,7 +354,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		});
 		await Bun.write(resolvedPlanPath, "# Plan\n\nUse the MCP tool.");
 		vi.spyOn(session!, "getContextUsage").mockReturnValue(undefined);
-		vi.spyOn(created, "showPlanReview").mockResolvedValue("Approve and keep context");
+		vi.spyOn(created, "showPlanReview").mockResolvedValue("keep");
 		vi.spyOn(session!, "prompt").mockResolvedValue(undefined as never);
 
 		await created.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
@@ -297,6 +362,64 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(false);
 		expect(session!.getEnabledToolNames()).toContain(mcpTool.name);
 		expect(session!.getActiveToolNames()).toContain(mcpTool.name);
+	});
+
+	/** Enters startup plan mode, then registers and enables a tool as a startup-deferred extension does. */
+	async function startWithLateExtensionTool(): Promise<{
+		created: InteractiveMode;
+		toolCommands: ToolCommandState;
+		name: string;
+	}> {
+		const writeTool = makeTool("write");
+		const toolCommands: ToolCommandState = {
+			tools: new Map(),
+			mountedNames: new Set(),
+			builtInNames: new Set(["read", "write"]),
+			isActive: name => session?.getActiveToolNames().includes(name) === true,
+		};
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+			initialActiveTools: [writeTool],
+			toolCommands,
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		const lateTool = makeTool("deferred_extension_tool");
+		toolCommands.tools.set(lateTool.name, lateTool);
+		await session!.setActiveToolPresentation(
+			[...session!.getEnabledToolNames(), lateTool.name],
+			[...session!.getMountedToolCommandNames(), lateTool.name],
+		);
+		expect(session!.getEnabledToolNames()).toContain(lateTool.name);
+		return { created, toolCommands, name: lateTool.name };
+	}
+
+	it("keeps extension tools registered after startup when exiting plan mode", async () => {
+		const { created, toolCommands, name } = await startWithLateExtensionTool();
+
+		await created.handlePlanModeCommand();
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session!.getEnabledToolNames()).toContain(name);
+		expect(resolveToolCommand(toolCommands, name)).toBeDefined();
+	});
+
+	it("keeps extension tools registered after startup when approving the plan", async () => {
+		const planFilePath = "local://PLAN.md";
+		const { created, name } = await startWithLateExtensionTool();
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session!.sessionManager.getArtifactsDir(),
+			getSessionId: () => session!.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nUse the extension tool.");
+		vi.spyOn(session!, "getContextUsage").mockReturnValue(undefined);
+		vi.spyOn(created, "showPlanReview").mockResolvedValue("keep");
+		vi.spyOn(session!, "prompt").mockResolvedValue(undefined as never);
+
+		await created.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(session!.getEnabledToolNames()).toContain(name);
 	});
 
 	it("keeps plan mode retryable when prior-tool restoration fails", async () => {
@@ -329,7 +452,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		const writeTool = makeTool("write");
 		const planSelectedTool = makeTool("plan_selected");
 		const mountedTool = makeMcpTool();
-		const xdev: XdevState = {
+		const toolCommands: ToolCommandState = {
 			tools: new Map(),
 			mountedNames: new Set(),
 			builtInNames: new Set(["read", "write"]),
@@ -338,7 +461,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		const created = createHarness(settings, {
 			extraRegistryTools: [writeTool, planSelectedTool],
 			builtInToolNames: ["read", "write"],
-			xdev,
+			toolCommands,
 		});
 		const previousModel = session?.model;
 		await created.init({ suppressWelcomeIntro: true });
@@ -347,12 +470,12 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		await session!.setActiveToolsByName([...session!.getEnabledToolNames(), planSelectedTool.name]);
 		const planTools = session!.getEnabledToolNames();
 		const planActiveTools = session!.getActiveToolNames();
-		const planMountedTools = session!.getMountedXdevToolNames();
+		const planMountedTools = session!.getMountedToolCommandNames();
 		expect(planModel?.id).toBe("claude-haiku-4-5");
 		expect(session?.configuredThinkingLevel()).toBe(Effort.High);
-		expect(planActiveTools).toEqual(["read", "write", planSelectedTool.name]);
+		expect(planActiveTools).toEqual(["read", "bash", "write", planSelectedTool.name]);
 		expect(planMountedTools).toEqual([mountedTool.name]);
-		expect(xdev.mountedNames.has(mountedTool.name)).toBe(true);
+		expect(toolCommands.mountedNames.has(mountedTool.name)).toBe(true);
 
 		const setModelTemporary = session!.setModelTemporary.bind(session);
 		const restoreModel = vi.spyOn(session!, "setModelTemporary").mockImplementationOnce(async (...args) => {
@@ -369,21 +492,21 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.configuredThinkingLevel()).toBe(Effort.High);
 		expect(session?.getEnabledToolNames()).toEqual(planTools);
 		expect(session?.getActiveToolNames()).toEqual(planActiveTools);
-		expect(session?.getMountedXdevToolNames()).toEqual(planMountedTools);
-		expect(xdev.mountedNames.has(mountedTool.name)).toBe(true);
+		expect(session?.getMountedToolCommandNames()).toEqual(planMountedTools);
+		expect(toolCommands.mountedNames.has(mountedTool.name)).toBe(true);
 
 		restoreModel.mockRestore();
 		await created.handlePlanModeCommand();
 		expect(created.planModeEnabled).toBe(false);
 		expect(session?.getPlanModeState()).toBeUndefined();
 		expect(session?.model?.id).toBe(previousModel?.id);
-		// The plan-only selections are removed while the live MCP tool survives
-		// top-level because restoring the read-only snapshot removes its device transport.
-		expect(session?.getActiveToolNames()).toContain(mountedTool.name);
+		// The plan-only selections are removed while the live MCP tool survives as
+		// the command the restored presentation keeps mounted.
+		expect(session?.getActiveToolNames()).toContain("read");
 		expect(session?.getActiveToolNames()).not.toContain(planSelectedTool.name);
-		expect(session?.getMountedXdevToolNames()).toEqual([]);
-		expect(xdev.tools.has(mountedTool.name)).toBe(true);
-		expect(resolveXdevTool(xdev, mountedTool.name)).toBeDefined();
+		expect(session?.getMountedToolCommandNames()).toEqual([mountedTool.name]);
+		expect(toolCommands.tools.has(mountedTool.name)).toBe(true);
+		expect(resolveToolCommand(toolCommands, mountedTool.name)).toBeDefined();
 	});
 
 	it("clears old plan UI state when target-session reconciliation restore fails", async () => {
@@ -415,7 +538,7 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.peekPlanProposalHandler()).toBeUndefined();
 	});
 
-	it("leaves plan mode on /new so the new session matches its empty mode record (issue #14653)", async () => {
+	it("leaves plan mode when an internal reset starts a new session, despite plan.defaultOnStartup (issue #14653)", async () => {
 		const writeTool = makeTool("write");
 		const created = createHarness(
 			Settings.isolated({
@@ -440,6 +563,27 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.peekPlanProposalHandler()).toBeUndefined();
 		expect(session?.getActiveToolNames()).toEqual(["read"]);
 		expect(session?.model?.id).toBe("claude-sonnet-4-5");
+	});
+
+	it("re-enters plan mode in the session /new starts when plan.defaultOnStartup is on (issue #15627)", async () => {
+		const created = createHarness(
+			Settings.isolated({
+				"plan.defaultOnStartup": true,
+				"compaction.enabled": false,
+				modelRoles: { plan: "anthropic/claude-sonnet-4-6" },
+			}),
+		);
+		await created.init({ suppressWelcomeIntro: true });
+		const previousSessionFile = session?.sessionFile;
+
+		await created.handleNewCommand();
+
+		expect(session?.sessionFile).not.toBe(previousSessionFile);
+		expect(created.planModeEnabled).toBe(true);
+		expect(session?.sessionManager.buildSessionContext().mode).toBe("plan");
+		expect(session?.getPlanModeState()?.enabled).toBe(true);
+		expect(session?.peekPlanProposalHandler()).toBeDefined();
+		expect(session?.model?.id).toBe("claude-sonnet-4-6");
 	});
 
 	it("enters only when enabled and the session has no conversation or explicit mode", () => {

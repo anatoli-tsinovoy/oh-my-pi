@@ -1,24 +1,27 @@
 import { combine, effect, register, type Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
-import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
+import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
-import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { TREE_FILTER_MODES } from "./view-model/overlays/tree-selector";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
 	STATUS_LINE_PRESET_VALUES,
 	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
-} from "@oh-my-pi/pi-tui/status-line/schema";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
-import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
-import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
-import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
-import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
-import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
-import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+} from "../config/status-line-schema";
+import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
+import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
+import { parseSpinnerInterval } from "../config/spinner-interval";
+import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
+import { setTightLayout } from "../ui/styles/terminal-padding";
+import { setColorBlindMode, setSymbolPreset, setThemeSlot } from "../ui/theme/service";
+import {
+	DEFAULT_INLINE_IMAGE_COLUMNS,
+	DEFAULT_INLINE_IMAGE_ROWS,
+	setInlineImageLimits,
+} from "../ui/transcript/messages/image";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -35,7 +38,8 @@ export const cfgAutoResume = register({
 		tab: "interaction",
 		group: "Startup & Updates",
 		label: "Auto Resume",
-		description: "Automatically resume the most recent session in the current directory",
+		description:
+			"Automatically resume the most recent session in the current directory. If its model cannot be restored and model fallback is disabled, interactive startup warns and starts a new session without the saved history",
 	},
 });
 
@@ -68,7 +72,7 @@ export const cfgThemeDark = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeDark, name => setAutoThemeMapping("dark", name));
+effect(cfgThemeDark, name => setThemeSlot("dark", name));
 
 export const cfgThemeLight = register({
 	id: "theme.light",
@@ -82,7 +86,7 @@ export const cfgThemeLight = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeLight, name => setAutoThemeMapping("light", name));
+effect(cfgThemeLight, name => setThemeSlot("light", name));
 
 export const cfgSymbolPreset = register({
 	id: "symbolPreset",
@@ -133,7 +137,6 @@ export const cfgComposerShape = register({
 		options: "runtime",
 	},
 });
-effect(cfgComposerShape, setEditorGapComposerShape);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",
@@ -332,23 +335,23 @@ export const cfgImagesBlockImages = register({
 	},
 });
 
+/** The width limit for transcript images, in columns. */
 export const cfgTuiMaxInlineImageColumns = register({
 	id: "tui.maxInlineImageColumns",
 	type: "number",
-	default: 100,
-	description:
-		"Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
+	default: DEFAULT_INLINE_IMAGE_COLUMNS,
+	description: `Maximum width in terminal columns for inline images (default ${DEFAULT_INLINE_IMAGE_COLUMNS}). Set to 0 for unlimited (bounded only by terminal width).`,
 });
-effect(cfgTuiMaxInlineImageColumns, setInlineImageMaxColumns);
 
+/** The height limit for transcript images, in rows. */
 export const cfgTuiMaxInlineImageRows = register({
 	id: "tui.maxInlineImageRows",
 	type: "number",
-	default: 20,
-	description:
-		"Maximum height in terminal rows for inline images (default 20). Set to 0 to use only the viewport-based limit (60% of terminal height).",
+	default: DEFAULT_INLINE_IMAGE_ROWS,
+	description: `Maximum height in terminal rows for inline images (default ${DEFAULT_INLINE_IMAGE_ROWS}). Set to 0 to use only the viewport-based limit (60% of terminal height).`,
 });
-effect(cfgTuiMaxInlineImageRows, setInlineImageMaxRows);
+
+effect(combine({ columns: cfgTuiMaxInlineImageColumns, rows: cfgTuiMaxInlineImageRows }), setInlineImageLimits);
 
 export const cfgTuiMaxInlineImages = register({
 	id: "tui.maxInlineImages",
@@ -427,6 +430,19 @@ export const cfgTuiTextSizing = register({
 	},
 });
 
+export const cfgTuiColorfulMarkdown = register({
+	id: "tui.colorfulMarkdown",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Colorful Markdown",
+		description:
+			"Color headings by level, bold and italic text, inline code, and table headers from the theme's ANSI palette. Off uses one heading color and plain bold/italic.",
+	},
+});
+
 export const cfgTuiRenderMermaid = register({
 	id: "tui.renderMermaid",
 	type: "boolean",
@@ -452,11 +468,24 @@ export const cfgTuiRenderSvg = register({
 	},
 });
 
+export const cfgTuiRenderEmbeds = register({
+	id: "tui.renderEmbeds",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Render Embedded Images and Pages",
+		description:
+			"Invite the agent to show pictures with <img> and web pages with <iframe>, loading them (remote addresses included) to draw inline on terminals that show graphics",
+	},
+});
+
 export const cfgTuiAutoGraph = register({
 	id: "tui.autoGraph",
 	type: "enum",
-	values: ["smart", "always", "off"] as const,
-	default: "always",
+	values: ["auto", "smart", "always", "off"] as const,
+	default: "auto",
 	ui: {
 		tab: "appearance",
 		group: "Display",
@@ -464,6 +493,11 @@ export const cfgTuiAutoGraph = register({
 		description:
 			"Draw a chart under numeric tables in the agent's answers, in your theme's colors, on terminals that show graphics",
 		options: [
+			{
+				value: "auto",
+				label: "Auto",
+				description: "Smart when the judge role resolves to a native TypeSafe jev model, else Always",
+			},
 			{
 				value: "smart",
 				label: "Smart",
@@ -539,6 +573,55 @@ export const cfgTuiTitleSpinner = register({
 	},
 });
 
+export const cfgTuiSpinnerInterval = register({
+	id: "tui.spinnerInterval",
+	type: "number",
+	// Unset follows `tui.motion`; any value set (file, flag, env) wins over the preset.
+	default: undefined,
+	env: "PI_SPINNER_INTERVAL",
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseSpinnerInterval(raw);
+	},
+	normalize: parseSpinnerInterval,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Spinner Interval (ms)",
+		description:
+			"Milliseconds between frames of every spinner, the terminal title included; 0 shows static glyphs. Unset follows Motion",
+		options: [
+			{ value: "0", label: "Static", description: "No animation" },
+			{ value: "80", label: "80 ms", description: "12.5 frames/s" },
+			{ value: "250", label: "250 ms", description: "4 frames/s" },
+			{ value: "1000", label: "1 s", description: "1 frame/s" },
+		],
+	},
+});
+
+export const cfgTuiMaxFps = register({
+	id: "tui.maxFps",
+	type: "number",
+	default: DEFAULT_MAX_FPS,
+	env: "PI_MAX_FPS",
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseMaxFps(raw);
+	},
+	normalize: parseMaxFps,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Max Frames Per Second",
+		description:
+			"Ceiling on how often the TUI repaints, streaming text included. Keystroke echo keeps 30 fps, so the pane you type in stays responsive",
+		options: [
+			{ value: "30", label: "30 fps", description: "Default" },
+			{ value: "15", label: "15 fps" },
+			{ value: "4", label: "4 fps", description: "Quiet, for many panes" },
+			{ value: "1", label: "1 fps", description: "Minimum" },
+		],
+	},
+});
+
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
 	type: "enum",
@@ -552,9 +635,6 @@ export const cfgTuiHyperlinks = register({
 			"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 	},
 });
-// Also re-applied when a project-scoped reload (`/move`, cross-project resume, rollback) changes the
-// effective value, so pi-tui renderers gating on the shared flag track it the same instant path links do.
-effect(cfgTuiHyperlinks, applyHyperlinkSetting);
 
 export const cfgTuiMouse = register({
 	id: "tui.mouse",
@@ -566,11 +646,12 @@ export const cfgTuiMouse = register({
 		label: "Mouse Click-to-Focus",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes ${shift}+drag and wheel scroll becomes ${shift}+wheel while on`;
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and mouse capture stops wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
 		},
 	},
 });
 
+/** Whether terminal output removes a cell of horizontal padding on each side. */
 export const cfgTuiTight = register({
 	id: "tui.tight",
 	type: "boolean",
@@ -579,9 +660,12 @@ export const cfgTuiTight = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Tight Layout",
-		description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
+		description:
+			"Remove the standard one-cell horizontal inset from terminal output; message bubbles and tool frames keep their padding",
 	},
 });
+
+effect(cfgTuiTight, setTightLayout);
 
 export const cfgDisplayShimmer = register({
 	id: "display.shimmer",
@@ -592,7 +676,7 @@ export const cfgDisplayShimmer = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Shimmer",
-		description: "Animation style for working/loading messages",
+		description: "Animation style for working/loading messages; off under reduced or no Motion",
 		options: [
 			{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
 			{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
@@ -600,7 +684,40 @@ export const cfgDisplayShimmer = register({
 		],
 	},
 });
-effect(cfgDisplayShimmer, setShimmerMode);
+
+export const cfgTuiMotion = register({
+	id: "tui.motion",
+	type: "enum",
+	values: MOTION_MODES,
+	default: "full",
+	env: "PI_MOTION",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Motion",
+		description:
+			"One switch over spinners, shimmer, and decorative blink/fade. Streaming text is unaffected (see Max Frames Per Second). A spinner interval you set still wins",
+		options: [
+			{ value: "full", label: "Full", description: "Every animation at its own setting (default)" },
+			{ value: "reduced", label: "Reduced", description: "Spinners at 250 ms, no shimmer, no blink/fade" },
+			{ value: "none", label: "None", description: "Static spinners and title, no shimmer, no blink/fade" },
+		],
+	},
+});
+
+/** Effective animation settings: `tui.motion`'s preset under the user's own spinner interval and shimmer. */
+export const cfgMotionResolved = combine(
+	{ mode: cfgTuiMotion, spinnerInterval: cfgTuiSpinnerInterval, shimmer: cfgDisplayShimmer },
+	({ mode, spinnerInterval, shimmer }) => {
+		const preset = MOTION_PRESETS[mode];
+		return {
+			spinnerInterval: spinnerInterval ?? preset.spinnerInterval,
+			titleSpinnerInterval: spinnerInterval ?? preset.titleSpinnerInterval,
+			shimmer: preset.effects ? shimmer : ("disabled" as const),
+			effects: preset.effects,
+		};
+	},
+);
 
 export const cfgDisplayPinnedAgents = register({
 	id: "display.pinnedAgents",
@@ -641,7 +758,8 @@ export const cfgDisplaySmoothStreaming = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Smooth Streaming",
-		description: "Reveal assistant text and streamed tool input smoothly while chunks arrive",
+		description:
+			"Reveal assistant text and streamed tool input smoothly while chunks arrive (Tern types assistant text out itself)",
 	},
 });
 
@@ -692,17 +810,49 @@ export const cfgDisplayCacheMissMarker = register({
 		description: "Show a divider after an assistant turn whose request lost (missed) the prompt cache",
 	},
 });
-effect(
-	combine({
-		hideToolActivity: cfgDisplayHideToolActivity,
-		readToolResultPreview: cfgReadToolResultPreview,
-		showImages: cfgTerminalShowImages,
-		cacheMissMarker: cfgDisplayCacheMissMarker,
-		showTokenUsage: cfgDisplayShowTokenUsage,
-		showTurnTime: cfgDisplayShowTurnTime,
-	}),
-	setChatTranscriptDisplayPreferences,
-);
+
+export const cfgDisplayShellVisualization = register({
+	id: "display.shellVisualization",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Shell Visualization",
+		description: "Show bash commands as an interactive execution visualization instead of plain shell commands",
+	},
+});
+
+export const cfgDisplayAdvisorCollapsedLines = register({
+	id: "display.advisorCollapsedLines",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Advisor Collapsed Lines",
+		description:
+			"Maximum note lines a collapsed advisor card shows below its header (0 keeps the full preview; expand with the tool-output toggle)",
+		options: [
+			{ value: "0", label: "No limit", description: "Default." },
+			{ value: "1", label: "1 line" },
+			{ value: "2", label: "2 lines" },
+			{ value: "3", label: "3 lines" },
+			{ value: "5", label: "5 lines" },
+		],
+	},
+});
+/** Transcript display preferences the shell applies to its tool, message and image blocks. */
+export const cfgTranscriptDisplay = combine({
+	hideToolActivity: cfgDisplayHideToolActivity,
+	shellVisualization: cfgDisplayShellVisualization,
+	readToolResultPreview: cfgReadToolResultPreview,
+	showImages: cfgTerminalShowImages,
+	cacheMissMarker: cfgDisplayCacheMissMarker,
+	showTokenUsage: cfgDisplayShowTokenUsage,
+	showTurnTime: cfgDisplayShowTurnTime,
+	advisorCollapsedLines: cfgDisplayAdvisorCollapsedLines,
+});
 
 export const cfgDisplayCollapseCompacted = register({
 	id: "display.collapseCompacted",
@@ -785,6 +935,19 @@ export const cfgInterruptMode = register({
 	},
 });
 
+export const cfgBtwInject = register({
+	id: "btw.inject",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "/btw Steering Inject",
+		description:
+			"When you ask /btw for a steering prompt, it drafts one in <inject> tags, highlighted in the answer; Alt+I (app.btw.inject) sends it to the main session",
+	},
+});
+
 export const cfgTuiVimMode = register({
 	id: "tui.vimMode",
 	type: "boolean",
@@ -813,7 +976,57 @@ export const cfgTuiVimModeDisplay = register({
 		options: [
 			{ value: "text", label: "Text", description: "Full mode name — NORMAL, INSERT, VISUAL, V-LINE, REPLACE" },
 			{ value: "icon", label: "Icon", description: "Single compact glyph per mode" },
-			{ value: "none", label: "Hidden", description: "Do not show the mode in the status line" },
+			{
+				value: "none",
+				label: "Hidden",
+				description: "Do not show the mode; a command being typed still shows with Vim Show Command",
+			},
+		],
+	},
+});
+
+export const cfgTuiVimShowCommand = register({
+	id: "tui.vimShowCommand",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Show Command",
+		description:
+			"Show the command being typed in the status line, like Vim's showcmd: 15d before its last d. Shows even when the mode indicator is hidden",
+		condition: "vimModeEnabled",
+	},
+});
+
+export const cfgTuiVimYankToClipboard = register({
+	id: "tui.vimYankToClipboard",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Yanks Copy to Clipboard",
+		description:
+			'Every Vim yank also copies to the system clipboard, as in Vim with clipboard=unnamed. Off: only "+y and "*y do',
+		condition: "vimModeEnabled",
+	},
+});
+
+export const cfgTuiVimStartMode = register({
+	id: "tui.vimStartMode",
+	type: "enum",
+	values: ["insert", "normal"] as const,
+	default: "insert",
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Vim Start Mode",
+		description: "Mode each new prompt starts in: at startup, after each message you send, and in dialog text boxes",
+		condition: "vimModeEnabled",
+		options: [
+			{ value: "insert", label: "Insert", description: "Type right away; Escape for Normal mode" },
+			{ value: "normal", label: "Normal", description: "Start on Vim commands; i, a, o and the like to type" },
 		],
 	},
 });
@@ -1000,7 +1213,7 @@ export const cfgSpellingAutocomplete = register({
 export const cfgComposerPredictions = register({
 	id: "composer.predictions",
 	type: "boolean",
-	default: false,
+	default: true,
 	ui: {
 		tab: "interaction",
 		group: "Input",
@@ -1008,6 +1221,21 @@ export const cfgComposerPredictions = register({
 		get description() {
 			return `After a completed turn, ask the active model to predict your next message and show it as ghost text in the empty composer; ${formatKeyHint("tab")} or ${formatKeyHint("right")} inserts it without sending. Extra usage: every completed turn sends one more billed request over the whole conversation (counted in /stats)`;
 		},
+	},
+});
+
+export const cfgComposerPredictionAlternatives = register({
+	id: "composer.predictionAlternatives",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Prediction Alternatives",
+		get description() {
+			return `Ask for up to four distinct predictions instead of one, most likely first. The ghost text shows the first one your draft matches; after inserting one, press ${formatKeyHint("tab")} again to pick another. The same single request returns a few more output tokens`;
+		},
+		condition: "composerPredictionsEnabled",
 	},
 });
 
@@ -1035,7 +1263,6 @@ export const cfgEmojiAutocomplete = register({
 		description: "Suggest emojis from `:name:` shortcodes and expand text emoticons like `:D` or `:-)`",
 	},
 });
-effect(cfgEmojiAutocomplete, setEmojiAutocompleteEnabled);
 
 export const cfgPasteLargeMenuThreshold = register({
 	id: "paste.largeMenuThreshold",
@@ -1046,7 +1273,7 @@ export const cfgPasteLargeMenuThreshold = register({
 		group: "Input",
 		label: "Large Paste Menu",
 		description:
-			"When a paste reaches this many lines, offer a menu to wrap it in a code block, wrap it in XML tags, or save it to a file. 0 disables the menu (large pastes still collapse to a [Paste] marker).",
+			"When a paste reaches this many lines, offer a menu to wrap it in a code block, wrap it in XML tags, or save it to a file. 0 disables the menu (large pastes still collapse to a chip).",
 		options: [
 			{ value: "0", label: "Off" },
 			{ value: "100", label: "100 lines" },
@@ -1120,6 +1347,24 @@ export const cfgUpdateChannel = register({
 			{ value: "stable", label: "Stable" },
 			{ value: "canary", label: "Canary" },
 		],
+	},
+});
+
+/**
+ * Background self-update: a launch that finds a newer release installs it the
+ * way `omp update` would, showing progress beside the welcome banner's version;
+ * the next launch runs it. Ignored where omp cannot update itself (Tern, Nix, a
+ * source checkout). Offered by the setup wizard.
+ */
+export const cfgUpdateAuto = register({
+	id: "update.auto",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Auto Update",
+		description: "Install omp updates in the background on startup; the next launch runs the new version",
 	},
 });
 
@@ -1232,7 +1477,7 @@ export const cfgAskTimeout = register({
 		group: "Notifications",
 		label: "Ask Timeout",
 		description:
-			"Auto-select the recommended ask option after this many seconds (0 disables). Also bounds cfg:// approval prompts; an unanswered approval denies the write instead of auto-selecting",
+			"Submit an ask form's current values (your preselected answers) after this many seconds (0 disables). Also bounds cfg:// approval prompts; an unanswered approval denies the write instead of auto-submitting",
 		options: [
 			{ value: "0", label: "Disabled" },
 			{ value: "15", label: "15 seconds" },
@@ -1263,6 +1508,19 @@ export const cfgAskNotify = register({
 		group: "Notifications",
 		label: "Ask Notification",
 		description: "Notify when the ask tool is waiting for input",
+	},
+});
+
+export const cfgPtyNotify = register({
+	id: "pty.notify",
+	type: "enum",
+	values: ["on", "off"] as const,
+	default: "on",
+	ui: {
+		tab: "interaction",
+		group: "Notifications",
+		label: "Console Notification",
+		description: "Notify when an interactive console (bash `pty`) is waiting on you",
 	},
 });
 

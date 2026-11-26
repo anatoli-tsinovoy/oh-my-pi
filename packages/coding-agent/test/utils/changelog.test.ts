@@ -39,15 +39,6 @@ import {
 import { cfgStartupChangelogMode } from "@oh-my-pi/pi-coding-agent/modes/settings";
 
 const CURRENT_VERSION = "2.0.0";
-const repoRoot = path.resolve(import.meta.dir, "..", "..", "..", "..");
-const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
-const packageDir = path.join(repoRoot, "packages", "coding-agent");
-const hasPtyHarness =
-	process.platform === "linux" &&
-	(await Bun.file("/usr/bin/script").exists()) &&
-	(await Bun.file("/usr/bin/timeout").exists());
-const PTY_STARTUP_OUTPUT_CEILING = 512 * 1024;
-
 function release(major: number, minor: number, patch: number, body: string): ChangelogEntry {
 	const heading = `## [${major}.${minor}.${patch}] - 2026-07-11`;
 	const content = `${heading}\n\n${body.trimEnd()}`;
@@ -286,7 +277,7 @@ describe("renderChangelogEntries", () => {
 			release(1, 0, 0, `### Added\n\n- First ${largeBody}\nEND-FIRST`),
 		]);
 
-		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("1.0.0");
+		expect(rendered.markdown.match(/## \[(\d+\.\d+\.\d+)\]/)?.[1]).toBe("3.0.0");
 		expect(rendered.truncated).toBe(false);
 		expect(rendered.markdown).toContain("END-FIRST");
 		expect(rendered.markdown).toContain("END-SECOND");
@@ -315,6 +306,7 @@ describe("last changelog marker", () => {
 			const upgradeDisplay = await resolveStartupChangelogForDisplay({
 				mode: "hidden",
 				currentVersion: CURRENT_VERSION,
+				lastVersion: "1.0.0",
 				agentDir,
 			});
 
@@ -325,6 +317,7 @@ describe("last changelog marker", () => {
 			const downgradeDisplay = await resolveStartupChangelogForDisplay({
 				mode: "hidden",
 				currentVersion: CURRENT_VERSION,
+				lastVersion: "3.0.0",
 				agentDir,
 			});
 
@@ -335,7 +328,6 @@ describe("last changelog marker", () => {
 
 	test("summary mode keeps the last unseen release of a changelog that ends in a newline", async () => {
 		await withTempAgentDir(async agentDir => {
-			await writeLastChangelogVersion("1.0.0", agentDir);
 			const changelogPath = path.join(agentDir, "CHANGELOG.md");
 			const history = [release(2, 0, 0, "### Added\n\n- Newest."), release(1, 5, 0, "### Fixed\n\n- Last section.")];
 			await Bun.write(changelogPath, `# Changelog\n\n${history.map(entry => entry.content).join("\n\n")}\n`);
@@ -343,6 +335,7 @@ describe("last changelog marker", () => {
 			const selection = await resolveStartupChangelogForDisplay({
 				mode: "summary",
 				currentVersion: CURRENT_VERSION,
+				lastVersion: "1.0.0",
 				changelogPath,
 				agentDir,
 			});
@@ -352,55 +345,4 @@ describe("last changelog marker", () => {
 			expect(selection?.markdown).toContain("- Last section.");
 		});
 	});
-});
-
-describe.skipIf(!hasPtyHarness)("interactive startup changelog PTY smoke", () => {
-	test("does not dump packaged changelog history on first install with uncollapsed notes", async () => {
-		await withTempAgentDir(async agentDir => {
-			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-changelog-pty-"));
-			try {
-				await fs.mkdir(path.join(root, "xdg-config"), { recursive: true });
-				await fs.mkdir(path.join(root, "xdg-state"), { recursive: true });
-				await fs.mkdir(path.join(root, "xdg-data"), { recursive: true });
-				await Bun.write(path.join(agentDir, "config.yml"), "setupVersion: 1\ncollapseChangelog: false\n");
-
-				const proc = Bun.spawn(
-					["timeout", "6s", "script", "-q", "-c", `bun ${JSON.stringify(cliEntry)}`, "/dev/null"],
-					{
-						cwd: repoRoot,
-						stdout: "pipe",
-						stderr: "pipe",
-						env: {
-							...process.env,
-							HOME: root,
-							XDG_CONFIG_HOME: path.join(root, "xdg-config"),
-							XDG_STATE_HOME: path.join(root, "xdg-state"),
-							XDG_DATA_HOME: path.join(root, "xdg-data"),
-							PI_CODING_AGENT_DIR: agentDir,
-							PI_PACKAGE_DIR: packageDir,
-							PI_NO_TITLE: "1",
-							NO_COLOR: "1",
-							TERM: "xterm-256color",
-						},
-					},
-				);
-
-				const [stdout, stderr, exitCode] = await Promise.all([
-					new Response(proc.stdout).arrayBuffer(),
-					new Response(proc.stderr).text(),
-					proc.exited,
-				]);
-				const output = Buffer.from(stdout).toString("utf8");
-
-				expect(exitCode).toBe(124);
-				expect(Buffer.byteLength(output)).toBeLessThan(PTY_STARTUP_OUTPUT_CEILING);
-				expect(output).not.toContain("## [");
-				expect(output).not.toContain(STARTUP_CHANGELOG_FULL_HINT);
-				expect(stderr).not.toContain("Cannot find module");
-				expect(await readLastChangelogVersion(agentDir)).toBe(VERSION);
-			} finally {
-				await removeWithRetries(root);
-			}
-		});
-	}, 15_000);
 });

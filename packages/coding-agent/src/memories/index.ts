@@ -15,6 +15,7 @@ import {
 	prompt,
 } from "@oh-my-pi/pi-utils";
 
+import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -26,6 +27,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { journalCompletion } from "../session/model-usage-journal";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -188,21 +190,16 @@ const memoryToolDeveloperInstructionsBySession = new WeakMap<
 >();
 const memoryToolDeveloperInstructionsByRoot = new Map<string, MemoryToolDeveloperInstructionsSnapshot | undefined>();
 
-function getMemoryInstructionRoot(agentDir: string, settings: Settings): string {
-	return getMemoryRoot(agentDir, settings.getCwd());
-}
-
 function getMemoryInstructionSessionFile(session: MemoryInstructionSession): string | undefined {
 	return session.sessionManager.getSessionFile() ?? undefined;
 }
 
 async function readMemoryToolDeveloperInstructionsSnapshot(
-	agentDir: string,
+	memoryRoot: string,
 	settings: Settings,
 ): Promise<MemoryToolDeveloperInstructionsSnapshot | undefined> {
 	const cfg = loadMemoryConfig(settings);
 	if (!cfg.enabled) return undefined;
-	const memoryRoot = getMemoryInstructionRoot(agentDir, settings);
 
 	let summary = "";
 	try {
@@ -277,14 +274,15 @@ export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstruc
 export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 	session: MemoryInstructionSession,
 	agentDir: string,
+	cwd: string,
 	settings: Settings,
 ): Promise<void> {
 	if (memoryConversationStarted(session)) return;
 	const sessionFile = getMemoryInstructionSessionFile(session);
 	const cached = memoryToolDeveloperInstructionsBySession.get(session);
-	const current = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	const root = getMemoryRoot(agentDir, cwd);
+	const current = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
 	if (memoryConversationStarted(session)) return;
-	const root = getMemoryInstructionRoot(agentDir, settings);
 	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
 	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
 	const learned = cachedLearned ?? baseline?.learned ?? "";
@@ -294,15 +292,21 @@ export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
 
 /**
  * Build memory usage instructions for prompt injection.
+ *
+ * `cwd` is the session's project directory, the same scope consolidation and
+ * `learn` write to; never `settings.getCwd()`, which an embedding host may pin
+ * to one directory for sessions spanning several projects.
  */
 export async function buildMemoryToolDeveloperInstructions(
 	agentDir: string,
+	cwd: string,
 	settings: Settings,
 	session?: MemoryInstructionSession,
 ): Promise<string | undefined> {
+	const root = getMemoryRoot(agentDir, cwd);
 	if (!session) {
-		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
-		memoryToolDeveloperInstructionsByRoot.set(getMemoryInstructionRoot(agentDir, settings), snapshot);
+		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
+		memoryToolDeveloperInstructionsByRoot.set(root, snapshot);
 		return renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
 	}
 
@@ -310,17 +314,17 @@ export async function buildMemoryToolDeveloperInstructions(
 	const cached = memoryToolDeveloperInstructionsBySession.get(session);
 	if (cached && cached.sessionFile === sessionFile) return cached.value;
 
-	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(root, settings);
 	return cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
 }
 
 /**
- * Clear all persisted memory state and generated artifacts.
+ * Clear the persisted memory state and generated artifacts of one project.
  */
 export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	try {
-		clearMemoryDataInDb(db);
+		clearMemoryDataInDb(db, cwd);
 	} finally {
 		closeMemoryDb(db);
 	}
@@ -358,7 +362,12 @@ async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
 	await runPhase2(options);
 	if (!isMemoryStartupActive(options)) return;
-	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
+	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
+		options.session,
+		options.agentDir,
+		options.session.sessionManager.getCwd(),
+		options.settings,
+	);
 	if (!isMemoryStartupActive(options)) return;
 	if (memoryConversationStarted(options.session)) return;
 	await options.session.refreshBaseSystemPrompt?.();
@@ -421,9 +430,20 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 
 		await runWithConcurrency(claims, config.stage1Concurrency, async claim => {
 			if (!isMemoryStartupActive(options)) return;
+			if (cfgOffline.get(session.settings) && session.model?.provider !== phase1Model.provider) {
+				markStage1Failed(db, {
+					threadId: claim.threadId,
+					ownershipToken: claim.ownershipToken,
+					retryDelaySeconds: config.stage1RetryDelaySeconds,
+					reason: "Memory model provider differs from the active session provider",
+					nowSec: unixNow(),
+				});
+				return;
+			}
 			const result = await runStage1Job({
 				claim,
 				model: phase1Model,
+				session,
 				apiKey: modelRegistry.resolver(phase1Model, session.sessionId),
 				sessionId: session.sessionId,
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
@@ -584,9 +604,13 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 
 		try {
 			if (!isMemoryStartupActive(options)) return;
+			if (cfgOffline.get(session.settings) && session.model?.provider !== phase2Model.provider) {
+				throw new Error("Memory model provider differs from the active session provider");
+			}
 			const consolidated = await runConsolidationModel({
 				memoryRoot,
 				model: phase2Model,
+				session,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				sessionId: session.sessionId,
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
@@ -753,9 +777,19 @@ function extractPersistableMessages(payload: string): AgentMessage[] {
 		const maybeMessage = entry.message;
 		if (!maybeMessage || typeof maybeMessage !== "object") continue;
 		const message = maybeMessage as AgentMessage;
-		if (shouldPersistResponseItemForMemories(message)) {
+		if (!shouldPersistResponseItemForMemories(message)) continue;
+		if (message.role !== "assistant") {
 			messages.push(message);
+			continue;
 		}
+		const content = message.content.some(block => block.type === "thinking" || block.type === "redactedThinking")
+			? message.content.filter(block => block.type !== "thinking" && block.type !== "redactedThinking")
+			: message.content;
+		messages.push(
+			content === message.content && !message.providerPayload
+				? message
+				: { ...message, content, providerPayload: undefined },
+		);
 	}
 	return messages;
 }
@@ -849,6 +883,7 @@ export async function buildStage1RolloutItems(rolloutPath: string, tokenLimit: n
 async function runStage1Job(options: {
 	claim: Stage1Claim;
 	model: Model;
+	session: AgentSession;
 	apiKey: ApiKey;
 	sessionId: string;
 	modelMaxTokens: number;
@@ -875,9 +910,14 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
+		// Billed to the session running the pipeline, whichever thread the rollout belongs to.
+		const journal = journalCompletion(options.session.sessionManager, { purpose: "memory:extract" });
 		const response = await retryTransientCompletion(
-			() =>
-				completeSimple(
+			() => {
+				if (cfgOffline.get(options.session.settings) && options.session.model?.provider !== model.provider) {
+					throw new Error("Memory model provider differs from the active session provider");
+				}
+				return completeSimple(
 					model,
 					{
 						systemPrompt: [stageOneSystemTemplate],
@@ -889,9 +929,14 @@ async function runStage1Job(options: {
 						metadata: options.metadata,
 						maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 						reasoning: clampThinkingLevelForModel(model, Effort.Low),
+						// OpenAI chat-completions owns its transient retries in the HTTP
+						// transport; never restart that budget at the provider/oneshot layers.
+						maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
+						onAttempt: message => journal?.(message, inputPrompt),
 					},
-				),
-			{ provider: model.provider },
+				);
+			},
+			{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 		);
 
 		if (response.stopReason === "error") {
@@ -996,6 +1041,7 @@ async function readRolloutSummaries(memoryRoot: string): Promise<string> {
 async function runConsolidationModel(options: {
 	memoryRoot: string;
 	model: Model;
+	session: AgentSession;
 	apiKey: ApiKey;
 	sessionId: string;
 	metadata?: Record<string, unknown>;
@@ -1018,9 +1064,13 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
+	const journal = journalCompletion(options.session.sessionManager, { purpose: "memory:consolidate" });
 	const response = await retryTransientCompletion(
-		() =>
-			completeSimple(
+		() => {
+			if (cfgOffline.get(options.session.settings) && options.session.model?.provider !== model.provider) {
+				throw new Error("Memory model provider differs from the active session provider");
+			}
+			return completeSimple(
 				model,
 				{
 					systemPrompt: [consolidationSystemTemplate],
@@ -1032,9 +1082,12 @@ async function runConsolidationModel(options: {
 					metadata: options.metadata,
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+					maxHttpAttempts: model.api === "openai-completions" ? 3 : undefined,
+					onAttempt: message => journal?.(message, input),
 				},
-			),
-		{ provider: model.provider },
+			);
+		},
+		{ provider: model.provider, maxAttempts: model.api === "openai-completions" ? 1 : undefined },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");
@@ -1351,15 +1404,20 @@ async function resolveMemoryModel(options: {
 	fallbackRole: string;
 }): Promise<Model | undefined> {
 	const { modelRegistry, session, fallbackRole } = options;
+	const provider = session.model?.provider;
+	if (cfgOffline.get(session.settings) && !provider) return undefined;
+	const models = cfgOffline.get(session.settings)
+		? modelRegistry.getAll().filter(model => model.provider === provider)
+		: modelRegistry.getAll();
 	const requestedModel = session.settings.getModelRole(fallbackRole) || session.settings.getModelRole("default");
 	if (requestedModel) {
-		const resolved = resolveModelRoleValue(requestedModel, modelRegistry.getAll(), {
+		const resolved = resolveModelRoleValue(requestedModel, models, {
 			settings: session.settings,
 			matchPreferences: getModelMatchPreferences(session.settings),
 		});
 		if (resolved.model) return resolved.model;
 	}
-	return session.model ?? modelRegistry.getAll()[0];
+	return session.model ?? models[0];
 }
 
 function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {

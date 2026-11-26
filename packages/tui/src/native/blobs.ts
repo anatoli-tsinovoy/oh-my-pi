@@ -1,105 +1,34 @@
 /**
- * Content-addressed binary blobs (images) for `image` nodes.
+ * Content-addressed blobs (image bytes) shared by both backends.
  *
- * `describe()` registers the bytes and puts the returned id in `image.p.blob`;
- * the native backend delivers each referenced blob once per terminal
- * connection (asking the terminal first which it holds, or through its blob
- * cache), else uploads it with verb `b` before the frame that first
- * references it.
+ * A program registers bytes once and puts the returned id (the sha256 hex of
+ * the bytes, as Tern names blobs) in an `image` node's `blob` prop or an
+ * editor decoration. The native backend uploads each blob a terminal does not
+ * hold before or alongside the frame that first references it; the terminal
+ * backend reads the bytes back by id. Bytes stay until {@link releaseBlob}.
  */
-import type { TspProps } from "@oh-my-pi/pi-wire";
-import { getImageDimensions } from "../terminal-capabilities";
-import { node } from "./describe";
-import type { NativeNode } from "./node";
 
-export interface NativeBlob {
-	readonly id: string;
-	readonly mime: string;
+/** A registered blob. */
+export interface BlobEntry {
 	readonly bytes: Uint8Array;
+	readonly mime: string;
 }
 
-const blobs = new Map<string, WeakRef<NativeBlob>>();
-const registeredBlobs = new Map<string, NativeBlob>();
-const releasedBlobs = new FinalizationRegistry<{ id: string; reference: WeakRef<NativeBlob> }>(({ id, reference }) => {
-	if (blobs.get(id) === reference) blobs.delete(id);
-});
-// Props spreads preserve ownership; wire serialization omits symbol keys.
-const kBlob = Symbol("native.blob");
-// Registration usually repeats with the same bytes object on every describe;
-// the tag skips rehashing it.
-const kBlobId = Symbol("native.blobId");
+const registry = new Map<string, BlobEntry>();
 
-interface BlobTagged {
-	[kBlobId]?: string;
+/** Register `bytes` and return their content address. Registering the same bytes again is a no-op. */
+export function registerBlob(bytes: Uint8Array, mime: string): string {
+	const id = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+	if (!registry.has(id)) registry.set(id, { bytes, mime });
+	return id;
 }
 
-function getOrCreateBlob(bytes: Uint8Array, mime: string): NativeBlob {
-	const known = (bytes as BlobTagged)[kBlobId];
-	const id = known ?? new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-	(bytes as BlobTagged)[kBlobId] = id;
-	let blob = blobs.get(id)?.deref();
-	if (!blob) {
-		blob = { id, mime, bytes };
-		const reference = new WeakRef(blob);
-		blobs.set(id, reference);
-		releasedBlobs.register(blob, { id, reference });
-	}
-	return blob;
+/** The bytes registered under `id`, if any. */
+export function getBlob(id: string): BlobEntry | undefined {
+	return registry.get(id);
 }
 
-/** Register bytes for process-lifetime, id-only use. Prefer {@link nativeImageNode} for owned images. */
-export function registerNativeBlob(bytes: Uint8Array, mime: string): string {
-	const blob = getOrCreateBlob(bytes, mime);
-	registeredBlobs.set(blob.id, blob);
-	return blob.id;
-}
-
-/** A registered blob by id. */
-export function getNativeBlob(id: string): NativeBlob | undefined {
-	return blobs.get(id)?.deref();
-}
-
-/** An image whose props own its bytes, including while hidden, unmounted, or awaiting upload. */
-export function nativeImageNode(
-	bytes: Uint8Array,
-	mime: string,
-	p?: Omit<TspProps<"image">, "blob" | "builtin">,
-	key?: string,
-): NativeNode {
-	const blob = getOrCreateBlob(bytes, mime);
-	const props = { ...p, blob: blob.id, [kBlob]: blob };
-	return node("image", props, undefined, key);
-}
-
-/**
- * An `image` node for a base64 payload: the bytes are registered as a blob and
- * the pixel size probed from the header. Decoding and hashing cost real time,
- * so callers cache the node per payload ({@link NativeImageCache}).
- */
-export function base64ImageNode(
-	data: string,
-	mimeType: string,
-	p?: Omit<TspProps<"image">, "blob" | "builtin" | "w" | "h">,
-	key?: string,
-): NativeNode {
-	const size = getImageDimensions(data, mimeType);
-	return nativeImageNode(
-		Buffer.from(data, "base64"),
-		mimeType,
-		size ? { ...p, w: size.widthPx, h: size.heightPx } : p,
-		key,
-	);
-}
-
-/** `image` nodes for base64 payloads, one per slot key, rebuilt only when the slot's payload changes. */
-export class NativeImageCache {
-	#entries = new Map<string, { data: string; node: NativeNode }>();
-
-	get(key: string, data: string, mimeType: string): NativeNode {
-		const cached = this.#entries.get(key);
-		if (cached?.data === data) return cached.node;
-		const image = base64ImageNode(data, mimeType, { alt: mimeType }, key);
-		this.#entries.set(key, { data, node: image });
-		return image;
-	}
+/** Forget the bytes of `id` (a terminal that loses the blob can no longer get it back). */
+export function releaseBlob(id: string): void {
+	registry.delete(id);
 }

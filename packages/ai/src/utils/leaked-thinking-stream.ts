@@ -27,17 +27,21 @@
  * their `thoughtSignature`.
  *
  * Modeled on {@link wrapInbandToolStream} / `InbandStreamProjector` in
- * `../dialect/owned-stream.ts`, minus all in-band tool-call grammar: tool-call
- * events are forwarded verbatim.
+ * `../dialect/owned-stream.ts`. Native tool-call events are forwarded verbatim;
+ * with {@link LeakedMarkupOptions.toolCallPattern} the visible text also runs
+ * through that model family's tool-call grammar (Kimi, DeepSeek DSML, Qwen XML),
+ * so a call the model wrote as text becomes a structured call live, for
+ * providers without such a healer of their own.
  */
 
 import { ThinkingInbandScanner } from "../dialect/thinking";
-import type { InbandScanEvent } from "../dialect/types";
+import type { InbandScanEvent, InbandScanner } from "../dialect/types";
 import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
 import type {
 	AnthropicServerToolContent,
 	AssistantMessage,
 	ImageContent,
+	StopReason,
 	TextContent,
 	ThinkingContent,
 	ToolCall,
@@ -50,6 +54,22 @@ import {
 	setStreamingPartialJson,
 } from "./block-symbols";
 import { AssistantMessageEventStream } from "./event-stream";
+import {
+	createToolCallHealingScanner,
+	generateHealedToolCallId,
+	type StreamMarkupHealingPattern,
+} from "./stream-markup-healing";
+
+/** Extra grammars {@link wrapLeakedThinkingStream} heals out of the visible text. */
+export interface LeakedMarkupOptions {
+	/** Tool-call grammar whose calls written as text become structured calls; `thinking` adds none. */
+	readonly toolCallPattern?: StreamMarkupHealingPattern;
+}
+
+/** A natural `stop` becomes `toolUse` once a healed call joins the turn; any other finish stands. */
+function healedStopReason<T extends StopReason>(reason: T, healedToolCall: boolean): T | "toolUse" {
+	return healedToolCall && reason === "stop" ? "toolUse" : reason;
+}
 
 type StreamingToolCall = ToolCall & StreamingPartialJsonCarrier;
 
@@ -80,18 +100,22 @@ function adoptThinkingState(target: ThinkingContent, source: ThinkingContent | u
  * blocks live, for every provider. Returns a new stream that re-projects the
  * inner one; the inner stream is fully consumed.
  */
-export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): AssistantMessageEventStream {
+export function wrapLeakedThinkingStream(
+	inner: AssistantMessageEventStream,
+	options: LeakedMarkupOptions = {},
+): AssistantMessageEventStream {
 	const out = new AssistantMessageEventStream();
 	void (async () => {
 		try {
 			let projector: LeakedThinkingProjector | undefined;
 			for await (const event of inner) {
+				if ("partial" in event) projector?.sync(event.partial);
 				switch (event.type) {
 					case "start":
-						projector = new LeakedThinkingProjector(out, event.partial);
+						projector = new LeakedThinkingProjector(out, event.partial, options);
 						break;
 					case "text_delta": {
-						projector ??= new LeakedThinkingProjector(out, event.partial);
+						projector ??= new LeakedThinkingProjector(out, event.partial, options);
 						const block = event.partial.content[event.contentIndex];
 						projector.text(
 							event.contentIndex,
@@ -106,7 +130,7 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 						break;
 					}
 					case "thinking_delta": {
-						projector ??= new LeakedThinkingProjector(out, event.partial);
+						projector ??= new LeakedThinkingProjector(out, event.partial, options);
 						const block = event.partial.content[event.contentIndex];
 						projector.thinking(event.contentIndex, event.delta, block?.type === "thinking" ? block : undefined);
 						break;
@@ -117,11 +141,11 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 						break;
 					}
 					case "image_end":
-						projector ??= new LeakedThinkingProjector(out, event.partial);
+						projector ??= new LeakedThinkingProjector(out, event.partial, options);
 						projector.image(event.contentIndex, event.content);
 						break;
 					case "toolcall_start": {
-						projector ??= new LeakedThinkingProjector(out, event.partial);
+						projector ??= new LeakedThinkingProjector(out, event.partial, options);
 						const block = event.partial.content[event.contentIndex];
 						projector.toolStart(event.contentIndex, block?.type === "toolCall" ? block : undefined);
 						break;
@@ -135,13 +159,24 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 						projector?.toolEnd(event.contentIndex, event.toolCall);
 						break;
 					case "done": {
-						projector ??= new LeakedThinkingProjector(out, event.message);
+						projector ??= new LeakedThinkingProjector(out, event.message, options);
 						const content = projector.finish(event.message);
-						out.push({ type: "done", reason: event.reason, message: { ...event.message, content } });
+						const reason = healedStopReason(event.reason, projector.healedToolCall);
+						out.push({ type: "done", reason, message: { ...event.message, content, stopReason: reason } });
 						return;
 					}
 					case "error": {
-						projector ??= new LeakedThinkingProjector(out, event.error);
+						// An error message with empty content means the provider
+						// discarded the partial turn; forward it as-is rather than
+						// rebuild it from #partial, which would resurrect exactly what
+						// was discarded. Non-empty error content is still healed: a
+						// provider that reports partial output alongside the error did
+						// send that output.
+						if (projector !== undefined && event.error.content.length === 0) {
+							out.push({ type: "error", reason: event.reason, error: event.error });
+							return;
+						}
+						projector ??= new LeakedThinkingProjector(out, event.error, options);
 						const content = projector.finish(event.error);
 						out.push({ type: "error", reason: event.reason, error: { ...event.error, content } });
 						return;
@@ -154,9 +189,9 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 			// Inner ended via end(result) without a terminal event.
 			if (!out.done) {
 				const result = await inner.result();
-				projector ??= new LeakedThinkingProjector(out, result);
+				projector ??= new LeakedThinkingProjector(out, result, options);
 				const content = projector.finish(result);
-				out.end({ ...result, content });
+				out.end({ ...result, content, stopReason: healedStopReason(result.stopReason, projector.healedToolCall) });
 			}
 		} catch (err) {
 			if (!out.done) out.fail(err);
@@ -176,6 +211,9 @@ type AnchoredContent = { block: ProjectedContent; sourceIndex: number; order: nu
 class LeakedThinkingProjector {
 	readonly #out: AssistantMessageEventStream;
 	readonly #healer = new ThinkingInbandScanner({ impliedOpen: true });
+	/** Tool-call grammar run ahead of {@link #healer}; its text is then healed for reasoning. */
+	readonly #toolScanner: InbandScanner | undefined;
+	#healedToolCall = false;
 	#partial: AssistantMessage;
 	#text: OpenBlock;
 	#thinking: OpenBlock;
@@ -196,10 +234,27 @@ class LeakedThinkingProjector {
 	/** Native thinking blocks whose projected `thinking_end` awaits the source end event. */
 	#pendingThinkingEnds = new Set<number>();
 
-	constructor(out: AssistantMessageEventStream, seed: AssistantMessage) {
+	constructor(out: AssistantMessageEventStream, seed: AssistantMessage, options: LeakedMarkupOptions) {
 		this.#out = out;
+		this.#toolScanner = options.toolCallPattern && createToolCallHealingScanner(options.toolCallPattern);
 		this.#partial = { ...seed, content: [] };
 		this.#out.push({ type: "start", partial: this.#partial });
+	}
+
+	/** Whether a call was healed out of the visible text. */
+	get healedToolCall(): boolean {
+		return this.#healedToolCall;
+	}
+
+	/**
+	 * Follow the source message's non-content fields. Providers replace some of
+	 * them while streaming (Gemini assigns a fresh `usage` per chunk), and the
+	 * projected partial is what downstream wrappers read mid-stream.
+	 */
+	sync(source: AssistantMessage): void {
+		const content = this.#partial.content;
+		Object.assign(this.#partial, source);
+		this.#partial.content = content;
 	}
 
 	/** Feed a visible-text delta through the healer, splitting leaked fences live. */
@@ -213,7 +268,7 @@ class LeakedThinkingProjector {
 		this.#activeTextSourceIndex = srcIndex;
 		this.#fedTextLengths.set(srcIndex, (this.#fedTextLengths.get(srcIndex) ?? 0) + delta.length);
 		if (startsSource || signature !== undefined) this.#lastTextSignature = signature;
-		this.#apply(this.#healer.feed(delta), this.#lastTextSignature, srcIndex);
+		this.#apply(this.#feed(delta), this.#lastTextSignature, srcIndex);
 	}
 
 	/** Forward a native thinking delta, preserving its source block identity, signature and summary state. */
@@ -246,9 +301,10 @@ class LeakedThinkingProjector {
 	thinkingEnd(srcIndex: number, source: ThinkingContent | undefined): void {
 		const index = this.#thinkingBlocks.get(srcIndex);
 		if (index === undefined) {
-			if (source?.thinkingSignature) this.#projectSignedThinking(srcIndex, "", source);
+			if (source?.thinkingSignature) this.#projectSignedThinking(srcIndex, source);
 			return;
 		}
+		this.#appendThinkingTail(index, source);
 		adoptThinkingState(this.#partial.content[index] as ThinkingContent, source);
 		if (!this.#pendingThinkingEnds.delete(index)) return;
 		if (this.#thinking?.index === index) this.#thinking = undefined;
@@ -261,18 +317,29 @@ class LeakedThinkingProjector {
 	 * semantics as {@link toolStart}) so block order survives for replay —
 	 * the signature item must precede the function call it signs.
 	 */
-	#projectSignedThinking(srcIndex: number, thinking: string, source: ThinkingContent): void {
+	#projectSignedThinking(srcIndex: number, source: ThinkingContent): void {
 		this.#flushHealer();
 		this.#closeText();
 		this.#closeThinking();
-		const block: ThinkingContent = { type: "thinking", thinking };
+		const block: ThinkingContent = { type: "thinking", thinking: "" };
 		adoptThinkingState(block, source);
 		this.#partial.content.push(block);
 		const index = this.#partial.content.length - 1;
 		this.#anchor(index, srcIndex);
 		this.#thinkingBlocks.set(srcIndex, index);
 		this.#out.push({ type: "thinking_start", contentIndex: index, partial: this.#partial });
+		this.#appendThinkingTail(index, source);
 		this.#emitThinkingEnd(index);
+	}
+
+	/** Emit only finalized native thinking that did not arrive as deltas. */
+	#appendThinkingTail(index: number, source: ThinkingContent | undefined): void {
+		const block = this.#partial.content[index] as ThinkingContent;
+		if (!source || source.thinking.length <= block.thinking.length || !source.thinking.startsWith(block.thinking))
+			return;
+		const delta = source.thinking.slice(block.thinking.length);
+		block.thinking += delta;
+		this.#out.push({ type: "thinking_delta", contentIndex: index, delta, partial: this.#partial });
 	}
 
 	/** Forward a completed native image after releasing held text. */
@@ -370,7 +437,7 @@ class LeakedThinkingProjector {
 			const block = message.content[srcIndex];
 			if (block?.type !== "thinking" || !block.thinkingSignature) continue;
 			if (this.#thinkingBlocks.has(srcIndex)) continue;
-			this.#projectSignedThinking(srcIndex, block.thinking, block);
+			this.#projectSignedThinking(srcIndex, block);
 		}
 		for (let srcIndex = 0; srcIndex < message.content.length; srcIndex++) {
 			const block = message.content[srcIndex];
@@ -385,7 +452,7 @@ class LeakedThinkingProjector {
 			}
 			this.#activeTextSourceIndex = srcIndex;
 			this.#lastTextSignature = block.textSignature;
-			this.#apply(this.#healer.feed(block.text.slice(fedLength)), this.#lastTextSignature, srcIndex);
+			this.#apply(this.#feed(block.text.slice(fedLength)), this.#lastTextSignature, srcIndex);
 		}
 		this.#flushHealer();
 		this.#closeText();
@@ -398,7 +465,39 @@ class LeakedThinkingProjector {
 			if (event.type === "text") this.#emitText(event.text, signature, srcIndex);
 			else if (event.type === "thinkingDelta") this.#emitHealedThinking(event.delta, srcIndex);
 			else if (event.type === "impliedThinkingEnd") this.#closeImpliedThinking(srcIndex);
+			else if (event.type === "toolEnd") this.#emitHealedToolCall(event.name, event.arguments, srcIndex);
 		}
+	}
+
+	#feed(text: string): InbandScanEvent[] {
+		return this.#toolScanner ? this.#healThinking(this.#toolScanner.feed(text)) : this.#healer.feed(text);
+	}
+
+	/** Pipe the tool scanner's text through the reasoning healer; its other events pass through in order. */
+	#healThinking(events: readonly InbandScanEvent[]): InbandScanEvent[] {
+		const out: InbandScanEvent[] = [];
+		for (const event of events) {
+			if (event.type === "text") out.push(...this.#healer.feed(event.text));
+			else out.push(event);
+		}
+		return out;
+	}
+
+	/** A call healed out of the visible text, emitted complete in stream order. */
+	#emitHealedToolCall(name: string, args: Record<string, unknown>, srcIndex: number): void {
+		this.#closeText();
+		this.#closeThinking();
+		const json = JSON.stringify(args);
+		const block: StreamingToolCall = { type: "toolCall", id: generateHealedToolCallId(), name, arguments: args };
+		setStreamingPartialJson(block, json);
+		this.#partial.content.push(block);
+		const index = this.#partial.content.length - 1;
+		this.#anchor(index, srcIndex);
+		this.#healedToolCall = true;
+		this.#out.push({ type: "toolcall_start", contentIndex: index, partial: this.#partial });
+		this.#out.push({ type: "toolcall_delta", contentIndex: index, delta: json, partial: this.#partial });
+		clearStreamingPartialJson(block);
+		this.#out.push({ type: "toolcall_end", contentIndex: index, toolCall: block, partial: this.#partial });
 	}
 
 	/**
@@ -467,7 +566,9 @@ class LeakedThinkingProjector {
 	#flushHealer(): void {
 		const srcIndex = this.#activeTextSourceIndex;
 		if (srcIndex !== undefined) {
-			this.#apply(this.#healer.flush(), this.#lastTextSignature, srcIndex);
+			const events = this.#toolScanner ? this.#healThinking(this.#toolScanner.flush()) : [];
+			events.push(...this.#healer.flush());
+			this.#apply(events, this.#lastTextSignature, srcIndex);
 		}
 		this.#activeTextSourceIndex = undefined;
 	}

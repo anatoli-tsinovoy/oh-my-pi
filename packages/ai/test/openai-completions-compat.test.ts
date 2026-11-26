@@ -233,6 +233,8 @@ describe("openai-completions compatibility", () => {
 			rejectRootObjectUnion: false,
 			retryWithoutStrictOnGrammarError: false,
 			supportsPromptCacheKey: false,
+			foldUserAfterToolResult: false,
+			splitToolCalls: false,
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
@@ -2462,7 +2464,7 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 	});
 
 	it("preserves OpenRouter Anthropic cache_control detection", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const payload = await captureOpenAICompletionsPayload(model, cacheContext());
 		const content = getLastPayloadContent(payload);
 		const textPart = getLastTextPart(content);
@@ -2470,8 +2472,8 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 		expect(textPart?.cache_control).toEqual({ type: "ephemeral" });
 	});
 
-	it("does not attach Anthropic cache_control to empty assistant tool-call content", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+	it("anchors Anthropic cache_control on the trailing tool result during a tool loop", async () => {
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
 			content: [
@@ -2508,17 +2510,16 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 			messages: [{ role: "user", content: "cache me", timestamp: 0 }, assistantMessage, toolResultMessage],
 		});
 		const messages = getPayloadMessages(payload);
-		const assistant = messages.find(message => {
-			const toolCalls = message.tool_calls;
-			return message.role === "assistant" && Array.isArray(toolCalls);
-		});
-		const firstUser = messages.find(message => message.role === "user");
-		const userContent = firstUser?.content;
-		const textPart = getLastTextPart(userContent);
+		const [user, assistant, tool] = messages;
 
+		// Empty tool-call replay content must stay a string: an empty text part
+		// with cache_control is rejected by Anthropic/OpenRouter.
 		expect(assistant?.content).toBe("");
-		expect(textPart?.text).toBe("cache me");
-		expect(textPart?.cache_control).toEqual({ type: "ephemeral" });
+		expect(getLastTextPart(user?.content)?.cache_control).toBeUndefined();
+		expect(tool?.role).toBe("tool");
+		expect(tool?.content).toEqual([
+			{ type: "text", text: "Read image file [image/webp]", cache_control: { type: "ephemeral" } },
+		]);
 	});
 
 	it("does not infer Anthropic cache_control for custom Claude ids without compat", async () => {
@@ -2529,7 +2530,7 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 });
 describe("openrouterVariant request integration", () => {
 	it("appends the configured variant suffix to params.model for OpenRouter requests", async () => {
-		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const { promise, resolve } = Promise.withResolvers<unknown>();
 		const fetchMock = createMockFetch(["[DONE]"]);
 		streamOpenAICompletions(model, baseContext(), {
@@ -2544,7 +2545,7 @@ describe("openrouterVariant request integration", () => {
 	});
 
 	it("does not override an explicit variant in the model id", async () => {
-		const base = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
+		const base = getBundledModel("openrouter", "anthropic/claude-sonnet-4.6") as Model<"openai-completions">;
 		const model: Model<"openai-completions"> = buildModel({
 			...base,
 			id: `${base.id}:online`,
@@ -2704,6 +2705,55 @@ describe("Moonshot Flavored JSON Schema tool normalization", () => {
 	});
 });
 
+describe("GitHub Copilot Gemini tool schemas (issue #20198)", () => {
+	// MCP tools (e.g. Grafana's update_dashboard) declare JSON Schema type
+	// arrays; Copilot's Gemini backend answers them with a blank 400.
+	const mcpTool: Tool = {
+		name: "mcp__grafana_update_dashboard",
+		description: "update a dashboard",
+		parameters: {
+			type: "object",
+			properties: {
+				value: { type: ["string", "number", "integer", "boolean", "object", "array", "null"] },
+				folder: { type: ["string", "null"] },
+			},
+		},
+	};
+
+	function copilotModel(id: string): Model<"openai-completions"> {
+		return buildModel({
+			...gpt4oMiniSpec,
+			provider: "github-copilot",
+			baseUrl: "https://api.enterprise.githubcopilot.com",
+			id,
+			name: id,
+		});
+	}
+
+	async function wireProperties(model: Model<"openai-completions">): Promise<Record<string, unknown>> {
+		const payload = await captureOpenAICompletionsPayload(model, { ...baseContext(), tools: [mcpTool] });
+		const tools = toObject(payload)?.tools;
+		if (!Array.isArray(tools)) throw new Error("payload tools missing");
+		const properties = getNestedObject(getNestedObject(tools[0], "function")?.parameters, "properties");
+		if (!properties) throw new Error("tool parameters missing");
+		return properties;
+	}
+
+	it("scalarizes type arrays for Gemini models", async () => {
+		const properties = await wireProperties(copilotModel("gemini-4-hydrogen"));
+		expect(JSON.stringify(properties)).not.toContain('"type":[');
+		expect(properties.folder).toEqual({ type: "string", nullable: true });
+		const value = toObject(properties.value);
+		expect(value?.nullable).toBe(true);
+		expect(value?.anyOf).toContainEqual({ type: "integer" });
+	});
+
+	it("keeps standard JSON Schema for non-Gemini Copilot models", async () => {
+		const properties = await wireProperties(copilotModel("gpt-5.5"));
+		expect(properties.folder).toEqual({ type: ["string", "null"] });
+	});
+});
+
 describe("grammar tool-schema normalization (issue #5914)", () => {
 	const primitiveUnion = {
 		anyOf: [
@@ -2846,6 +2896,36 @@ describe("mistral prompt_cache_key regression (#15079)", () => {
 		});
 		const payloadObject = toObject(payload);
 		expect(payloadObject === null || !("prompt_cache_key" in payloadObject)).toBe(true);
+	});
+});
+
+describe("Mistral reasoning_effort ladders (#19265)", () => {
+	// docs.mistral.ai/inference/conversations/reasoning: GLM 5.3 and Flash take
+	// low/high/max; Large 4 takes low/medium/high and rejects minimal/xhigh/max.
+	it("offers each model only the efforts Mistral documents and sends them on the wire", async () => {
+		const ladders = [
+			["zai-glm-5-3", [Effort.Low, Effort.High, Effort.Max]],
+			["zai-glm-5-3-flash", [Effort.Low, Effort.High, Effort.Max]],
+			["mistral-large-4", [Effort.Low, Effort.Medium, Effort.High]],
+			["mistral-large-4-0", [Effort.Low, Effort.Medium, Effort.High]],
+		] as const;
+		for (const [id, efforts] of ladders) {
+			const model = getBundledModel<"openai-completions">("mistral", id);
+			expect(getSupportedEfforts(model)).toEqual([...efforts]);
+			const send = async (requested: Effort) =>
+				toObject(
+					await captureOpenAICompletionsPayload(model, undefined, {
+						reasoning: clampThinkingLevelForModel(model, requested),
+					}),
+				)?.reasoning_effort;
+			// A documented effort goes out as itself, `max` included.
+			for (const effort of efforts) expect(await send(effort)).toBe(effort);
+			// An undocumented one is clamped to a documented value, never sent as-is.
+			for (const requested of [Effort.Minimal, Effort.Medium, Effort.XHigh, Effort.Max]) {
+				if ((efforts as readonly Effort[]).includes(requested)) continue;
+				expect(efforts as readonly unknown[]).toContain(await send(requested));
+			}
+		}
 	});
 });
 

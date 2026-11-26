@@ -14,7 +14,7 @@
  * `thinking` overrides (same vocabulary as the cascade, validated against the
  * row's API); catalog axes are rejected because they stay rule-owned.
  */
-import { API_COMPAT_RECORDS } from "../../src/compat/axes";
+import { API_COMPAT_RECORDS, type RuleAxes } from "../../src/compat/axes";
 import type {
 	CompiledProvider,
 	CompiledProviderDiscovery,
@@ -31,7 +31,7 @@ import {
 	runnerApiKind,
 	type TokenCost,
 } from "../../src/types";
-import { axisFor, collectAxis, type RuleAxes } from "./compile-axes";
+import { axisFor, collectAxis } from "./compile-axes";
 import {
 	CompatCompileError,
 	type KdlNodeView,
@@ -56,11 +56,13 @@ const KNOWN_APIS = [
 	"google-generative-ai",
 	"google-gemini-cli",
 	"google-vertex",
+	"kiro-api",
 	"ollama-chat",
 	"cursor-agent",
 	"gitlab-duo-agent",
 	"devin-agent",
 	"factory-droid-agent",
+	"antigravity-acp",
 	"apple-foundation-models",
 ] as const satisfies readonly KnownApi[];
 type _MissingKnownApis = Exclude<KnownApi, (typeof KNOWN_APIS)[number]>;
@@ -82,6 +84,7 @@ export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"automatic-default",
 	"dynamic-models-authoritative",
 	"skip-cross-provider-reference-fills",
+	"keep-bundled-names",
 	"discovery",
 	"kind-apis",
 	"seed",
@@ -391,6 +394,10 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "skip-cross-provider-reference-fills":
 				if (provider.skipCrossProviderReferenceFills !== undefined) malformed(child);
 				provider.skipCrossProviderReferenceFills = singleBoolean(child);
+				break;
+			case "keep-bundled-names":
+				if (provider.keepBundledNames !== undefined) malformed(child);
+				provider.keepBundledNames = singleBoolean(child);
 				break;
 			case "discovery":
 				if (provider.discovery !== undefined) malformed(child);

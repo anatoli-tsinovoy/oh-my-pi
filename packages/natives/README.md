@@ -9,7 +9,7 @@ Native Rust functionality via N-API.
 - **SIXEL**: Terminal image encoding for SIXEL-capable terminals (decode, resize, encode in one pass)
 - **Audio**: Cross-platform low-latency microphone capture and gapless speaker playback
 - **WebRTC**: Native Opus media, SDP offer/answer negotiation, and data-channel events for live sessions
-- **File locking**: Process-owned cross-process locks with in-memory kernel names on Linux/Windows and `flock(2)` sidecars on other Unix platforms
+- **File locking**: Process-owned cross-process locks with in-memory kernel names on Windows, open-file-description lock sidecars on Linux and `flock(2)` sidecars on other Unix platforms
 - **Local IPC**: `IpcServer`/`IpcConnection` over Unix sockets and Windows named pipes — owner-only access, single-instance binding with stale-endpoint takeover, newline or raw framing; `ipcEndpoint(dir, name)` names endpoints per platform
 - **PDF**: In-memory PDF-to-Markdown extraction with OCR-page classification via `pdf-inspector`
 - **Binary patches**: `applyBinaryPatch(oldPath, patchPath, outPath)` applies an HDiffPatch single-stream patch (HDIFFSF20, zstd or uncompressed), streaming from files; callers verify digests
@@ -41,12 +41,29 @@ const files = await find({
 
 // SIXEL encode for a terminal cell box (px), off the JS thread
 // (`encodeSixel` is the synchronous form)
-const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx);
+const backgroundRgb = 0x202040; // Actual terminal background, packed 0xRRGGBB
+const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx, backgroundRgb);
 
 // Extract PDF text and identify pages that still need OCR
 const pdf = await pdfToMarkdown(pdfBytes);
 console.log(pdf.markdown, pdf.pagesNeedingOcr);
 ```
+
+Both SIXEL encoder forms require the terminal background as a fourth argument,
+packed as a 24-bit `0xRRGGBB` number. When resizing images with alpha, RGB is
+premultiplied before Lanczos filtering so transparent pixels cannot darken or
+discolor visible edges. After resizing, the terminal background is composited
+without applying alpha twice. Fully transparent pixels remain transparent;
+unscaled images retain their existing blending path. Re-encode when the terminal
+background RGB changes.
+
+### PTY dimensions
+
+`normalizePtyDimensions(cols, rows)` returns `{ cols, rows }` with fractional
+values truncated toward zero and dimensions clamped to 20–400 columns and
+5–200 rows. It shares the native bounds used by `PtySession.start`,
+`startArgv`, and `resize`. Use the returned dimensions when sizing a screen
+emulator so its viewport matches the native PTY.
 
 ### Lazy Windows path helpers
 
@@ -66,13 +83,58 @@ bun run build
 bun run check
 ```
 
+Android ARM64 has an explicit experimental Bazel cross-target for the native
+addon; it is not part of the `all` native aggregate. From a Linux host with
+Bazel and Android NDK 25b or newer, build just the addon from the workspace
+root:
+
+```sh
+ANDROID_NDK_HOME=/path/to/android-ndk bun scripts/bazel-natives.ts android-arm64
+```
+
+The installer targets Android 9 (API 28) and installs
+`packages/natives/native/pi_natives.android-arm64.node`. It only load-probes
+artifacts native to the current host, so a Linux builder never loads Android.
+
+To cross-build a standalone coding-agent Android binary, use the optional Linux-host command:
+
+```sh
+ANDROID_NDK_HOME=/path/to/android-ndk bun --cwd=packages/coding-agent run build:android
+```
+
+Use Android NDK 25b or newer and released Bun 1.4.4 on the Linux build host.
+The command builds the explicit Bazel `android-arm64` native target, then
+compiles the CLI for Bun's `bun-linux-arm64-android` target. The raw executable
+is written to `packages/coding-agent/dist/omp-android-arm64`; Bun's runtime is
+included, so it does not need an external Bun installation in Termux.
+The bundled Bun 1.4.4 runtime and native addon both target Android 9 (API 28).
+The generic `build` and `CROSS_TARGET` paths remain for ordinary
+host/cross-target builds.
+
+Install a published binary from Termux with:
+
+```sh
+curl -fsSL https://omp.sh/install | sh -s -- --binary
+```
+
+Cross-compilation does not verify Android/Termux or seccomp compatibility;
+validate the executable on a native non-root Termux device before publishing.
+
+The Android addon omits the native desktop and clipboard modules. The desktop
+declarations remain available for type compatibility, but Android does not
+provide desktop sessions. The package root and
+`@oh-my-pi/pi-natives/desktop` can both be imported; calling
+`createDesktopSession()` from the subpath throws
+`Unsupported: desktop sessions are not supported on this platform.` No Android
+screen-capture or input support is provided.
+
 ## Architecture
 
 `@oh-my-pi/pi-natives` publishes a small core package plus generated
 platform-specific optional dependency packages:
 
 ```
-crates/pi-natives/       # Rust source (workspace member)
+crates/natives/       # Rust source (workspace member)
   src/lib.rs             # N-API exports
   src/sixel.rs           # SIXEL terminal-image encoding
   Cargo.toml             # Rust dependencies

@@ -21,9 +21,9 @@ function makeSession(cwd: string): ToolSession {
 		getSessionFile: () => path.join(cwd, "session.jsonl"),
 		getSessionSpawns: () => "*",
 		getArtifactsDir: () => path.join(cwd, "session"),
-		allocateOutputArtifact: async (toolType: string) => ({
+		allocateOutputArtifact: async () => ({
 			id: "a1",
-			path: path.join(cwd, "session", `a1.${toolType}.log`),
+			path: path.join(cwd, "session", `a1.log`),
 		}),
 		settings: Settings.isolated(),
 	};
@@ -64,11 +64,11 @@ describe("read tool directory listings honor line selectors (regression: was sil
 		expect(lines.length).toBeLessThanOrEqual(11);
 		// "Use :N to continue" pagination hint when more entries remain.
 		expect(output).toContain("more lines in listing");
-		expect(output).toContain("Use :41 to continue");
+		expect(output).toContain("Use :41- to continue");
 	});
 
-	it("returns from offset to end for `:start`", async () => {
-		const result = await tool.execute("call-offset", { path: `${testDir}:30` });
+	it("returns from offset to end for `:start-`", async () => {
+		const result = await tool.execute("call-offset", { path: `${testDir}:30-` });
 		const output = getTextOutput(result);
 		const lines = output.split("\n").filter(line => line.includes("file-"));
 
@@ -106,6 +106,38 @@ describe("read tool directory listings honor line selectors (regression: was sil
 		expect(expanded).toContain("c-40.txt");
 		expect(expanded).not.toContain("more");
 	});
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"reports an unreadable root instead of claiming its files are absent",
+		async () => {
+			fs.chmodSync(testDir, 0o000);
+			try {
+				await expect(tool.execute("call-denied-root", { path: testDir })).rejects.toThrow(
+					/Cannot read directory:.*(permission denied|os error 13)/i,
+				);
+			} finally {
+				fs.chmodSync(testDir, 0o755);
+			}
+		},
+	);
+
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"marks an unreadable child and keeps listing its readable siblings",
+		async () => {
+			const child = path.join(testDir, "blocked");
+			fs.mkdirSync(child);
+			fs.writeFileSync(path.join(child, "nested.txt"), "present");
+			fs.chmodSync(child, 0o000);
+			try {
+				const output = getTextOutput(await tool.execute("call-denied-child", { path: testDir }));
+				expect(output).toMatch(/- blocked\/ \[unreadable: [^\]]*(permission denied|os error 13)[^\]]*\]/i);
+				expect(output).toContain("file-001.txt");
+				expect(output).toContain("file-060.txt");
+			} finally {
+				fs.chmodSync(child, 0o755);
+			}
+		},
+	);
 
 	it("emits a clear `beyond end` notice instead of returning an empty body", async () => {
 		const result = await tool.execute("call-beyond", { path: `${testDir}:9999` });

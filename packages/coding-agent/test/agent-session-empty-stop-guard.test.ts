@@ -4,6 +4,7 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ThinkingContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
@@ -61,22 +62,11 @@ function emptyStop(): MockResponse {
 	};
 }
 
-// A zero-block `stop` for which the provider still billed output tokens: content
-// was generated and dropped downstream (e.g. a filter/refusal flattened to
-// `finish_reason: "stop"` by a proxy), so the context/`/shake images` hint is wrong.
-function filteredEmptyStop(): MockResponse {
+function reportedOutputEmptyStop(reasoningTokens?: number): MockResponse {
 	return {
 		content: [],
 		stopReason: "stop",
-		usage: { output: 126, cacheRead: 100 },
-	};
-}
-
-function reasoningOnlyEmptyStop(): MockResponse {
-	return {
-		content: [],
-		stopReason: "stop",
-		usage: { output: 126, reasoningTokens: 126, cacheRead: 100 },
+		usage: { output: 126, cacheRead: 100, ...(reasoningTokens === undefined ? {} : { reasoningTokens }) },
 	};
 }
 
@@ -121,6 +111,7 @@ async function createHarness(
 		extensionRunner?: ExtensionRunner;
 		provider?: string;
 		id?: string;
+		ownedAsyncJobManager?: AsyncJobManager;
 	} = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-empty-stop-guard-");
@@ -162,6 +153,8 @@ async function createHarness(
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 		extensionRunner: options.extensionRunner,
+		agentId: options.ownedAsyncJobManager ? "Main" : undefined,
+		ownedAsyncJobManager: options.ownedAsyncJobManager,
 	});
 	const harness = { session, tempDir };
 	activeHarnesses.push(harness);
@@ -337,11 +330,13 @@ describe("AgentSession empty stop guard", () => {
 		expect(assistantText(session.agent.state.messages)).toContain("fresh final answer");
 	});
 
-	it("accepts a signed thinking-only stop without retrying", async () => {
-		const { session, mock } = await createHarness([
-			signedThinkingOnlyStop(),
-			{ content: ["must not be requested"], stopReason: "stop" },
-		]);
+	it("keeps a signed thinking-only stop instead of discarding it as empty", async () => {
+		// Unexpected-stop recovery owns signed thinking-only stops; disable it so
+		// only the empty-stop guard decides the turn.
+		const { session, mock } = await createHarness(
+			[signedThinkingOnlyStop(), { content: ["must not be requested"], stopReason: "stop" }],
+			{ "features.unexpectedStopDetection": "none" },
+		);
 
 		await session.prompt("finish with signed thinking");
 		await session.waitForIdle();
@@ -528,83 +523,71 @@ describe("AgentSession empty stop guard", () => {
 			success: false,
 			attempt: 3,
 		});
-		expect(retryEndEvents[0]?.finalError).toContain("/shake images");
 	});
 
-	it("names billed output tokens instead of the context hint when a capped empty stop billed output", async () => {
-		const { session, mock } = await createHarness([
-			filteredEmptyStop(),
-			filteredEmptyStop(),
-			filteredEmptyStop(),
-			filteredEmptyStop(),
-		]);
-		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+	it("retries an empty stop when a background job wakes the session after the retry cap", async () => {
+		const manager = new AsyncJobManager({});
+		const { session, mock } = await createHarness(
+			[emptyStop(), emptyStop(), emptyStop(), emptyStop(), emptyStop(), { content: ["recovered after async wake"] }],
+			{},
+			{ ownedAsyncJobManager: manager },
+		);
+		const failedAttempts: number[] = [];
 		session.subscribe(event => {
-			if (event.type === "auto_retry_end") {
-				retryEndEvents.push(event);
-			}
+			if (event.type === "auto_retry_end" && !event.success) failedAttempts.push(event.attempt);
 		});
 
-		await expectPromptCompletes(session.prompt("answer that gets filtered"));
+		await expectPromptCompletes(session.prompt("answer without tools"));
 		await session.waitForIdle();
-
 		expect(mock.calls).toHaveLength(4);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]?.success).toBe(false);
-		const finalError = retryEndEvents[0]?.finalError ?? "";
-		expect(finalError).toContain("billed 126 output tokens");
-		expect(finalError).not.toContain("/shake images");
+		expect(failedAttempts).toEqual([3]);
+
+		// Owner-routed delivery starts a new turn without submitting a user prompt.
+		manager.register("task", "background work", async () => "job completed", { ownerId: "Main" });
+		await manager.waitForOwnerJobs("Main");
+		await manager.drainDeliveries({ filter: { ownerId: "Main" } });
+		await session.waitForRunEnd();
+
+		expect(failedAttempts).toEqual([3]);
+		expect(mock.calls).toHaveLength(6);
+		expect(assistantText(session.agent.state.messages)).toContain("recovered after async wake");
 	});
 
-	it("keeps the context hint when a capped zero-block stop billed only reasoning tokens", async () => {
-		const { session, mock } = await createHarness([
-			reasoningOnlyEmptyStop(),
-			reasoningOnlyEmptyStop(),
-			reasoningOnlyEmptyStop(),
-			reasoningOnlyEmptyStop(),
-		]);
-		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_end") {
-				retryEndEvents.push(event);
+	it.each([
+		["unknown reasoning usage", undefined],
+		["partial reasoning usage", 42],
+		["reasoning-only usage", 126],
+	] as const)(
+		"reports capped empty-stop diagnostics without inventing a cause for %s",
+		async (_label, reasoningTokens) => {
+			const { session } = await createHarness(
+				Array.from({ length: 4 }, () => reportedOutputEmptyStop(reasoningTokens)),
+			);
+			const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_end") retryEndEvents.push(event);
+			});
+
+			await expectPromptCompletes(session.prompt("answer without tools"));
+			await session.waitForIdle();
+
+			expect(retryEndEvents).toEqual([expect.objectContaining({ success: false, attempt: 3 })]);
+			const diagnostic = retryEndEvents[0]?.finalError ?? "";
+			if (reasoningTokens === 126) {
+				expect(diagnostic).toContain("/shake images");
+				expect(diagnostic).not.toContain("provider reported");
+			} else {
+				expect(diagnostic).toContain("126 output tokens");
+				expect(diagnostic).not.toContain("/shake images");
+				if (reasoningTokens === undefined) {
+					expect(diagnostic).not.toContain("reasoning tokens");
+				} else {
+					expect(diagnostic).toContain("42 reasoning tokens");
+				}
 			}
-		});
-
-		await expectPromptCompletes(session.prompt("think without delivering an answer"));
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(4);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]?.success).toBe(false);
-		const finalError = retryEndEvents[0]?.finalError ?? "";
-		expect(finalError).toContain("/shake images");
-		expect(finalError).not.toContain("billed");
-	});
-
-	it("keeps the context hint for a capped thinking-only stop even though it billed output", async () => {
-		const { session, mock } = await createHarness([
-			thinkingOnlyStop(),
-			thinkingOnlyStop(),
-			thinkingOnlyStop(),
-			thinkingOnlyStop(),
-		]);
-		const retryEndEvents: Array<Extract<AgentSessionEvent, { type: "auto_retry_end" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_end") {
-				retryEndEvents.push(event);
-			}
-		});
-
-		await expectPromptCompletes(session.prompt("think without answering"));
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(4);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]?.success).toBe(false);
-		const finalError = retryEndEvents[0]?.finalError ?? "";
-		expect(finalError).toContain("/shake images");
-		expect(finalError).not.toContain("billed");
-	});
+			expect(diagnostic).not.toMatch(/filter|dropped|generated and/i);
+		},
+	);
 
 	it("ends auto-retry state when empty stop retries hit the cap", async () => {
 		mockSchedulerWaitWithClock();

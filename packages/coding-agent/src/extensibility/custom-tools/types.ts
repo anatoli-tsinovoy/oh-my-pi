@@ -18,8 +18,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { FetchImpl, Model, Static, TSchema } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
-import type { NativeToolView, RenderResultOptions } from "@oh-my-pi/pi-tui/tools/renderer";
+import type { RenderResultOptions } from "../../tools/details/renderer";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -28,9 +27,9 @@ import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { ExtensionRender, ExtensionTheme } from "../extensions/render-types";
 import type { ReadonlySessionManager } from "../../session/session-manager";
-import type { TodoItem } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoItem } from "../../tools/details/todo";
 import type { RetryErrorUpdate } from "../shared-events";
 
 /** Alias for clarity */
@@ -40,7 +39,7 @@ export type CustomToolUIContext = HookUIContext;
 export type { ExecOptions, ExecResult } from "../../exec/exec";
 /** Re-export for custom tools to use in execute signature */
 export type { AgentToolResult, AgentToolUpdateCallback, ToolApproval, ToolApprovalDecision, ToolTier };
-/** Display state handed to `renderCall`/`renderResult`; owned by pi-tui. */
+/** Display state handed to `renderCall`/`renderResult`. */
 export type { RenderResultOptions };
 
 /** Pending action entry consumed by the hidden resolve tool */
@@ -213,12 +212,18 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 	mcpServerName?: string;
 	/** Original MCP tool name for discovery/search metadata. */
 	mcpToolName?: string;
+	/** MCP read-only annotation, independent of the approval tier. */
+	mcpReadOnlyHint?: boolean;
 	/** Previous public name when a rename changed minting (e.g. digits kept in
 	 *  MCP names). Approval resolution honors `deny`/`prompt` keyed on it. */
 	legacyName?: string;
 
 	/** Capability tier declaration used by approval gates. Omitted means "exec". */
 	approval?: ToolApproval;
+
+	/** Exact targets an approval mode may remember for this call (`always-ask-cached`), one key per
+	 *  target, derived from the call's args. Omit it and approvals are never remembered per target. */
+	approvalCacheTargets?: (args: unknown) => readonly string[] | undefined;
 
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
@@ -240,26 +245,23 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
 	onSession?: (event: CustomToolSessionEvent, ctx: CustomToolContext) => void | Promise<void>;
-	/** Custom rendering for tool call display - return a Component */
-	renderCall?: (args: Static<TParams>, options: RenderResultOptions, theme: Theme) => Component;
+	/**
+	 * Custom rendering for tool call display: pi-tui nodes (drawn in the terminal and in Tern) or a
+	 * rows object `{ render(width): string[] }` (drawn in the terminal; Tern shows the generic card).
+	 */
+	renderCall?: (
+		args: Static<TParams>,
+		options: RenderResultOptions,
+		theme: ExtensionTheme,
+	) => ExtensionRender | undefined;
 
-	/** Custom rendering for tool result display - return a Component */
+	/** Custom rendering for tool result display; same contract as {@link renderCall}. */
 	renderResult?: (
 		result: CustomToolResult<TDetails>,
 		options: RenderResultOptions,
-		theme: Theme,
+		theme: ExtensionTheme,
 		args?: Static<TParams>,
-	) => Component;
-
-	/** Semantic call view for TSP terminals (the native counterpart of {@link renderCall}). */
-	describeCall?: (args: Static<TParams>, options: RenderResultOptions) => NativeToolView | undefined;
-
-	/** Semantic result view for TSP terminals (the native counterpart of {@link renderResult}). */
-	describeResult?: (
-		result: CustomToolResult<TDetails>,
-		options: RenderResultOptions,
-		args?: Static<TParams>,
-	) => NativeToolView | undefined;
+	) => ExtensionRender | undefined;
 }
 
 /** Factory function that creates a custom tool or array of tools */

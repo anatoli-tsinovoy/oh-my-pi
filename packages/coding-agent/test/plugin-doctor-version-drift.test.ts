@@ -70,7 +70,7 @@ describe("PluginManager.doctor version drift", () => {
 		await seed(name, "1.0.2", expectedVersion);
 		const packagePath = path.join(pluginsNodeModules, name, "package.json");
 		const reinstalled = JSON.stringify({ name, version: expectedVersion, omp: { version: expectedVersion } });
-		const install = Bun.spawn(["bun", "-e", ""], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		const install = Bun.spawn([process.execPath, "-e", ""], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 		Object.defineProperty(install, "exited", {
 			get: async () => {
 				await Bun.write(packagePath, reinstalled);
@@ -83,7 +83,10 @@ describe("PluginManager.doctor version drift", () => {
 
 		// Targeted repair: bare `bun install` (no global `--force` that would
 		// re-extract sibling plugins).
-		expect(spawnSpy).toHaveBeenCalledWith(["bun", "install"], expect.objectContaining({ cwd: pluginsDir }));
+		expect(spawnSpy).toHaveBeenCalledWith(
+			[process.execPath, "install"],
+			expect.objectContaining({ cwd: pluginsDir }),
+		);
 		expect(checks.find(c => c.name === `plugin:${name}:version`)).toEqual({
 			name: `plugin:${name}:version`,
 			status: "ok",
@@ -97,7 +100,7 @@ describe("PluginManager.doctor version drift", () => {
 	test("restores the stale package when repair fails", async () => {
 		const name = "@scope/plugin";
 		await seed(name, "1.0.2", "1.0.3");
-		const install = Bun.spawn(["bun", "-e", "process.exit(1)"], {
+		const install = Bun.spawn([process.execPath, "-e", "process.exit(1)"], {
 			stdin: "ignore",
 			stdout: "pipe",
 			stderr: "pipe",
@@ -126,7 +129,7 @@ describe("PluginManager.doctor version drift", () => {
 			version: expectedVersion,
 			omp: { version: expectedVersion, tools: "./missing.js" },
 		});
-		const install = Bun.spawn(["bun", "-e", ""], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		const install = Bun.spawn([process.execPath, "-e", ""], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
 		Object.defineProperty(install, "exited", {
 			get: async () => {
 				await Bun.write(packagePath, reinstalled);

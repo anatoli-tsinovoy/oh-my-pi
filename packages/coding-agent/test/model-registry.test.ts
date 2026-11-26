@@ -8,9 +8,11 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { resolveOpenAIRequestSetup } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { toPiNativeModelSpec } from "@oh-my-pi/pi-catalog/discovery/pi-native";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
 import { factoryDroidRegistry, resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { writeThinkingCapability } from "@oh-my-pi/pi-catalog/thinking-capability";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import * as catalogModels from "@oh-my-pi/pi-catalog/models";
 import { calculateUsageCost, getBundledModels } from "@oh-my-pi/pi-catalog/models";
@@ -18,7 +20,7 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { resolveRoleChain, resolveSessionModelSelector } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -274,7 +276,7 @@ describe("ModelRegistry", () => {
 			expect(registry.getAll("all")).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({ provider: "local", id: "falcon-h1-90m", kind: "tiny" }),
-					expect.objectContaining({ provider: "local", id: "kokoro", kind: "tts" }),
+					expect.objectContaining({ provider: "local", id: "phonon-31m", kind: "tts" }),
 					expect.objectContaining({ provider: "local", id: "whisper-base", kind: "stt" }),
 					expect.objectContaining({ provider: "web", id: "duckduckgo", kind: "search" }),
 					expect.objectContaining({ provider: "typesafe", id: "jev-latest", kind: "judge" }),
@@ -284,7 +286,7 @@ describe("ModelRegistry", () => {
 				expect.objectContaining({ provider: "local", id: "falcon-h1-90m" }),
 			);
 			expect(registry.getAvailable("tts")).toContainEqual(
-				expect.objectContaining({ provider: "local", id: "kokoro" }),
+				expect.objectContaining({ provider: "local", id: "phonon-31m" }),
 			);
 			expect(registry.getAvailable("stt")).toContainEqual(
 				expect.objectContaining({ provider: "local", id: "whisper-base" }),
@@ -335,7 +337,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[cachedChat],
 				true,
-				fingerprintStaticModels(getBundledModels("deepinfra"), true),
+				fingerprintStaticModels(getBundledModels("deepinfra"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
@@ -639,7 +641,9 @@ describe("ModelRegistry", () => {
 			// `mergeDiscoveredModel` dropped `transport: pi-native` (raw catalog
 			// rows carry no transport), so the next stream went out as plain
 			// openai-completions to `${baseUrl}/chat/completions` instead of the
-			// gateway's `/v1/pi/stream`.
+			// gateway's `/v1/pi/stream`. A pi-native provider never runs the
+			// provider's own discovery: its roster comes from the gateway's
+			// `/v1/pi/models`, and a gateway without that route keeps the bundled one.
 			writeRawModelsJson({
 				openrouter: {
 					baseUrl: "http://localhost:4000",
@@ -652,18 +656,7 @@ describe("ModelRegistry", () => {
 			const fetchMock: FetchImpl = async input => {
 				const url = input instanceof Request ? input.url : String(input);
 				requestedUrls.push(url);
-				if (url === "http://localhost:4000/models") {
-					return new Response(
-						JSON.stringify({
-							data: [
-								{ id: "openai/gpt-5.4", name: "GPT-5.4", supported_parameters: ["tools"] },
-								{ id: "anthropic/claude-opus-4.6", name: "Claude Opus 4.6", supported_parameters: ["tools"] },
-							],
-						}),
-						{ status: 200, headers: { "Content-Type": "application/json" } },
-					);
-				}
-				throw new Error(`Unexpected URL: ${url}`);
+				return new Response("Not Found", { status: 404 });
 			};
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
@@ -675,10 +668,10 @@ describe("ModelRegistry", () => {
 			expect(preRefresh.every(m => m.baseUrl === "http://localhost:4000")).toBe(true);
 
 			await registry.refreshProvider("openrouter", "online");
-			expect(requestedUrls).toContain("http://localhost:4000/models");
+			expect(requestedUrls).toEqual(["http://localhost:4000/v1/pi/models"]);
 
-			// Post-refresh: every openrouter model — bundled or freshly
-			// discovered — must still route through the pi-native transport.
+			// Post-refresh: every openrouter model must still route through the
+			// pi-native transport.
 			const postRefresh = getModelsForProvider(registry, "openrouter");
 			expect(postRefresh.length).toBeGreaterThan(0);
 			for (const model of postRefresh) {
@@ -686,9 +679,140 @@ describe("ModelRegistry", () => {
 				expect(model.baseUrl).toBe("http://localhost:4000");
 			}
 		});
+
+		test("pi-native provider takes its roster from the gateway", async () => {
+			writeRawModelsJson({
+				"openai-codex": {
+					baseUrl: "http://localhost:4000",
+					apiKey: "gateway-token",
+					transport: "pi-native",
+				},
+			});
+			const [kept, pruned] = getBundledModels("openai-codex").filter(model => modelKind(model) === "chat");
+			const gatewayOnly = buildModel({
+				id: "gpt-gateway-only",
+				name: "Gateway Only",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://chatgpt.com/backend-api",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 500_000,
+				maxTokens: 128_000,
+			});
+			const otherProvider = getBundledModels("anthropic")[0];
+			const requests: Request[] = [];
+			const fetchMock: FetchImpl = async (input, init) => {
+				const request = new Request(input instanceof Request ? input.url : String(input), init);
+				requests.push(request);
+				return Response.json({ models: [kept, gatewayOnly, otherProvider].map(toPiNativeModelSpec) });
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("openai-codex", "online");
+
+			expect(requests.map(request => request.url)).toEqual(["http://localhost:4000/v1/pi/models"]);
+			expect(requests[0].headers.get("Authorization")).toBe("Bearer gateway-token");
+			expect(registry.find("openai-codex", "gpt-gateway-only")).toMatchObject({
+				transport: "pi-native",
+				baseUrl: "http://localhost:4000",
+				contextWindow: 500_000,
+				thinking: { efforts: gatewayOnly.thinking?.efforts },
+			});
+			expect(registry.find("openai-codex", kept.id)?.transport).toBe("pi-native");
+			expect(registry.find("openai-codex", pruned.id)).toBeUndefined();
+			expect(registry.find("openai-codex", otherProvider.id)).toBeUndefined();
+		});
 	});
 
 	describe("provider compat overrides", () => {
+		test("discovered model WebSocket overrides survive refresh and cache restoration", async () => {
+			const config = {
+				api: "openai-responses",
+				baseUrl: "https://discovery.example.com/v1",
+				apiKey: "TEST_KEY",
+				authHeader: true,
+				discovery: { type: "openai-models-list" },
+				modelOverrides: {
+					"explicit-http": { preferWebsockets: false },
+					"explicit-ws": { preferWebsockets: true },
+				},
+			};
+			const fetch = mockOpenAiCompatibleModels("https://discovery.example.com/v1/models", [
+				"discovered",
+				"explicit-http",
+				"explicit-ws",
+			]);
+			writeRawModelsJson({ "discovery-provider": config });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			await registry.refresh("offline");
+			await registry.refreshProvider("discovery-provider", "online");
+			const reopened = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+			for (const current of [registry, reopened]) {
+				const discovered = current.find("discovery-provider", "discovered");
+				expect(discovered).toMatchObject({ id: "discovered", api: "openai-responses" });
+				expect(discovered?.preferWebsockets).toBeUndefined();
+				expect(current.find("discovery-provider", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(current.find("discovery-provider", "explicit-ws")?.preferWebsockets).toBe(true);
+			}
+		});
+
+		test("runtime models preserve explicit WebSocket preferences before and after materialization", () => {
+			for (const materialized of [false, true]) {
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				const base = registry.find("openai", "gpt-5-mini");
+				if (!base) throw new Error("Expected bundled Responses model");
+				if (materialized) registry.getAll();
+				registry.registerProvider("runtime-ws", {
+					api: "openai-responses",
+					baseUrl: "https://runtime.example.com/v1",
+					apiKey: "test-key",
+					models: [
+						{ ...base, id: "default", contextWindow: 32000, maxTokens: 1024, preferWebsockets: undefined },
+						{ ...base, id: "explicit-http", contextWindow: 32000, maxTokens: 1024, preferWebsockets: false },
+						{ ...base, id: "explicit-ws", contextWindow: 32000, maxTokens: 1024, preferWebsockets: true },
+					],
+				});
+				expect(registry.find("runtime-ws", "default")?.preferWebsockets).toBeUndefined();
+				expect(registry.find("runtime-ws", "explicit-http")?.preferWebsockets).toBe(false);
+				expect(registry.find("runtime-ws", "explicit-ws")?.preferWebsockets).toBe(true);
+				registry.unregisterProvider("runtime-ws");
+				expect(registry.find("runtime-ws", "default")).toBeUndefined();
+			}
+		});
+
+		test("models.yml preserves standard Responses WebSocket preferences and explicit HTTP overrides", async () => {
+			const modelsPath = path.join(tempDir, "models.yml");
+			await Bun.write(
+				modelsPath,
+				`providers:
+  responses-proxy:
+    api: openai-responses
+    baseUrl: https://proxy.example.com/v1
+    apiKey: test-key
+    models:
+      - id: websocket-model
+      - id: http-model
+        preferWebsockets: true
+      - id: default-model
+    modelOverrides:
+      websocket-model:
+        preferWebsockets: true
+      http-model:
+        preferWebsockets: false
+`,
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			const websocketModel = registry.find("responses-proxy", "websocket-model");
+			const httpModel = registry.find("responses-proxy", "http-model");
+			const defaultModel = registry.find("responses-proxy", "default-model");
+			expect(websocketModel?.api).toBe("openai-responses");
+			expect(websocketModel?.preferWebsockets).toBe(true);
+			expect(httpModel?.preferWebsockets).toBe(false);
+			expect(defaultModel?.preferWebsockets).toBeUndefined();
+		});
+
 		test("models.yml can opt a Responses provider in while opting one model out of stored chaining", async () => {
 			const modelsPath = path.join(tempDir, "models.yml");
 			await Bun.write(
@@ -1242,7 +1366,7 @@ describe("ModelRegistry", () => {
 				providers: {
 					openrouter: providerConfig(
 						"https://my-proxy.example.com/v1",
-						[{ id: "anthropic/claude-sonnet-4" }],
+						[{ id: "anthropic/claude-sonnet-4.6" }],
 						"openai-completions",
 					),
 				},
@@ -1308,7 +1432,7 @@ describe("ModelRegistry", () => {
 							},
 						],
 						modelOverrides: {
-							"anthropic/claude-sonnet-4": {
+							"anthropic/claude-sonnet-4.6": {
 								name: "Overridden Built-in Sonnet",
 							},
 						},
@@ -1509,7 +1633,7 @@ describe("ModelRegistry", () => {
 
 		test("custom model with same id replaces built-in model by id", () => {
 			const models = getModelsForProvider(openrouterReplace, "openrouter");
-			const sonnetModels = models.filter(m => m.id === "anthropic/claude-sonnet-4");
+			const sonnetModels = models.filter(m => m.id === "anthropic/claude-sonnet-4.6");
 			expect(sonnetModels).toHaveLength(1);
 			expect(sonnetModels[0].baseUrl).toBe("https://my-proxy.example.com/v1");
 		});
@@ -1544,9 +1668,9 @@ describe("ModelRegistry", () => {
 		test("modelOverrides still apply when provider also defines models", () => {
 			const models = getModelsForProvider(openrouterWithModels, "openrouter");
 			expect(models.some(m => m.id === "custom/openrouter-model")).toBe(true);
-			expect(models.some(m => m.id === "anthropic/claude-sonnet-4" && m.name === "Overridden Built-in Sonnet")).toBe(
-				true,
-			);
+			expect(
+				models.some(m => m.id === "anthropic/claude-sonnet-4.6" && m.name === "Overridden Built-in Sonnet"),
+			).toBe(true);
 		});
 
 		test("refresh() reloads merged custom models from disk", async () => {
@@ -1664,17 +1788,22 @@ describe("ModelRegistry", () => {
 					modelOverrides: {
 						"gpt-5.4": {
 							contextWindow: 512000,
+							preferWebsockets: true,
 						},
+						"gpt-5.5": { preferWebsockets: false },
 					},
 				},
 			});
-			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4"]);
+			const fetchMock = mockOpenAiCompatibleModels("https://my-proxy.example.com/v1/models", ["gpt-5.4", "gpt-5.5"]);
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
 
 			await registry.refreshProvider("openai", "online");
 
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(512000);
+			expect(registry.find("openai", "gpt-5.4")?.preferWebsockets).toBe(true);
+			expect(registry.find("openai", "gpt-5.5")?.preferWebsockets).toBe(false);
 		});
 
 		test("newly discovered ids inherit provider fields, not another model's custom fields", async () => {
@@ -1787,6 +1916,67 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("learned thinking capabilities", () => {
+		test.each([false, true])(
+			"loads saved capabilities from the registry's scoped database (override=%s)",
+			override => {
+				writeRawModelsJson({
+					"custom-thinking": {
+						api: "openai-completions",
+						baseUrl: "https://custom.example/v1",
+						apiKey: "test-key",
+						models: [
+							{ id: "unknown-local" },
+							{ id: "authored-plain", reasoning: false },
+							{
+								id: "authored-ladder",
+								reasoning: true,
+								thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] },
+							},
+							{ id: "gpt-5" },
+						],
+					},
+				});
+				const dbPath = path.join(tempDir, override ? "capabilities.db" : "models.db");
+				const options = override ? { cacheDbPath: dbPath } : undefined;
+				const initial = new ModelRegistry(authStorage, modelsJsonPath, options);
+				const unknown = initial.find("custom-thinking", "unknown-local");
+				expect(unknown?.thinking?.unverified).toBe(true);
+				for (const id of ["unknown-local", "authored-plain", "authored-ladder", "gpt-5"]) {
+					const model = initial.find("custom-thinking", id);
+					if (!model) throw new Error(`Expected custom-thinking/${id}`);
+					writeThinkingCapability(
+						model,
+						{
+							checkedAt: Date.now(),
+							format: "openai",
+							efforts: [Effort.Medium],
+							observed: false,
+							attempts: [{ format: "openai", effort: Effort.Medium, accepted: true, observed: false }],
+						},
+						dbPath,
+					);
+				}
+
+				const restored = new ModelRegistry(authStorage, modelsJsonPath, options);
+				const learned = restored.find("custom-thinking", "unknown-local");
+				expect(learned?.reasoning).toBe(true);
+				expect(learned?.thinking?.unverified).not.toBe(true);
+				expect(learned?.thinking?.efforts).toEqual([Effort.Medium]);
+				const plain = restored.find("custom-thinking", "authored-plain");
+				expect(plain?.reasoning).toBe(false);
+				expect(plain?.thinking).toBeUndefined();
+				expect(restored.find("custom-thinking", "authored-ladder")?.thinking?.efforts).toEqual([
+					Effort.Low,
+					Effort.High,
+				]);
+				expect(restored.find("custom-thinking", "gpt-5")?.thinking).toEqual(
+					initial.find("custom-thinking", "gpt-5")?.thinking,
+				);
+			},
+		);
+	});
+
 	describe("thinking metadata normalization", () => {
 		const customThinking: ThinkingConfig = {
 			mode: "anthropic-adaptive",
@@ -1795,6 +1985,7 @@ describe("ModelRegistry", () => {
 		let thinkingCustom: ModelRegistry;
 		let thinkingOverride: ModelRegistry;
 		let deepseekOverride: ModelRegistry;
+		let prefixBoundOverride: ModelRegistry;
 		beforeAll(() => {
 			thinkingCustom = readonlyRegistry({
 				providers: {
@@ -1807,7 +1998,7 @@ describe("ModelRegistry", () => {
 				providers: {
 					openrouter: {
 						modelOverrides: {
-							"anthropic/claude-sonnet-4": {
+							"anthropic/claude-sonnet-4.6": {
 								thinking: { mode: "budget", efforts: [Effort.Low, Effort.Medium] },
 							},
 						},
@@ -1829,6 +2020,21 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
+			prefixBoundOverride = readonlyRegistry({
+				providers: {
+					anthropic: {
+						modelOverrides: {
+							"claude-opus-5-5": {
+								thinking: {
+									mode: "anthropic-adaptive",
+									supportsDisplay: true,
+									efforts: [Effort.Low, Effort.High],
+								},
+							},
+						},
+					},
+				},
+			});
 		});
 
 		test("custom models preserve explicit thinking verbatim", () => {
@@ -1840,7 +2046,7 @@ describe("ModelRegistry", () => {
 
 		test("model overrides can replace canonical thinking metadata", () => {
 			const model = getModelsForProvider(thinkingOverride, "openrouter").find(
-				m => m.id === "anthropic/claude-sonnet-4",
+				m => m.id === "anthropic/claude-sonnet-4.6",
 			);
 			expect(model?.thinking).toEqual({
 				mode: "budget",
@@ -1856,6 +2062,18 @@ describe("ModelRegistry", () => {
 				mode: "effort",
 				efforts: [Effort.Max, Effort.High, Effort.Low],
 				defaultLevel: Effort.High,
+			});
+		});
+
+		test("model overrides keep catalog prefix binding the override does not set", () => {
+			const model = getModelsForProvider(prefixBoundOverride, "anthropic").find(m => m.id === "claude-opus-5-5");
+			// Without prefixBinding, pruning/compaction stop preserving the bound prefix
+			// and prefix-mismatch 400s are not retried (#17276).
+			expect(model?.thinking).toEqual({
+				mode: "anthropic-adaptive",
+				supportsDisplay: true,
+				efforts: [Effort.Low, Effort.High],
+				prefixBinding: true,
 			});
 		});
 	});
@@ -1876,7 +2094,7 @@ describe("ModelRegistry", () => {
 				providers: {
 					openrouter: {
 						modelOverrides: {
-							"anthropic/claude-sonnet-4": {
+							"anthropic/claude-sonnet-4.6": {
 								compat: { openRouterRouting: { order: ["anthropic", "together"] } },
 							},
 						},
@@ -1888,7 +2106,7 @@ describe("ModelRegistry", () => {
 					openrouter: {
 						compat: { extraBody: { gateway: "default-gateway", controller: "provider-controller" } },
 						modelOverrides: {
-							"anthropic/claude-sonnet-4": { compat: { extraBody: { controller: "model-controller" } } },
+							"anthropic/claude-sonnet-4.6": { compat: { extraBody: { controller: "model-controller" } } },
 						},
 					},
 				},
@@ -1897,8 +2115,8 @@ describe("ModelRegistry", () => {
 				providers: {
 					openrouter: {
 						modelOverrides: {
-							"anthropic/claude-sonnet-4": { compat: { openRouterRouting: { only: ["amazon-bedrock"] } } },
-							"anthropic/claude-opus-4": { compat: { openRouterRouting: { only: ["anthropic"] } } },
+							"anthropic/claude-sonnet-4.6": { compat: { openRouterRouting: { only: ["amazon-bedrock"] } } },
+							"anthropic/claude-opus-4.6": { compat: { openRouterRouting: { only: ["anthropic"] } } },
 						},
 					},
 				},
@@ -1907,7 +2125,7 @@ describe("ModelRegistry", () => {
 				providers: {
 					openrouter: {
 						baseUrl: "https://my-proxy.example.com/v1",
-						modelOverrides: { "anthropic/claude-sonnet-4": { name: "Proxied Sonnet" } },
+						modelOverrides: { "anthropic/claude-sonnet-4.6": { name: "Proxied Sonnet" } },
 					},
 				},
 			});
@@ -1941,7 +2159,7 @@ describe("ModelRegistry", () => {
 			addHeaders = readonlyRegistry({
 				providers: {
 					openrouter: {
-						modelOverrides: { "anthropic/claude-sonnet-4": { headers: { "X-Custom-Model-Header": "value" } } },
+						modelOverrides: { "anthropic/claude-sonnet-4.6": { headers: { "X-Custom-Model-Header": "value" } } },
 					},
 				},
 			});
@@ -1973,7 +2191,7 @@ describe("ModelRegistry", () => {
 
 		test("model override deep merges compat settings", () => {
 			const sonnet = getModelsForProvider(routingOrder, "openrouter").find(
-				m => m.id === "anthropic/claude-sonnet-4",
+				m => m.id === "anthropic/claude-sonnet-4.6",
 			);
 			const compat = sonnet?.compat as OpenAICompat | undefined;
 			expect(compat?.openRouterRouting).toEqual({ order: ["anthropic", "together"] });
@@ -1981,7 +2199,7 @@ describe("ModelRegistry", () => {
 
 		test("model override merges compat.extraBody across provider+model", () => {
 			const sonnet = getModelsForProvider(extraBodyMerge, "openrouter").find(
-				m => m.id === "anthropic/claude-sonnet-4",
+				m => m.id === "anthropic/claude-sonnet-4.6",
 			);
 			const compat = sonnet?.compat as OpenAICompat | undefined;
 			expect(compat?.extraBody).toEqual({ gateway: "default-gateway", controller: "model-controller" });
@@ -1989,8 +2207,8 @@ describe("ModelRegistry", () => {
 
 		test("multiple model overrides on same provider", () => {
 			const models = getModelsForProvider(multiple, "openrouter");
-			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4");
-			const opus = models.find(m => m.id === "anthropic/claude-opus-4");
+			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4.6");
+			const opus = models.find(m => m.id === "anthropic/claude-opus-4.6");
 			const sonnetCompat = sonnet?.compat as OpenAICompat | undefined;
 			const opusCompat = opus?.compat as OpenAICompat | undefined;
 			expect(sonnetCompat?.openRouterRouting).toEqual({ only: ["amazon-bedrock"] });
@@ -1999,12 +2217,12 @@ describe("ModelRegistry", () => {
 
 		test("model override combined with baseUrl override", () => {
 			const models = getModelsForProvider(withBaseUrl, "openrouter");
-			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4");
+			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4.6");
 			// Both overrides should apply
 			expect(sonnet?.baseUrl).toBe("https://my-proxy.example.com/v1");
 			expect(sonnet?.name).toBe("Proxied Sonnet");
 			// Other models should have the baseUrl but not the name override
-			const opus = models.find(m => m.id === "anthropic/claude-opus-4");
+			const opus = models.find(m => m.id === "anthropic/claude-opus-4.6");
 			expect(opus?.baseUrl).toBe("https://my-proxy.example.com/v1");
 			expect(opus?.name).not.toBe("Proxied Sonnet");
 		});
@@ -2053,8 +2271,8 @@ describe("ModelRegistry", () => {
 			expect(gpt56?.cost.output).toBeGreaterThan(0);
 			expect(gpt56?.cost.longContext).toMatchObject({
 				inputThreshold: 272_000,
-				input: 10,
-				output: 45,
+				input: 8,
+				output: 30,
 			});
 		});
 
@@ -2097,7 +2315,9 @@ describe("ModelRegistry", () => {
 		});
 
 		test("model override can add headers", async () => {
-			const sonnet = getModelsForProvider(addHeaders, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4");
+			const sonnet = getModelsForProvider(addHeaders, "openrouter").find(
+				m => m.id === "anthropic/claude-sonnet-4.6",
+			);
 			expect(sonnet && (await addHeaders.resolveModelHeaders(sonnet))?.["X-Custom-Model-Header"]).toBe("value");
 		});
 
@@ -2105,7 +2325,7 @@ describe("ModelRegistry", () => {
 			writeRawModelsJson({
 				openrouter: {
 					modelOverrides: {
-						"anthropic/claude-sonnet-4": {
+						"anthropic/claude-sonnet-4.6": {
 							name: "First Name",
 						},
 					},
@@ -2114,14 +2334,14 @@ describe("ModelRegistry", () => {
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			expect(
-				getModelsForProvider(registry, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4")?.name,
+				getModelsForProvider(registry, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4.6")?.name,
 			).toBe("First Name");
 
 			// Update and refresh
 			writeRawModelsJson({
 				openrouter: {
 					modelOverrides: {
-						"anthropic/claude-sonnet-4": {
+						"anthropic/claude-sonnet-4.6": {
 							name: "Second Name",
 						},
 					},
@@ -2130,7 +2350,7 @@ describe("ModelRegistry", () => {
 			await registry.refresh("offline");
 
 			expect(
-				getModelsForProvider(registry, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4")?.name,
+				getModelsForProvider(registry, "openrouter").find(m => m.id === "anthropic/claude-sonnet-4.6")?.name,
 			).toBe("Second Name");
 		});
 
@@ -2138,7 +2358,7 @@ describe("ModelRegistry", () => {
 			writeRawModelsJson({
 				openrouter: {
 					modelOverrides: {
-						"anthropic/claude-sonnet-4": {
+						"anthropic/claude-sonnet-4.6": {
 							name: "Custom Name",
 						},
 					},
@@ -2147,7 +2367,7 @@ describe("ModelRegistry", () => {
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const customName = getModelsForProvider(registry, "openrouter").find(
-				m => m.id === "anthropic/claude-sonnet-4",
+				m => m.id === "anthropic/claude-sonnet-4.6",
 			)?.name;
 			expect(customName).toBe("Custom Name");
 
@@ -2156,7 +2376,7 @@ describe("ModelRegistry", () => {
 			await registry.refresh("offline");
 
 			const restoredName = getModelsForProvider(registry, "openrouter").find(
-				m => m.id === "anthropic/claude-sonnet-4",
+				m => m.id === "anthropic/claude-sonnet-4.6",
 			)?.name;
 			expect(restoredName).not.toBe("Custom Name");
 		});
@@ -2265,7 +2485,7 @@ describe("ModelRegistry", () => {
 				providers: {
 					openrouter: {
 						modelOverrides: {
-							"qwen/qwen3-8b": { kind: "tiny" },
+							"qwen/qwen3-14b": { kind: "tiny" },
 							"black-forest-labs/flux.2-flex": { kind: "chat" },
 							"openai/text-embedding-3-small": { kind: "embedding", name: "Small embeddings" },
 						},
@@ -2273,7 +2493,7 @@ describe("ModelRegistry", () => {
 				},
 			});
 			expect(registry.getError()).toBeUndefined();
-			expect(registry.find("openrouter", "qwen/qwen3-8b")).toMatchObject({ kind: "tiny", api: "openrouter" });
+			expect(registry.find("openrouter", "qwen/qwen3-14b")).toMatchObject({ kind: "tiny", api: "openrouter" });
 			// `openrouter-images` serves only image, so the chat kind is ignored.
 			expect(registry.find("openrouter", "black-forest-labs/flux.2-flex")).toMatchObject({
 				kind: "image",
@@ -2363,6 +2583,100 @@ describe("ModelRegistry", () => {
 			await registry.refreshProvider("github-copilot", "online");
 			expect(requestedUrls).toContain("https://copilot-api.ghe.example.com/models");
 			expect(requestedUrls).not.toContain("https://api.githubcopilot.com/models");
+		});
+		test("lists only the Copilot models the account can select, before and after a restart", async () => {
+			await authStorage.credentials.set("github-copilot", [
+				{
+					type: "oauth",
+					access: "ghu_business_token",
+					refresh: "ghu_business_token",
+					expires: Date.now() + 60_000,
+					apiEndpoint: "https://api.business.githubcopilot.com",
+				},
+			]);
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url !== "https://api.business.githubcopilot.com/models") throw new Error(`Unexpected URL: ${url}`);
+				return Response.json({
+					data: [
+						{ id: "gpt-4o", capabilities: { type: "chat" }, policy: { state: "enabled" } },
+						{ id: "claude-haiku-5.5", capabilities: { type: "chat" }, policy: { state: "disabled" } },
+						{ id: "claude-sonnet-4.5", capabilities: { type: "chat" }, policy: { state: "unconfigured" } },
+						{ id: "gpt-4o-mini", capabilities: { type: "chat" }, model_picker_enabled: false },
+					],
+				});
+			};
+			const cacheDbPath = path.join(tempDir, "copilot-models.db");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock, cacheDbPath });
+			await registry.refreshProvider("github-copilot", "online");
+			expect(
+				registry
+					.getAvailable()
+					.filter(model => model.provider === "github-copilot")
+					.map(model => model.id),
+			).toEqual(["claude-sonnet-4.5", "gpt-4o", "gpt-4o-mini"]);
+
+			const restarted = new ModelRegistry(authStorage, modelsJsonPath, { cacheDbPath });
+			await restarted.refreshProvider("github-copilot", "online-if-uncached");
+			expect(
+				restarted
+					.getAvailable()
+					.filter(model => model.provider === "github-copilot")
+					.map(model => model.id),
+			).toEqual(["claude-sonnet-4.5", "gpt-4o", "gpt-4o-mini"]);
+		});
+
+		test("keeps a discovered Copilot 1M model restorable during background refresh without models.yml", async () => {
+			const provider = "github-copilot";
+			const baseId = "claude-opus-5.5";
+			const variantId = `${baseId}-1m`;
+			await authStorage.credentials.set(provider, {
+				type: "oauth",
+				access: "ghu_business_token",
+				refresh: "ghu_business_token",
+				expires: Date.now() + 60_000,
+				apiEndpoint: "https://api.business.githubcopilot.com",
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async input => {
+					const url = input instanceof Request ? input.url : String(input);
+					if (url !== "https://api.business.githubcopilot.com/models") return new Response(null, { status: 503 });
+					return Response.json({
+						data: [
+							{
+								id: baseId,
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 1_000_000, max_output_tokens: 64_000 },
+								},
+								billing: {
+									token_prices: {
+										default: { context_max: 200_000 },
+										long_context: { context_max: 936_000 },
+									},
+								},
+							},
+						],
+					});
+				},
+			});
+			await registry.refreshDiscoverableProviders([provider], "online");
+			expect(registry.getAvailableForProviders(new Set([provider])).some(model => model.id === variantId)).toBe(
+				true,
+			);
+
+			registry.refreshInBackground();
+			try {
+				// The refresh has started, but its async discovery cannot have published a new catalog yet.
+				await Promise.resolve();
+				expect(resolveSessionModelSelector(registry, `${provider}/${variantId}`)?.model).toMatchObject({
+					id: variantId,
+					requestModelId: baseId,
+					contextWindow: 1_000_000,
+				});
+			} finally {
+				await registry.awaitBackgroundRefresh();
+			}
 		});
 	});
 
@@ -2483,7 +2797,11 @@ describe("ModelRegistry", () => {
 			await registry.refresh("online");
 
 			const disabledProbeUrls = requestedUrls.filter(
-				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
+				url =>
+					url.includes("127.0.0.1:11434") ||
+					url.includes("127.0.0.1:8080") ||
+					url.includes("127.0.0.1:9931") ||
+					url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
 		});
@@ -2593,6 +2911,47 @@ describe("ModelRegistry", () => {
 			expect(registry.find("github-copilot", "gpt-5.6-sol")?.contextWindow).toBe(1_050_000);
 		});
 
+		test("keeps Cursor's explicit 500K Grok 4.7 lane at its served window with extended context off", () => {
+			// A custom Cursor row exercises the catalog rule without a Cursor
+			// account or live discovery. The KDL `long-context-window-uncapped`
+			// rule matches by provider and id, so the served window survives the
+			// registry's premium-tier cap.
+			writeRawModelsJson({
+				cursor: {
+					baseUrl: "https://example.com/v1",
+					auth: "none",
+					api: "openai-completions",
+					models: [
+						{
+							id: "grok-4.7-500k",
+							name: "Grok 4.7 500k",
+							reasoning: true,
+							input: ["text", "image"],
+							contextWindow: 500_000,
+							maxTokens: 64_000,
+							cost: {
+								input: 2,
+								output: 6,
+								cacheRead: 0.5,
+								cacheWrite: 0,
+								longContext: {
+									inputThreshold: 256_000,
+									input: 4,
+									output: 12,
+									cacheRead: 1,
+									cacheWrite: 0,
+								},
+							},
+						},
+					],
+				},
+			});
+			const testSettings = Settings.isolated({ extendedContext: false });
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
+			const lane = registry.find("cursor", "grok-4.7-500k");
+			expect(lane?.contextWindow).toBe(500_000);
+		});
+
 		test("custom provider models follow the extended-context toggle without retaining an earlier window", async () => {
 			writeRawModelsJson({
 				"proxy-window": {
@@ -2682,21 +3041,21 @@ describe("ModelRegistry", () => {
 			writeRawModelsJson({
 				openrouter: {
 					modelOverrides: {
-						"anthropic/claude-sonnet-4": { contextWindow: 128_000, maxContextWindow: 512_000 },
+						"anthropic/claude-sonnet-4.6": { contextWindow: 128_000, maxContextWindow: 512_000 },
 					},
 				},
 			});
 			const testSettings = Settings.isolated();
 			const registry = new ModelRegistry(authStorage, modelsJsonPath, { settings: testSettings });
-			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(128_000);
+			expect(registry.find("openrouter", "anthropic/claude-sonnet-4.6")?.contextWindow).toBe(128_000);
 
 			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
-			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(512_000);
+			expect(registry.find("openrouter", "anthropic/claude-sonnet-4.6")?.contextWindow).toBe(512_000);
 
 			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();
-			expect(registry.find("openrouter", "anthropic/claude-sonnet-4")?.contextWindow).toBe(128_000);
+			expect(registry.find("openrouter", "anthropic/claude-sonnet-4.6")?.contextWindow).toBe(128_000);
 		});
 
 		test("toggles bundled Astra between its standard and documented extended windows", async () => {
@@ -2830,8 +3189,9 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai-codex", "gpt-5.6-sol")?.contextWindow).toBe(272_000);
 			// Standard-priced 1M models (no long-context tier) keep their window.
 			expect(registry.find("anthropic", "claude-opus-4-8")?.contextWindow).toBe(1_000_000);
-			// SuperGrok carries public xAI tiers for stats estimates, not billing.
-			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(2_000_000);
+			// SuperGrok carries public xAI tiers (200K threshold) for stats estimates,
+			// not billing, so it keeps its full 1M window.
+			expect(registry.find("xai-oauth", "grok-4.20-0309-reasoning")?.contextWindow).toBe(1_000_000);
 		});
 
 		test("reapplyModelPolicies re-clamps and restores premium windows on toggle", async () => {
@@ -3226,9 +3586,9 @@ describe("ModelRegistry", () => {
 				{ providers: {} },
 				{
 					seedCache: dbPath => {
-						for (const [providerId, dynamicModelsAuthoritative] of [
-							["zai", false],
-							["anthropic", true],
+						for (const [providerId, policy] of [
+							["zai", { additive: true }],
+							["anthropic", { authoritative: true, additive: true }],
 						] as const) {
 							const bundledModels = getBundledModels(providerId);
 							writeModelCache(
@@ -3236,7 +3596,7 @@ describe("ModelRegistry", () => {
 								Date.now(),
 								bundledModels,
 								false,
-								fingerprintStaticModels(bundledModels, dynamicModelsAuthoritative),
+								fingerprintStaticModels(bundledModels, policy),
 								dbPath,
 							);
 						}
@@ -3323,7 +3683,7 @@ describe("ModelRegistry", () => {
 								}),
 							],
 							true,
-							fingerprintStaticModels(getBundledModels("ollama-cloud")),
+							fingerprintStaticModels(getBundledModels("ollama-cloud"), { additive: true }),
 							dbPath,
 						);
 					},
@@ -3406,7 +3766,7 @@ describe("ModelRegistry", () => {
 				{
 					seedCache: dbPath =>
 						writeModelCache(
-							"cached-compact-proxy:openai-models-list-context-v3",
+							"cached-compact-proxy:openai-models-list-context-v6",
 							Date.now(),
 							[
 								buildModel({
@@ -3453,11 +3813,11 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows cached before mode filtering must be orphaned instead of
-				// serving stale non-conversational entries.
+				// Rows from rich-v6 may contain only the first /v2/model/info page;
+				// decisions-mode routing was already corrected in that namespace.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v4",
+						"litellm-proxy:litellm-rich-v6",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -3468,7 +3828,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v5",
+						"litellm-proxy:litellm-rich-v7",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -3489,11 +3849,11 @@ describe("ModelRegistry", () => {
 					},
 				},
 				{
-					// Row under the retired pre-modality namespace; the context-v3
-					// bump must orphan it instead of serving the stale text-only row.
+					// Row under the retired pre-`top_provider` namespace; the context-v4
+					// bump must orphan it instead of serving the stale output limit.
 					seedCache: dbPath =>
 						writeModelCache(
-							"stale-openai-proxy:openai-models-list-context-v2",
+							"stale-openai-proxy:openai-models-list-context-v3",
 							Date.now(),
 							[
 								buildModel({
@@ -3506,7 +3866,7 @@ describe("ModelRegistry", () => {
 									input: ["text"],
 									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 									contextWindow: 128_000,
-									maxTokens: 16_384,
+									maxTokens: 65_536,
 								}),
 							],
 							true,
@@ -3548,12 +3908,12 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v4 namespace", () => {
+		test("ignores litellm discovery rows cached under the retired rich-v6 namespace", () => {
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("restores LiteLLM backend session policy from rich-v5 alias rows without changing their API", () => {
+		test("restores LiteLLM backend session policy from rich-v7 alias rows without changing their API", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
@@ -3570,9 +3930,9 @@ describe("ModelRegistry", () => {
 			).toBe("cached-alias-session");
 		});
 
-		test("ignores openai-models-list rows cached under the retired context-v2 namespace", () => {
-			// PR #7584 added server-advertised input-modality parsing; warm v2 rows
-			// pinned vision-capable ids at text-only and must not load.
+		test("ignores openai-models-list rows cached under the retired context-v3 namespace", () => {
+			// PR #15652 reads `top_provider.max_completion_tokens`; warm v3 rows
+			// kept the bundled reference's larger output limit and must not load.
 			expect(openaiModelsListStaleNamespaceCache.find("stale-openai-proxy", "stale-vlm")).toBeUndefined();
 			expect(getModelsForProvider(openaiModelsListStaleNamespaceCache, "stale-openai-proxy")).toHaveLength(0);
 		});
@@ -3591,7 +3951,7 @@ describe("ModelRegistry", () => {
 				Date.now(),
 				[served],
 				true,
-				fingerprintStaticModels(getBundledModels("google-antigravity"), true),
+				fingerprintStaticModels(getBundledModels("google-antigravity"), { authoritative: true }),
 				path.join(tempDir, "models.db"),
 			);
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath);

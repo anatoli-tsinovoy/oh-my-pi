@@ -3,7 +3,7 @@ import type { Model, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from 
 // from the dependency-free types module so the `pi-ai` index (and the native
 // addon behind it) stays lazy.
 import { serviceTierFamily } from "@oh-my-pi/pi-ai/types";
-import type { SubmenuOption } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import type { SubmenuOption } from "./settings-defs";
 
 /**
  * Per-family service-tier setting values. `"none"` is the omit-the-parameter
@@ -116,7 +116,7 @@ export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTie
 	{
 		value: "ultrafast",
 		label: "Ultrafast",
-		description: "Lowest-latency serving; OpenAI API preview access, or Codex models that advertise it",
+		description: "Lowest-latency serving; OpenAI API preview access, or Codex and relay models that advertise it",
 	},
 ];
 

@@ -4,6 +4,10 @@ import { apiRouteFor } from "../compat/behavior";
 import { providerEntry, seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
+import { fetchKiroModels } from "../discovery/kiro";
+import { fetchPiNativeModels, type PiNativeModelDiscoveryOptions } from "../discovery/pi-native";
+import { decodeKiroCredential } from "../wire/kiro";
+
 import {
 	type FactoryDroidModelDiscoveryOptions,
 	factoryDroidSeedModels,
@@ -64,6 +68,7 @@ export function openaiCodexModelManagerOptions(
 		providerId: "openai-codex",
 		cacheProviderId: resolveModelCacheProviderId("openai-codex", { baseUrl }),
 		dynamicModelsAuthoritative: providerEntry("openai-codex")?.dynamicModelsAuthoritative === true,
+		keepStaticNames: providerEntry("openai-codex")?.keepBundledNames === true,
 		...(resolveAccounts
 			? {
 					fetchDynamicModels: async () => {
@@ -93,11 +98,10 @@ export function openaiCodexModelManagerOptions(
  * {@link unionAccountCatalogs}.
  *
  * Returns `null` when any account's fetch failed transiently, so a partial list
- * cannot replace the previous or bundled authoritative catalog. An account
- * whose credential the backend rejected outright (401/403 — revoked or
- * deauthorized) contributes nothing and is skipped instead: it would otherwise
- * veto every sibling account's models until the user removes it. If no account
- * produced a catalog, discovery aborts the same way.
+ * cannot replace the previous or bundled authoritative catalog. A definitive
+ * account denial (401/403 auth or 402 payment) contributes nothing and is skipped
+ * instead: it would otherwise veto every sibling account's models until the
+ * account recovers. If no account produced a catalog, discovery aborts.
  */
 function unionCodexModels(
 	results: readonly { accountId: string | undefined; result: CodexModelDiscoveryResult | null }[],
@@ -106,7 +110,7 @@ function unionCodexModels(
 	for (const { accountId, result } of results) {
 		if (!result) return null;
 		if (result.rejectedStatus !== undefined) {
-			logger.warn("Codex model discovery skipped an account whose credential was rejected", {
+			logger.warn("Codex model discovery skipped an account denied by the backend", {
 				accountId,
 				status: result.rejectedStatus,
 			});
@@ -115,6 +119,32 @@ function unionCodexModels(
 		catalogs.push(result.models);
 	}
 	return catalogs.length > 0 ? unionAccountCatalogs(catalogs) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Auth gateway (pi-native transport)
+// ---------------------------------------------------------------------------
+
+/** A provider whose traffic rides `transport: "pi-native"` through an auth gateway. */
+export interface PiNativeModelManagerConfig extends PiNativeModelDiscoveryOptions {
+	/** Namespace from {@link resolvePiNativeModelCacheProviderId}. */
+	cacheProviderId: string;
+}
+
+/**
+ * Model manager that takes a pi-native provider's roster from its gateway
+ * (`GET /v1/pi/models`). Authoritative: the gateway lists exactly what it can
+ * route for the provider, so bundled models it does not serve are pruned and
+ * models it discovered at runtime appear.
+ */
+export function piNativeModelManagerOptions(config: PiNativeModelManagerConfig): ModelManagerOptions<Api> {
+	const { cacheProviderId, ...discovery } = config;
+	return {
+		providerId: config.providerId,
+		cacheProviderId,
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: () => fetchPiNativeModels(discovery),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +444,24 @@ export function cloudflareWorkersAiModelManagerOptions(): ModelManagerOptions<"w
 	};
 }
 
+/** Liquid AI judges: the authored d1 rows. */
+export function liquidModelManagerOptions(): ModelManagerOptions<"liquid-systemone"> {
+	return {
+		providerId: "liquid",
+		cacheProviderId: resolveModelCacheProviderId("liquid"),
+		staticModels: seedModels<"liquid-systemone">("liquid"),
+	};
+}
+
+/** Nace Drex judges: the authored Drex rows. */
+export function naceModelManagerOptions(): ModelManagerOptions<"nace-systemone"> {
+	return {
+		providerId: "nace",
+		cacheProviderId: resolveModelCacheProviderId("nace"),
+		staticModels: seedModels<"nace-systemone">("nace"),
+	};
+}
+
 /** Credentials and endpoint overrides for the TypeSafe catalog manager. */
 export interface TypeSafeModelManagerConfig {
 	apiKey?: string;
@@ -421,38 +469,80 @@ export interface TypeSafeModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-/** Discover account-visible judge models while keeping the bundled offline seed. */
+/**
+ * Discover account-visible judge models while keeping the bundled offline seed. `GET /v1/models` lists
+ * only aliases, yet TypeSafe accepts versioned ids whether or not they are listed, so a successful
+ * discovery is extended with the seed rows it omits (the pinned default judge, `jev-1.14.0`) instead of
+ * pruning them as `dynamicModelsAuthoritative` otherwise would.
+ */
 export function typesafeModelManagerOptions(config: TypeSafeModelManagerConfig = {}): ModelManagerOptions<"typesafe"> {
 	const { apiKey } = config;
 	const envBaseUrl = Bun.env.TYPESAFE_BASE_URL?.trim();
 	const baseUrl = (config.baseUrl ?? (envBaseUrl || TYPESAFE_DEFAULT_BASE_URL)).replace(/\/+$/, "");
-	const staticModels = seedModels<"typesafe">("typesafe");
+	const staticModels = seedModels<"typesafe">("typesafe").map(model => ({ ...model, baseUrl }));
 	return {
 		providerId: "typesafe",
 		cacheProviderId: resolveModelCacheProviderId("typesafe"),
-		staticModels: staticModels.map(model => ({ ...model, baseUrl })),
+		staticModels,
 		...(apiKey ? { dynamicModelsAuthoritative: true } : undefined),
 		...(apiKey
 			? {
-					fetchDynamicModels: () =>
-						fetchTypeSafeModels({
-							apiKey,
-							baseUrl,
-							fetch: config.fetch,
-						}),
+					fetchDynamicModels: async () => {
+						const discovered = await fetchTypeSafeModels({ apiKey, baseUrl, fetch: config.fetch });
+						if (!discovered) return discovered;
+						const listed = new Set(discovered.map(model => model.id));
+						return [...discovered, ...staticModels.filter(model => !listed.has(model.id))];
+					},
 				}
 			: undefined),
 	};
 }
 // ---------------------------------------------------------------------------
-// Zai
+// Kiro
 // ---------------------------------------------------------------------------
 
-export interface ZaiModelManagerConfig {}
+export interface KiroDiscoveryAccount {
+	apiKey: string;
+	accountKey?: string;
+}
 
-/** Creates model-manager options for Z.AI's mixed native and Anthropic transports. */
-export function zaiModelManagerOptions(
-	_config: ZaiModelManagerConfig = {},
-): ModelManagerOptions<"anthropic-messages" | "openai-completions"> {
-	return { providerId: "zai" };
+export interface KiroModelManagerConfig {
+	apiKey?: string;
+	fetch?: FetchImpl;
+	resolveAccounts?: () => Promise<readonly KiroDiscoveryAccount[] | null>;
+}
+
+export function kiroModelManagerOptions(config: KiroModelManagerConfig = {}): ModelManagerOptions<"kiro-api"> {
+	const { apiKey, fetch, resolveAccounts } = config;
+	const discover = (key: string) => fetchKiroModels({ credential: decodeKiroCredential(key), fetch });
+	return {
+		providerId: "kiro",
+		staticModels: [],
+		dynamicModelsAuthoritative: true,
+		cacheProviderId: resolveModelCacheProviderId("kiro", { apiKey }),
+		// A credential that does not decode throws; the model manager keeps the last cache.
+		...(resolveAccounts
+			? {
+					fetchDynamicModels: async () => {
+						const accounts = await resolveAccounts();
+						if (!accounts || accounts.length === 0) return null;
+						const rosters = await Promise.all(accounts.map(account => discover(account.apiKey)));
+						const tagAccess = accounts.every(account => account.accountKey !== undefined);
+						const catalogs: ModelSpec<"kiro-api">[][] = [];
+						for (const [i, models] of rosters.entries()) {
+							if (!models) return null;
+							const accountKey = accounts[i].accountKey;
+							catalogs.push(
+								tagAccess && accountKey !== undefined
+									? models.map(model => ({ ...model, accountAccess: { [accountKey]: {} } }))
+									: models,
+							);
+						}
+						return unionAccountCatalogs(catalogs);
+					},
+				}
+			: apiKey
+				? { fetchDynamicModels: async () => discover(apiKey) }
+				: undefined),
+	};
 }

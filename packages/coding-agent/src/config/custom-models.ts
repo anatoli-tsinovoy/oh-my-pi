@@ -10,7 +10,7 @@ import { runnerApiKind } from "@oh-my-pi/pi-catalog/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type ConfigHeaderResolver, type ConfigHeaderSource, createConfigHeaderResolver } from "./resolve-config-value";
 import { type ModelPatch, mergeCompat, mergeRemoteCompactionConfig } from "./model-patch";
-import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { parseModelString } from "./model-selector";
 import type { ModelOverride, ProviderAuthMode } from "./models-config-schema";
 export interface CustomModelDefinitionLike extends ModelPatch {
 	id: string;
@@ -88,6 +88,8 @@ export function buildCustomModelOverlay(
 		thinking: modelDef.thinking,
 		input: modelDef.input,
 		imageInputDecoder: modelDef.imageInputDecoder,
+		imageCountBudget: modelDef.imageCountBudget,
+		snapcompactShape: modelDef.snapcompactShape,
 		tokenizer: modelDef.tokenizer,
 		supportsTools: modelDef.supportsTools,
 		cost: modelDef.cost,
@@ -107,15 +109,7 @@ export function buildCustomModelOverlay(
 	};
 }
 
-function applyStandaloneCustomModelPolicies(model: CustomModelOverlay): CustomModelOverlay {
-	if (model.id !== "gpt-5.4" || model.provider === "github-copilot" || model.contextWindow !== undefined) {
-		return model;
-	}
-	return { ...model, contextWindow: 1_000_000 };
-}
-
-export function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
-	const resolvedModel = options.useDefaults ? applyStandaloneCustomModelPolicies(model) : model;
+export function finalizeCustomModel(resolvedModel: CustomModelOverlay, options: CustomModelBuildOptions): Model<Api> {
 	const reference = options.useDefaults
 		? resolveModelReference(resolvedModel.id, getBundledModelReferenceIndex())
 		: undefined;
@@ -132,15 +126,18 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		kindConfig: resolvedModel.kind,
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
-		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
+		reasoning: resolvedModel.reasoning ?? reference?.reasoning,
 		thinking: inheritReferenceThinking(resolvedModel.thinking, reference, resolvedModel.provider),
 		input: input as ("text" | "image")[],
 		imageInputDecoder: resolvedModel.imageInputDecoder,
+		imageCountBudget: resolvedModel.imageCountBudget,
+		snapcompactShape: resolvedModel.snapcompactShape,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
 		promptCache: resolvedModel.promptCache,
 		promptCacheConfig: resolvedModel.promptCache,
 		contextWindow: resolvedModel.contextWindow ?? reference?.contextWindow ?? (options.useDefaults ? 128000 : null),
+		maxContextWindow: resolvedModel.maxContextWindow,
 		maxTokens: resolvedModel.maxTokens ?? reference?.maxTokens ?? (options.useDefaults ? 16384 : null),
 		headers: resolvedModel.headers,
 		resolveHeaders: resolvedModel.resolveHeaders,
@@ -160,6 +157,9 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 		built.cost = { ...resolvedModel.cost };
 		delete built.cost.timeBased;
 	}
+	// Explicit custom limits outrank the catalog `limits-patch` buildModel applied.
+	if (resolvedModel.contextWindow !== undefined) built.contextWindow = resolvedModel.contextWindow;
+	if (resolvedModel.maxTokens !== undefined) built.maxTokens = resolvedModel.maxTokens;
 	return built;
 }
 

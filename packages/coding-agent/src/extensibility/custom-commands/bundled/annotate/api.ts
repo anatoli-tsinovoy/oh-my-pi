@@ -10,12 +10,8 @@ import type {
 	ExtensionContext,
 } from "../../../../extensibility/extensions/types";
 import type { SendUserMessageOptions } from "../../../../session/agent-session";
-import { splitTextLines } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
-import type {
-	CodeReviewAnnotation,
-	TextReviewAnnotation,
-	TextReviewSource,
-} from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import { splitTextLines } from "../../../../modes/view-model/overlays/annotation-overlay";
+import type { CodeReviewAnnotation, TextReviewAnnotation, TextReviewSource } from "./annotation-types";
 import { fetchPrReviewTarget, parseReviewPrRef } from "../review";
 import { assertReviewablePatchSize, buildCodeReviewFeedback } from "../review/prompt";
 import {
@@ -65,7 +61,7 @@ async function resolveDiffTarget(ctx: AnnotationContext, source: AnnotationDiffS
 			break;
 		case "pr": {
 			const ref = parseReviewPrRef(source.ref);
-			if (!ref) throw new Error(`Not a GitHub pull request reference: ${source.ref}`);
+			if (!ref) throw new Error(`Not a GitHub pull request or GitLab merge request reference: ${source.ref}`);
 			target = await fetchPrReviewTarget(cwd, ref);
 			break;
 		}

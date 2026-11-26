@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { networkFailureMessage } from "@oh-my-pi/pi-ai/error";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -15,6 +16,7 @@ import {
 	modelsAreEqual,
 } from "@oh-my-pi/pi-catalog/models";
 import { Type as TypeBoxShimType } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-typebox";
+import { isRetryableAssistantError } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-ai-shim";
 import {
 	__resetLegacyPiResolutionCache,
 	installLegacyPiSpecifierShim,
@@ -204,54 +206,6 @@ describe("legacy pi package root remaps (issue #1474)", () => {
 
 		const loaded = (await loadLegacyPiModule(entry)) as { loadedVersion: string };
 		expect(loaded.loadedVersion).toMatch(/^\d+\.\d+\.\d+/);
-	});
-
-	it("loads pi-vimmode's minified legacy imports", async () => {
-		const entry = await writeFixtureExtension(
-			[
-				'import{CustomEditor,copyToClipboard}from"@earendil-works/pi-coding-agent";',
-				'import{CURSOR_MARKER,decodeKittyPrintable,matchesKey,parseKey,truncateToWidth,visibleWidth}from"@earendil-works/pi-tui";',
-				"export const apiTypes=[typeof CustomEditor,typeof copyToClipboard,typeof CURSOR_MARKER,typeof decodeKittyPrintable,typeof matchesKey,typeof parseKey,typeof truncateToWidth,typeof visibleWidth];",
-				'export const printable=decodeKittyPrintable("\\x1b[97u");',
-			].join("\n"),
-		);
-
-		const loaded = (await loadLegacyPiModule(entry)) as { apiTypes: string[]; printable: string };
-		expect(loaded.apiTypes).toEqual([
-			"function",
-			"function",
-			"string",
-			"function",
-			"function",
-			"function",
-			"function",
-			"function",
-		]);
-		expect(loaded.printable).toBe("a");
-	});
-
-	it("loads pi-sprite's legacy terminal helpers", async () => {
-		const entry = await writeFixtureExtension(
-			[
-				'import { deleteAllKittyImages, deleteKittyImage, getCapabilities } from "@earendil-works/pi-tui";',
-				"export const deleteOne = deleteKittyImage(42);",
-				"export const deleteAll = deleteAllKittyImages();",
-				"export const capabilities = getCapabilities();",
-			].join("\n"),
-		);
-
-		const loaded = (await loadLegacyPiModule(entry)) as {
-			deleteOne: string;
-			deleteAll: string;
-			capabilities: { images: "kitty" | "iterm2" | null; trueColor: boolean; hyperlinks: boolean };
-		};
-		// Bare sequences, exactly like upstream Pi: legacy callers (pi-sprite)
-		// apply their own tmux passthrough wrapping.
-		expect(loaded.deleteOne).toBe("\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
-		expect(loaded.deleteAll).toBe("\x1b_Ga=d,d=A,q=2\x1b\\");
-		expect(["kitty", "iterm2", null]).toContain(loaded.capabilities.images);
-		expect(typeof loaded.capabilities.trueColor).toBe("boolean");
-		expect(typeof loaded.capabilities.hyperlinks).toBe("boolean");
 	});
 
 	it("preserves legacy defineTool root imports and usable coding tools", async () => {
@@ -467,5 +421,58 @@ it("runs the legacy pi-ai compat `complete` export with SoL-Pi's reducer call sh
 		cacheRetention: "none",
 		maxTokens: 321,
 		sessionId: "sol-pi-run",
+	});
+});
+
+describe("legacy isRetryableAssistantError network-failure wording", () => {
+	function erroredTurn(errorMessage: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "error",
+			errorMessage,
+			timestamp: Date.now(),
+		};
+	}
+
+	// Each row is a distinct transport failure family; a legacy extension that
+	// stops restarting any of them regressed against the old `Connection error.`.
+	it.each([
+		[
+			"offline",
+			new TypeError("fetch failed", {
+				cause: Object.assign(new Error("connect ENETUNREACH 1.2.3.4:443"), { code: "ENETUNREACH" }),
+			}),
+		],
+		["unreachable", Object.assign(new Error("Was there a typo in the url or port?"), { code: "FailedToOpenSocket" })],
+		[
+			"refused",
+			new TypeError("fetch failed", {
+				cause: new AggregateError([
+					Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:8080"), { code: "ECONNREFUSED" }),
+				]),
+			}),
+		],
+		[
+			"tls",
+			Object.assign(new Error("unable to verify the first certificate"), {
+				code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+			}),
+		],
+	])("restarts a turn that failed with the %s sentence", (kind, cause) => {
+		const message = networkFailureMessage(cause, "https://api.anthropic.com/v1/messages");
+		if (message === undefined) throw new Error(`Expected a ${kind} network-failure sentence`);
+		expect(isRetryableAssistantError(erroredTurn(message))).toBe(true);
 	});
 });

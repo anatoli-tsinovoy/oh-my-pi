@@ -18,13 +18,22 @@ export const MIN_FITTED_OUTPUT_TOKENS = 1024;
 const PROMPT_ESTIMATE_MARGIN_DIVISOR = 10;
 
 /**
+ * Chat-template framing charged per locally counted message. `Tokenizer.countMessage`
+ * counts content only, but every template wraps each message in role markers and
+ * separators, and tool results in response wrappers: about 5 tokens per merged
+ * Qwen3 `<tool_response>` or Llama 3 turn, 10–15 for harmony or Mistral tool results.
+ * The proportional margin scales with content, so many short messages (a turn's
+ * parallel tool results) leave this uncovered. Provider-anchored messages need no
+ * charge: the host's own report already includes their framing.
+ */
+export const MESSAGE_FRAMING_TOKENS = 16;
+
+/**
  * Absolute headway subtracted from the remaining room (unconditionally, on anchored and
- * fully-local counts alike). Proportional padding covers
- * tokenizer drift that scales with the prompt, but a host can still count a few tokens more
- * than any local estimate can see (chat-template framing, reasoning wrappers). Measured
- * against a 262,144-token host: fitted caps landed +11 to +42 tokens over and were rejected
- * with 400s. 64 tokens covers the observed drift with margin to spare; the
- * {@link MIN_FITTED_OUTPUT_TOKENS} floor still applies.
+ * fully-local counts alike). Covers per-request framing no message count sees: the
+ * generation prompt, the anchoring turn's end marker, reasoning wrappers. Measured
+ * against a 262,144-token host: fitted caps landed +11 to +42 tokens over and were
+ * rejected with 400s. The {@link MIN_FITTED_OUTPUT_TOKENS} floor still applies.
  */
 export const OUTPUT_FIT_HEADWAY_TOKENS = 64;
 
@@ -43,7 +52,9 @@ export const OUTPUT_FIT_HEADWAY_TOKENS = 64;
  * The prompt size is the provider's own report from the newest trustworthy
  * assistant turn (see {@link findRequestUsageAnchor}) plus a local count of
  * only the messages appended after it; the whole context is counted locally
- * only when no turn can anchor (fresh or freshly rewritten context).
+ * only when no turn can anchor (fresh or freshly rewritten context). Local
+ * counts carry a proportional tokenizer margin plus
+ * {@link MESSAGE_FRAMING_TOKENS} per message.
  *
  * Returns `maxTokens` unchanged when the requested cap already fits, the
  * model declares no window, the host ends generation at the window itself
@@ -122,21 +133,52 @@ function withMargin(localTokens: number): number {
 function countPromptTokens(context: Context, tokenizer: Tokenizer): number {
 	const { messages } = context;
 	const anchor = findRequestUsageAnchor(messages);
-	if (!anchor) return withMargin(countContextTokens(context, tokenizer));
+	if (!anchor) {
+		return withMargin(countContextTokens(context, tokenizer)) + messages.length * MESSAGE_FRAMING_TOKENS;
+	}
 	let tail = 0;
 	for (let index = anchor.index + 1; index < messages.length; index++) {
 		tail += tokenizer.countMessage(messages[index]);
 	}
-	return anchor.tokens + withMargin(tail);
+	return anchor.tokens + withMargin(tail) + (messages.length - anchor.index - 1) * MESSAGE_FRAMING_TOKENS;
 }
 
 function countContextTokens(context: Context, tokenizer: Tokenizer): number {
+	return countFramingTokens(context, tokenizer) + tokenizer.countMessages(context.messages);
+}
+
+/** System prompt and tool schemas: the request prefix outside `messages`. */
+function countFramingTokens(context: Context, tokenizer: Tokenizer): number {
 	const { systemPrompt, tools, inactiveTools } = context;
 	return (
 		countFraming(systemPrompt, tokenizer, () => [...(systemPrompt ?? [])]) +
 		countFraming(tools, tokenizer, () => toolFragments(tools ?? [])) +
 		// Anthropic replays retired tool definitions, so they are prompt too.
-		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? [])) +
-		tokenizer.countMessages(context.messages)
+		countFraming(inactiveTools, tokenizer, () => toolFragments(inactiveTools ?? []))
 	);
+}
+
+/**
+ * Local prompt count of `context` when it leaves `model` no room for the
+ * smallest output the transport requests, else `undefined` (also when the
+ * window is unknown). Counting stops at the first message past the window, so
+ * the count is a floor.
+ *
+ * Unlike {@link fitOutputTokensToContextWindow}, no usage anchor is trusted:
+ * history re-expanded behind a native compaction the model cannot replay
+ * carries reports describing the compacted prefix. Nor is a tokenizer margin
+ * added: a caller refuses on this verdict, so only a clear overrun counts, and
+ * a near-full request is still left to the provider.
+ */
+export function countContextOverrun(context: Context, model: Model, tokenizer: Tokenizer): number | undefined {
+	const contextWindow = model.contextWindow;
+	if (!contextWindow || contextWindow <= 0) return undefined;
+	const budget = contextWindow - OUTPUT_FIT_HEADWAY_TOKENS - MIN_FITTED_OUTPUT_TOKENS;
+	let tokens = countFramingTokens(context, tokenizer);
+	for (const message of context.messages) {
+		if (tokens > budget) break;
+		// Encrypted reasoning bytes overstate what the provider bills; a floor leaves them out.
+		tokens += tokenizer.countMessage(message, { excludeEncryptedReasoning: true });
+	}
+	return tokens > budget ? tokens : undefined;
 }
