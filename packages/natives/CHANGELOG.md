@@ -10,6 +10,7 @@
 
 - Added Android ARM64/Bionic process-management support.
 - Android desktop sessions now report `Unsupported`; desktop capture and input remain unavailable.
+- Android ARM64/Termux audio now uses the shared runtime-loaded PulseAudio client instead of OpenSL ES/miniaudio; install the `pulseaudio` Termux package and start its daemon explicitly.
 
 ### Fixed
 
